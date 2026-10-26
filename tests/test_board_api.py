@@ -256,3 +256,10 @@ def test_configProblemsBecomeWarnings(approvedProject):
   writeConfig(approvedProject, claudeCommand=["claude"])
   assert board_api.stateView(approvedProject)["warnings"] == [
     "claudeCommand 已經不用了，請改寫成 writer.command（見 README 的「換模型」）"]
+
+
+def test_badCliStillShowsWarningInsteadOfCrashing(approvedProject):
+  writeConfig(approvedProject, writer={"cli": ["codex"]})
+  view = board_api.stateView(approvedProject)
+  assert view["warnings"] == ["writer.cli 只能是 claude 或 codex，現在是 ['codex']"]
+  assert agentsById(view)["writer"]["context"] is None

@@ -490,3 +490,12 @@ def test_codexWriterReadsTddSkillAndHasNoAllowedTools(startBoard):
   write = readCalls(scenarioDir, "write")[0]
   assert "SKILL.md" in write["prompt"] and "Skill 工具" not in write["prompt"]
   assert "--allowedTools" not in write["argv"]
+
+
+def test_writerAllowedToolsReachClaude(startBoard):
+  conductor, scenarioDir = startBoard(oneTask, writer=fakeRole("claude", allowedTools=["Bash(npm install*)",
+                                                                                     "PowerShell(npm install*)"]))
+  runUntil(conductor, planDone)
+  argv = readCalls(scenarioDir, "write")[0]["argv"]
+  allowedIndex = argv.index("--allowedTools")
+  assert argv[allowedIndex + 1:allowedIndex + 3] == ["Bash(npm install*)", "PowerShell(npm install*)"]

@@ -50,7 +50,7 @@ python <agent-board>\install_skill.py
 
    - 把 `docs/AGENTS-snippet.md` 的規則寫進專案的 `AGENTS.md`，前後加標記；規則更新後再跑一次 `init`，會整段換成最新版
    - 規則裡寫 plan 的 agent 要執行的 `board.py` 路徑，會寫成這份 `<agent-board>` 的實際位置；`<agent-board>` 搬家後要再跑一次 `init`
-   - 建立 `.claude/skills/agent-board-plan/SKILL.md`，內容是同一份規則：在 Claude Code 打 `/agent-board-plan 你的需求`，就由 Claude 寫 plan；沒打這個指令時，Claude Code 照平常的方式工作。已經有同名、但不是 init 產生的 skill 時不覆蓋
+   - 建立 `.claude/skills/agent-board-plan/SKILL.md`，內容是同一份規則：在 Claude Code 打 `/agent-board-plan 你的需求`，就由 Claude 寫 plan；注意：Claude Code 平常也會自己讀 `AGENTS.md`，所以在這個專案裡開的 Claude Code，即使沒打這個指令，也會看到「負責寫 plan、不要自己寫程式」那段規則；要它直接寫程式時請明講。已經有同名、但不是 init 產生的 skill 時不覆蓋
    - `.gitignore` 補上 `.board/`、`plans/_review/`
    - 不會自動 commit，最後會印出要執行的 git 指令
    - 測試產物（例如 `__pycache__/`、`.pytest_cache/`）要自己加進 `.gitignore`，否則會被 commit 進任務分支
@@ -110,7 +110,7 @@ python <agent-board>\install_skill.py
 - 權限：
   - Claude 寫程式：只能執行 `testCommand` 和 `allowedTools` 列的指令
   - Codex 寫程式：在 `workspace-write` 沙箱裡，只能寫入這個任務的 worktree，但不能限制它執行哪些指令
-  - Claude 審查：只能讀檔案，不能改檔案、不能執行指令
+  - Claude 審查：會改檔案、執行指令的內建工具（Edit、Write、NotebookEdit、Bash、PowerShell）都被拿掉；你在 Claude Code 設定裡另外放行的工具（例如 MCP 工具）仍可能可用
   - Codex 審查：`read-only` 沙箱
 - 寫 plan 的 agent 是你自己開的，模型在開的時候選：`codex -m <模型>`，或 `claude --model <模型>` 再打 `/agent-board-plan`
 - 舊版的 `claudeCommand`、`codexCommand`、`claudeAllowedTools`、`claudeContextWindow`、`codexContextWindow` 已經不用了，conductor 看到會拒絕啟動並說明要改成什麼

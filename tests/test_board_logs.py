@@ -134,3 +134,13 @@ def test_claudeReviewDetailShowsWholeResult(tmp_path):
   records = [{"type": "result", "subtype": "success", "structured_output": verdict}]
   detail = board_logs.logDetail(writeLog(tmp_path, "r.log", records), "claude", "review")
   assert detail["messages"] == [{"text": json.dumps(verdict, ensure_ascii=False)}]
+
+
+def test_codexSummaryShortensLongCommands(tmp_path):
+  command = "Set-Content a.txt '" + "x" * 300 + "'\n第二行"
+  records = [{"type": "item.completed", "item": {"id": "item_0", "type": "command_execution", "command": command,
+                                                 "aggregated_output": "", "exit_code": 0}}]
+  summary = board_logs.logSummary(writeLog(tmp_path, "long.log", records), "codex", "write")
+  assert summary["action"] == "執行 " + command.splitlines()[0][:120] + "…"
+  detail = board_logs.logDetail(writeLog(tmp_path, "long2.log", records), "codex", "write")
+  assert detail["tools"][0]["input"] == command

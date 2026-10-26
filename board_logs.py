@@ -10,6 +10,7 @@ maxFieldChars = 2000
 # Codex 還沒有任何動作、或在回覆最後結果時，卡片依階段顯示
 codexIdleActions = {"write": "寫程式中", "review": "審查中"}
 codexReplyActions = {"write": "回覆寫程式結果", "review": "回覆審查結果"}
+maxActionChars = 120
 
 
 def readTail(path, limit):
@@ -64,6 +65,14 @@ def fileChangeNames(item):
   return "、".join(fileName(str(change.get("path", ""))) for change in changes if isinstance(change, dict))
 
 
+def shortCommand(command):
+  # Codex 在 Windows 用 PowerShell 寫檔時，檔案內容整段在指令裡；卡片只放第一行的開頭
+  lines = str(command).splitlines()
+  first = lines[0] if lines else ""
+  cut = len(lines) > 1 or len(first) > maxActionChars
+  return first[:maxActionChars] + ("…" if cut else "")
+
+
 def claudeContextTokens(usage):
   # 一則訊息送出時整段對話的大小 = 這次新讀的 + 從快取讀的 + 寫進快取的
   return (usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
@@ -90,7 +99,7 @@ def summarizeRecords(records, cli, kind):
     elif cli == "codex" and recordType == "item.completed":
       item = record.get("item") or {}
       if item.get("type") == "command_execution":
-        action = f"執行 {item.get('command', '')}".strip()
+        action = f"執行 {shortCommand(item.get('command', ''))}".strip()
       elif item.get("type") == "file_change":
         action = f"修改 {fileChangeNames(item)}".strip()
       elif item.get("type") == "agent_message":

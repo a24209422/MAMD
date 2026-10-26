@@ -61,7 +61,7 @@ def roleSpec(config, role):
   raw = raw if isinstance(raw, dict) else {}
   cli = raw.get("cli") or defaultConfig[role]["cli"]
   return {"cli": cli, "model": raw.get("model") or None, "command": raw.get("command") or None,
-          "contextWindow": raw.get("contextWindow") or defaultContextWindows.get(cli),
+          "contextWindow": raw.get("contextWindow") or (defaultContextWindows.get(cli) if isinstance(cli, str) else None),
           "allowedTools": list(raw.get("allowedTools") or [])}
 
 
