@@ -90,7 +90,7 @@ def agentView(projectDir, snapshot, agentId, group):
   logPath = board_logs.findLog(boardDir(projectDir) / "logs", taskState["plan"], taskState["task"],
                                taskState["round"], kind)
   if logPath:
-    summary = board_logs.logSummary(logPath, group)
+    summary = board_logs.logSummary(logPath, group, kind)
     view.update(action=summary["action"], lastActivity=summary["lastActivity"])
     view["context"]["tokens"] = summary["tokens"]
   return view
@@ -222,7 +222,7 @@ def agentLogView(projectDir, agentId):
   logPath = board_logs.findLog(boardDir(projectDir) / "logs", planIdValue, taskId, roundNumber, kind)
   if logPath is None:
     return view
-  detail = board_logs.logDetail(logPath, group)
+  detail = board_logs.logDetail(logPath, group, kind)
   view.update(file=logPath.name, messages=detail["messages"], tools=detail["tools"], truncated=detail["truncated"],
               context={"tokens": detail["tokens"], "window": snapshot["config"][f"{group}ContextWindow"]})
   return view

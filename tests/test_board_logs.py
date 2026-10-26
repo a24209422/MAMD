@@ -25,6 +25,13 @@ codexRecords = [
   {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "{\"verdict\":\"pass\"}"}},
   {"type": "turn.completed", "usage": {"input_tokens": 18094, "cached_input_tokens": 0, "output_tokens": 94}},
 ]
+codexWriteRecords = [
+  {"type": "thread.started", "thread_id": "t2"},
+  {"type": "item.completed", "item": {"id": "item_0", "type": "file_change", "status": "completed",
+                                      "changes": [{"path": "D:\\w\\P0001-T1\\calc.py", "kind": "update"},
+                                                  {"path": "D:\\w\\P0001-T1\\test_calc.py", "kind": "add"}]}},
+  {"type": "turn.completed", "usage": {"input_tokens": 9000, "cached_input_tokens": 0, "output_tokens": 50}},
+]
 claudeTokens = 2 + 33570 + 596
 
 
@@ -37,26 +44,26 @@ def writeLog(directory, name, records, tail=""):
 
 
 def test_claudeSummaryUsesLastToolAndUsage(tmp_path):
-  summary = board_logs.logSummary(writeLog(tmp_path, "a.log", claudeRecords), "claude")
+  summary = board_logs.logSummary(writeLog(tmp_path, "a.log", claudeRecords), "claude", "write")
   assert summary["action"] == "Write calc.py"
   assert summary["tokens"] == claudeTokens
   assert summary["lastActivity"][:4].isdigit() and "T" in summary["lastActivity"]
 
 
 def test_codexSummaryUsesLastItemAndTurnUsage(tmp_path):
-  summary = board_logs.logSummary(writeLog(tmp_path, "b.log", codexRecords), "codex")
+  summary = board_logs.logSummary(writeLog(tmp_path, "b.log", codexRecords), "codex", "review")
   assert summary["action"] == "回覆審查結果"
   assert summary["tokens"] == 18094
 
 
 def test_codexSummaryBeforeAnyItem(tmp_path):
-  summary = board_logs.logSummary(writeLog(tmp_path, "c.log", codexRecords[:2]), "codex")
+  summary = board_logs.logSummary(writeLog(tmp_path, "c.log", codexRecords[:2]), "codex", "review")
   assert (summary["action"], summary["tokens"]) == ("審查中", None)
 
 
 def test_incompleteLastLineIsIgnored(tmp_path):
   path = writeLog(tmp_path, "d.log", claudeRecords[:3], tail='{"type": "assistant", "mess')
-  assert board_logs.logSummary(path, "claude")["action"] == "Write calc.py"
+  assert board_logs.logSummary(path, "claude", "write")["action"] == "Write calc.py"
 
 
 def test_summaryReadsOnlyTail(tmp_path, monkeypatch):
@@ -65,13 +72,13 @@ def test_summaryReadsOnlyTail(tmp_path, monkeypatch):
                                                            "input": {"file_path": "old.py"}}]}}
   chinese = {"type": "assistant", "message": {"content": [{"type": "text", "text": "中" * 30}]}}
   path = writeLog(tmp_path, "e.log", [oldTool] * 50 + [chinese, claudeRecords[2]])
-  assert board_logs.logSummary(path, "claude")["action"] == "Write calc.py"
+  assert board_logs.logSummary(path, "claude", "write")["action"] == "Write calc.py"
   text, cut = board_logs.readTail(path, 600)
   assert cut is True and len(text.encode("utf-8")) <= 600
 
 
 def test_claudeDetailPairsToolResults(tmp_path):
-  detail = board_logs.logDetail(writeLog(tmp_path, "f.log", claudeRecords), "claude")
+  detail = board_logs.logDetail(writeLog(tmp_path, "f.log", claudeRecords), "claude", "write")
   assert [message["text"] for message in detail["messages"]] == ["先看 calc.py", "新增 calc.py"]
   assert detail["tools"] == [{
     "name": "Write", "target": "calc.py",
@@ -83,12 +90,12 @@ def test_claudeDetailPairsToolResults(tmp_path):
 
 def test_detailClipsLongFields(tmp_path, monkeypatch):
   monkeypatch.setattr(board_logs, "maxFieldChars", 10)
-  tool = board_logs.logDetail(writeLog(tmp_path, "g.log", claudeRecords), "claude")["tools"][0]
+  tool = board_logs.logDetail(writeLog(tmp_path, "g.log", claudeRecords), "claude", "write")["tools"][0]
   assert len(tool["result"]) == 10 and tool["truncated"] is True
 
 
 def test_codexDetailListsCommandsAndMessages(tmp_path):
-  detail = board_logs.logDetail(writeLog(tmp_path, "h.log", codexRecords), "codex")
+  detail = board_logs.logDetail(writeLog(tmp_path, "h.log", codexRecords), "codex", "review")
   assert detail["messages"] == [{"text": "{\"verdict\":\"pass\"}"}]
   assert detail["tools"] == [{"name": "執行", "target": "git diff", "input": "git diff",
                               "result": "diff --git a/calc.py", "truncated": False}]
@@ -104,3 +111,26 @@ def test_findLogPicksLatestMatchingFile(tmp_path):
   assert board_logs.findLog(tmp_path, "P0001", "T1", 1, "review").name == "P0001-T1-r1-review2-20261026-100900.log"
   assert board_logs.findLog(tmp_path, "P0001", "T2", 1, "write") is None
   assert board_logs.findLog(tmp_path / "missing", "P0001", "T1", 1, "write") is None
+
+
+def test_codexWriterSummaryShowsChangedFiles(tmp_path):
+  summary = board_logs.logSummary(writeLog(tmp_path, "w.log", codexWriteRecords), "codex", "write")
+  assert (summary["action"], summary["tokens"]) == ("修改 calc.py、test_calc.py", 9000)
+  started = board_logs.logSummary(writeLog(tmp_path, "w0.log", codexWriteRecords[:1]), "codex", "write")
+  assert started["action"] == "寫程式中"
+  replied = writeLog(tmp_path, "w2.log", codexWriteRecords + [codexRecords[3]])
+  assert board_logs.logSummary(replied, "codex", "write")["action"] == "回覆寫程式結果"
+
+
+def test_codexDetailListsFileChanges(tmp_path):
+  tools = board_logs.logDetail(writeLog(tmp_path, "w1.log", codexWriteRecords), "codex", "write")["tools"]
+  changes = codexWriteRecords[1]["item"]["changes"]
+  assert tools == [{"name": "修改", "target": "calc.py、test_calc.py",
+                    "input": json.dumps(changes, ensure_ascii=False), "result": "", "truncated": False}]
+
+
+def test_claudeReviewDetailShowsWholeResult(tmp_path):
+  verdict = {"verdict": "fail", "mustFix": [{"ref": "R1", "text": "還沒做"}], "suggest": []}
+  records = [{"type": "result", "subtype": "success", "structured_output": verdict}]
+  detail = board_logs.logDetail(writeLog(tmp_path, "r.log", records), "claude", "review")
+  assert detail["messages"] == [{"text": json.dumps(verdict, ensure_ascii=False)}]

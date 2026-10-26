@@ -7,6 +7,10 @@ tailBytes = 256 * 1024
 detailBytes = 2 * 1024 * 1024
 maxFieldChars = 2000
 
+# Codex 還沒有任何動作、或在回覆最後結果時，卡片依階段顯示
+codexIdleActions = {"write": "寫程式中", "review": "審查中"}
+codexReplyActions = {"write": "回覆寫程式結果", "review": "回覆審查結果"}
+
 
 def readTail(path, limit):
   size = path.stat().st_size
@@ -54,6 +58,12 @@ def toolTarget(toolInput):
   return ""
 
 
+def fileChangeNames(item):
+  # Codex 改檔案的事件列出每個檔案的完整路徑，卡片上只放檔名
+  changes = item.get("changes") if isinstance(item.get("changes"), list) else []
+  return "、".join(fileName(str(change.get("path", ""))) for change in changes if isinstance(change, dict))
+
+
 def claudeContextTokens(usage):
   # 一則訊息送出時整段對話的大小 = 這次新讀的 + 從快取讀的 + 寫進快取的
   return (usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
@@ -65,11 +75,11 @@ def contentBlocks(record):
   return [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
 
 
-def summarizeRecords(records, group):
+def summarizeRecords(records, cli, kind):
   action, tokens = None, None
   for record in records:
     recordType = record.get("type")
-    if group == "claude" and recordType == "assistant":
+    if cli == "claude" and recordType == "assistant":
       for block in contentBlocks(record):
         # StructuredOutput 是交回結果用的內部工具，不算 agent 在做的事
         if block.get("type") == "tool_use" and block.get("name") != "StructuredOutput":
@@ -77,25 +87,27 @@ def summarizeRecords(records, group):
       usage = (record.get("message") or {}).get("usage")
       if isinstance(usage, dict):
         tokens = claudeContextTokens(usage)
-    elif group == "codex" and recordType == "item.completed":
+    elif cli == "codex" and recordType == "item.completed":
       item = record.get("item") or {}
       if item.get("type") == "command_execution":
         action = f"執行 {item.get('command', '')}".strip()
+      elif item.get("type") == "file_change":
+        action = f"修改 {fileChangeNames(item)}".strip()
       elif item.get("type") == "agent_message":
-        action = "回覆審查結果"
-    elif group == "codex" and recordType == "turn.completed":
+        action = codexReplyActions[kind]
+    elif cli == "codex" and recordType == "turn.completed":
       usage = record.get("usage")
       if isinstance(usage, dict) and usage.get("input_tokens") is not None:
         tokens = usage["input_tokens"]
-  if group == "codex" and action is None:
-    action = "審查中"
+  if cli == "codex" and action is None:
+    action = codexIdleActions[kind]
   return action, tokens
 
 
-def logSummary(path, group):
+def logSummary(path, cli, kind):
   # 卡片每 2 秒更新一次，只看 log 最後一段就夠
   text, _ = readTail(path, tailBytes)
-  action, tokens = summarizeRecords(parseLines(text), group)
+  action, tokens = summarizeRecords(parseLines(text), cli, kind)
   modified = datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
   return {"action": action, "lastActivity": modified, "tokens": tokens}
 
@@ -136,9 +148,13 @@ def claudeDetail(records):
           tool["result"], resultCut = clip(toolResultText(block.get("content")))
           tool["truncated"] = tool["truncated"] or resultCut
     elif recordType == "result":
-      summary = (record.get("structured_output") or {}).get("summary")
-      if summary:
-        messages.append({"text": summary})
+      structured = record.get("structured_output")
+      structured = structured if isinstance(structured, dict) else {}
+      if structured.get("summary"):
+        messages.append({"text": structured["summary"]})
+      elif structured:
+        # 審查的結果沒有 summary，整份列出來，和 Codex 審查時看到的回覆一樣
+        messages.append({"text": json.dumps(structured, ensure_ascii=False)})
   return messages, tools
 
 
@@ -155,14 +171,18 @@ def codexDetail(records):
       resultText, resultCut = clip(str(item.get("aggregated_output", "")))
       tools.append({"name": "執行", "target": command, "input": command, "result": resultText,
                     "truncated": resultCut})
+    elif item.get("type") == "file_change":
+      inputText, inputCut = clip(item.get("changes") or [])
+      tools.append({"name": "修改", "target": fileChangeNames(item), "input": inputText, "result": "",
+                    "truncated": inputCut})
   return messages, tools
 
 
-def logDetail(path, group):
+def logDetail(path, cli, kind):
   text, cut = readTail(path, detailBytes)
   records = parseLines(text)
-  messages, tools = claudeDetail(records) if group == "claude" else codexDetail(records)
-  _, tokens = summarizeRecords(records, group)
+  messages, tools = claudeDetail(records) if cli == "claude" else codexDetail(records)
+  _, tokens = summarizeRecords(records, cli, kind)
   return {"messages": messages, "tools": tools, "tokens": tokens, "truncated": cut}
 
 
