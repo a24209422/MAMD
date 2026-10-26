@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from board_review import writeResultSchema
+from board_review import reviewResultSchema, writeResultSchema
 
 # 不用 "limit reached"：Claude 的 "Context limit reached" 是對話太長，不是額度用完
 quotaPatterns = ["usage limit", "rate limit", "rate_limit", "quota", "hit your limit", "out of extra usage", "額度"]
@@ -19,6 +19,8 @@ deniedShellPatterns = [
 ]
 # Windows 上 Claude 的 shell 工具是 PowerShell、其他平台是 Bash；同一條規則兩種都要列才擋得住
 deniedClaudeTools = [f"{tool}({pattern})" for pattern in deniedShellPatterns for tool in ("Bash", "PowerShell")]
+# 審查只能讀：會改檔案或執行指令的工具都拿掉；沒列到、需要核准的工具，也會因為沒人能核准而被自動拒絕
+claudeReviewDeniedTools = ["Edit", "Write", "NotebookEdit", "Bash", "PowerShell"]
 
 
 def killProcessTree(pid):
@@ -116,8 +118,12 @@ def resolveCommand(configured, name):
   return [shutil.which(name) or name]
 
 
-def buildClaudeArgv(command, sessionId, resume, systemRules, allowedTools=()):
-  argv = list(command) + [
+def modelArgs(flag, model):
+  return [flag, model] if model else []
+
+
+def buildClaudeArgv(command, sessionId, resume, systemRules, allowedTools=(), model=None):
+  argv = list(command) + modelArgs("--model", model) + [
     "-p", "--output-format", "stream-json", "--verbose",
     "--json-schema", json.dumps(writeResultSchema, ensure_ascii=False),
     "--permission-mode", "acceptEdits", "--permission-prompts", "none",
@@ -129,6 +135,17 @@ def buildClaudeArgv(command, sessionId, resume, systemRules, allowedTools=()):
     argv += ["--allowedTools", *allowedTools]
   # session 參數維持在最後兩項，呼叫端與測試都依賴這個位置
   return argv + (["--resume", sessionId] if resume else ["--session-id", sessionId])
+
+
+def buildClaudeReviewArgv(command, systemRules, model=None):
+  # 審查每次都是新的對話，不必指定 session
+  return list(command) + modelArgs("--model", model) + [
+    "-p", "--output-format", "stream-json", "--verbose",
+    "--json-schema", json.dumps(reviewResultSchema, ensure_ascii=False),
+    "--permission-mode", "manual", "--permission-prompts", "none",
+    "--append-system-prompt", systemRules,
+    "--disallowedTools", *claudeReviewDeniedTools,
+  ]
 
 
 def describeToolUse(name, toolInput):
@@ -167,9 +184,17 @@ def claudeFinalResult(activity):
   return (parsed, "") if isinstance(parsed, dict) else (None, "result 不是 JSON 物件")
 
 
-def buildCodexArgv(command, worktree, schemaPath, outPath):
+def buildCodexArgv(command, worktree, schemaPath, outPath, model=None):
   return list(command) + ["exec", "-C", str(worktree), "-s", "read-only", "--json",
-                          "--output-schema", str(schemaPath), "-o", str(outPath), "-"]
+                          "--output-schema", str(schemaPath), "-o", str(outPath), *modelArgs("-m", model), "-"]
+
+
+def buildCodexWriteArgv(command, worktree, schemaPath, outPath, threadId=None, model=None):
+  options = ["--json", "--output-schema", str(schemaPath), "-o", str(outPath), *modelArgs("-m", model)]
+  if threadId:
+    # exec resume 沒有 -s、-C：沙箱改用 -c 設定，資料夾由 AgentJob 的 cwd 決定
+    return list(command) + ["exec", "resume", "-c", "sandbox_mode=workspace-write", *options, threadId, "-"]
+  return list(command) + ["exec", "-C", str(worktree), "-s", "workspace-write", *options, "-"]
 
 
 def parseCodexLine(line, activity):

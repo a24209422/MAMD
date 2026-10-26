@@ -5,6 +5,7 @@ import sys
 import time
 
 import board_agents
+from board_review import reviewResultSchema
 
 
 def waitJob(job, timeout=20):
@@ -140,3 +141,45 @@ def test_looksLikeQuota():
   assert board_agents.looksLikeQuota("Context limit reached") is False
   assert board_agents.looksLikeQuota("You've hit your limit · resets 5pm") is True
   assert board_agents.looksLikeQuota("You're out of extra usage") is True
+
+
+def test_buildClaudeArgvWithModel():
+  argv = board_agents.buildClaudeArgv(["claude"], "sid-1", False, "規則", model="opus")
+  assert argv[:4] == ["claude", "--model", "opus", "-p"]
+  assert argv[-2:] == ["--session-id", "sid-1"]
+
+
+def test_buildClaudeReviewArgvIsReadOnly():
+  argv = board_agents.buildClaudeReviewArgv(["claude"], "審查規則", model="sonnet")
+  assert argv[:4] == ["claude", "--model", "sonnet", "-p"]
+  assert json.loads(argv[argv.index("--json-schema") + 1]) == reviewResultSchema
+  assert argv[argv.index("--permission-mode") + 1] == "manual"
+  assert argv[argv.index("--permission-prompts") + 1] == "none"
+  assert argv[argv.index("--append-system-prompt") + 1] == "審查規則"
+  denied = argv[argv.index("--disallowedTools") + 1:]
+  assert {"Edit", "Write", "NotebookEdit", "Bash", "PowerShell"} <= set(denied)
+  assert "--session-id" not in argv and "--resume" not in argv
+  assert board_agents.buildClaudeReviewArgv(["claude"], "規則")[:2] == ["claude", "-p"]
+
+
+def test_buildCodexArgvWithModel(tmp_path):
+  argv = board_agents.buildCodexArgv(["codex"], tmp_path / "wt", tmp_path / "s.json", tmp_path / "o.json",
+                                     model="gpt-6.1-sol")
+  assert argv[argv.index("-m") + 1] == "gpt-6.1-sol" and argv[-1] == "-"
+  assert "-m" not in board_agents.buildCodexArgv(["codex"], tmp_path / "wt", tmp_path / "s.json", tmp_path / "o.json")
+
+
+def test_buildCodexWriteArgvNewAndResume(tmp_path):
+  fresh = board_agents.buildCodexWriteArgv(["codex"], tmp_path / "wt", tmp_path / "s.json", tmp_path / "o.json")
+  assert fresh[:4] == ["codex", "exec", "-C", str(tmp_path / "wt")]
+  assert fresh[fresh.index("-s") + 1] == "workspace-write"
+  assert fresh[fresh.index("--output-schema") + 1] == str(tmp_path / "s.json")
+  assert fresh[fresh.index("-o") + 1] == str(tmp_path / "o.json")
+  assert "--json" in fresh and fresh[-1] == "-" and "-m" not in fresh
+  resumed = board_agents.buildCodexWriteArgv(["codex"], tmp_path / "wt", tmp_path / "s.json", tmp_path / "o.json",
+                                             threadId="th-1", model="gpt-6.1-sol")
+  assert resumed[:3] == ["codex", "exec", "resume"]
+  assert resumed[resumed.index("-c") + 1] == "sandbox_mode=workspace-write"
+  assert resumed[resumed.index("-m") + 1] == "gpt-6.1-sol"
+  assert resumed[-2:] == ["th-1", "-"]
+  assert "-C" not in resumed and "-s" not in resumed
