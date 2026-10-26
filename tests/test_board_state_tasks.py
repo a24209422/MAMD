@@ -253,3 +253,20 @@ def test_blockedRemembersCodexSession():
   blocked = makeEvent("taskBlocked", plan="P0001", task="T1", reason="缺資料", sessionId="thread-9", cli="codex")
   state = task(stateAfter(start, blocked))
   assert (state["sessionId"], state["sessionCli"]) == ("thread-9", "codex")
+
+
+def test_startedJobsRememberCliAndModel():
+  start = makeEvent("taskStarted", plan="P0001", task="T1", roundNumber=1, agent="writer", sessionId=None,
+                    cli="codex", model="gpt-6.1-sol")
+  writtenEvent = makeEvent("taskWritten", plan="P0001", task="T1", commit="c1", sessionId="thread-1", cli="codex",
+                           model="gpt-6.1-sol")
+  review = makeEvent("reviewStarted", plan="P0001", task="T1", roundNumber=1, agent="reviewer", cli="claude",
+                     model="opus")
+  state = task(stateAfter(start, writtenEvent, review))
+  assert (state["sessionCli"], state["sessionModel"]) == ("codex", "gpt-6.1-sol")
+  assert (state["reviewCli"], state["reviewModel"]) == ("claude", "opus")
+
+
+def test_oldEventsWithoutModelLeaveItEmpty():
+  state = task(stateAfter(started(1), written(), reviewStarted(1)))
+  assert (state["sessionModel"], state["reviewCli"], state["reviewModel"]) == (None, None, None)

@@ -120,3 +120,90 @@ def test_configProblemsFlagsLegacyKeysAndBadRoles():
   ]
   assert board_core.configProblems({"writer": {"command": "claude"}}) == [
     'writer.command 要是文字陣列，例如 ["C:/tools/claude.exe"]']
+
+
+def writeUserConfigFile(projectDir, config):
+  (projectDir / ".board").mkdir(exist_ok=True)
+  (projectDir / ".board" / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+
+def test_saveRoleChoiceOnlyChangesThatRole(tmp_path):
+  writeUserConfigFile(tmp_path, {
+    "maxParallel": 2,
+    "writer": {"cli": "claude", "model": "opus", "allowedTools": ["Bash(npm i*)"]},
+    "reviewer": {"cli": "codex", "command": ["C:/tools/codex.cmd"]},
+  })
+  board_core.saveRoleChoice(tmp_path, "writer", "codex", "gpt-6.1-sol")
+  assert board_core.readUserConfig(tmp_path) == {
+    "maxParallel": 2,
+    "writer": {"cli": "codex", "model": "gpt-6.1-sol", "allowedTools": ["Bash(npm i*)"]},
+    "reviewer": {"cli": "codex", "command": ["C:/tools/codex.cmd"]},
+  }
+  # 有自訂 command 時，不換 CLI、只換模型可以
+  board_core.saveRoleChoice(tmp_path, "reviewer", "codex", "gpt-6.1-sol")
+  # 模型空白代表用 CLI 的預設模型，model 欄位拿掉
+  board_core.saveRoleChoice(tmp_path, "writer", "codex", "")
+  config = board_core.readUserConfig(tmp_path)
+  assert "model" not in config["writer"] and config["reviewer"]["model"] == "gpt-6.1-sol"
+  assert [path.name for path in (tmp_path / ".board").iterdir()] == ["config.json"]
+
+
+def test_saveRoleChoiceCreatesConfigFile(tmp_path):
+  board_core.saveRoleChoice(tmp_path, "reviewer", "claude", "claude-opus-5-5[1m]")
+  assert board_core.readUserConfig(tmp_path) == {"reviewer": {"cli": "claude", "model": "claude-opus-5-5[1m]"}}
+
+
+def test_saveRoleChoiceRejectsBadChoices(tmp_path):
+  writeUserConfigFile(tmp_path, {"reviewer": {"cli": "codex", "command": ["C:/tools/codex.cmd"]}})
+  configFile = tmp_path / ".board" / "config.json"
+  before = configFile.read_text(encoding="utf-8")
+  cases = [
+    ("boss", "claude", "", "角色只能是 writer 或 reviewer，現在是 boss"),
+    ("writer", "gemini", "", "CLI 只能是 claude 或 codex，現在是 gemini"),
+    ("writer", "codex", "gpt&calc", board_core.modelNameRule),
+    ("writer", "codex", "-p", board_core.modelNameRule),
+    ("writer", "codex", "x" * 101, board_core.modelNameRule),
+    ("reviewer", "claude", "", "reviewer 有自訂 command，換 CLI 前要先到 .board/config.json 改 command"),
+  ]
+  for role, cli, model, message in cases:
+    with pytest.raises(board_core.BoardError) as raised:
+      board_core.saveRoleChoice(tmp_path, role, cli, model)
+    assert str(raised.value) == message
+  assert configFile.read_text(encoding="utf-8") == before
+
+
+def test_saveRoleChoiceRefusesUnreadableConfig(tmp_path):
+  (tmp_path / ".board").mkdir()
+  configFile = tmp_path / ".board" / "config.json"
+  configFile.write_text("{壞掉", encoding="utf-8")
+  with pytest.raises(board_core.BoardError, match="讀不懂"):
+    board_core.saveRoleChoice(tmp_path, "writer", "codex", "")
+  configFile.write_text("[1]", encoding="utf-8")
+  with pytest.raises(board_core.BoardError, match="最外層要是物件"):
+    board_core.saveRoleChoice(tmp_path, "writer", "codex", "")
+  assert configFile.read_text(encoding="utf-8") == "[1]"
+
+
+def test_saveRoleChoiceRetriesWhileFileIsBusy(tmp_path, monkeypatch):
+  realReplace = board_core.os.replace
+  calls = []
+
+  def busyTwice(source, target):
+    calls.append(target)
+    if len(calls) <= 2:
+      raise PermissionError("busy")
+    realReplace(source, target)
+
+  monkeypatch.setattr(board_core.os, "replace", busyTwice)
+  monkeypatch.setattr(board_core.time, "sleep", lambda seconds: None)
+  board_core.saveRoleChoice(tmp_path, "writer", "codex", "")
+  assert len(calls) == 3 and board_core.readUserConfig(tmp_path) == {"writer": {"cli": "codex"}}
+
+  def alwaysBusy(source, target):
+    raise PermissionError("busy")
+
+  monkeypatch.setattr(board_core.os, "replace", alwaysBusy)
+  with pytest.raises(board_core.BoardError, match="正被其他程式使用"):
+    board_core.saveRoleChoice(tmp_path, "writer", "claude", "")
+  assert board_core.readUserConfig(tmp_path) == {"writer": {"cli": "codex"}}
+  assert [path.name for path in (tmp_path / ".board").iterdir()] == ["config.json"]

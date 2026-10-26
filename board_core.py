@@ -1,6 +1,7 @@
 """事件紀錄與狀態推導：所有程式都透過這裡讀寫 .board/。"""
 import json
 import os
+import re
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -14,6 +15,12 @@ lockFileName = "events.lock"
 roleNames = ("writer", "reviewer")
 cliNames = ("claude", "codex")
 defaultContextWindows = {"claude": 200000, "codex": 475000}
+cliTitles = {"claude": "Claude", "codex": "Codex"}
+# 模型名稱會變成命令列參數：Windows 上的 codex 是 codex.cmd，參數會經過 cmd.exe，& | 之類的字元可能被當成另一個指令；
+# 開頭限定英數字，免得被當成 CLI 的其他參數（例如 -p）
+modelNamePattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,99}")
+modelNameRule = "模型名稱要以英數字開頭，只能有英數字和 . _ - : / [ ]，最多 100 字"
+configReplaceAttempts = 20
 # 舊版設定的 key 和新寫法；conductor 看到舊的就拒絕啟動，免得設定被默默忽略
 legacyConfigKeys = {
   "claudeCommand": "writer.command",
@@ -42,11 +49,15 @@ def boardDir(projectDir):
   return Path(projectDir) / boardDirName
 
 
+def configPath(projectDir):
+  return boardDir(projectDir) / "config.json"
+
+
 def readUserConfig(projectDir):
-  configPath = boardDir(projectDir) / "config.json"
-  if not configPath.exists():
+  path = configPath(projectDir)
+  if not path.exists():
     return {}
-  return json.loads(configPath.read_text(encoding="utf-8-sig"))
+  return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
 def loadConfig(projectDir):
@@ -85,6 +96,55 @@ def configProblems(userConfig):
                                     and all(isinstance(part, str) for part in command)):
       problems.append(f'{role}.command 要是文字陣列，例如 ["C:/tools/claude.exe"]')
   return problems
+
+
+def roleChoiceText(cli, model):
+  return f"{cliTitles.get(cli, cli)}（{model or '預設模型'}）"
+
+
+def writeUserConfig(projectDir, userConfig):
+  path = configPath(projectDir)
+  path.parent.mkdir(parents=True, exist_ok=True)
+  tempPath = path.with_name(path.name + ".tmp")
+  tempPath.write_text(json.dumps(userConfig, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+  # conductor 每一輪都會讀設定檔；先寫暫存檔再整個換掉，它才不會讀到寫一半的內容
+  for _ in range(configReplaceAttempts):
+    try:
+      os.replace(tempPath, path)
+      return
+    except PermissionError:
+      # Windows 上別的程式剛好開著設定檔時換不掉，等一下再試
+      time.sleep(0.05)
+  tempPath.unlink(missing_ok=True)
+  raise BoardError("設定檔正被其他程式使用，請稍後再試")
+
+
+def saveRoleChoice(projectDir, role, cli, model):
+  """只改 .board/config.json 裡這個角色的 cli、model，其他設定原樣保留；不能存時丟 BoardError。"""
+  if role not in roleNames:
+    raise BoardError(f"角色只能是 writer 或 reviewer，現在是 {role}")
+  if cli not in cliNames:
+    raise BoardError(f"CLI 只能是 claude 或 codex，現在是 {cli}")
+  if model and not modelNamePattern.fullmatch(model):
+    raise BoardError(modelNameRule)
+  try:
+    userConfig = readUserConfig(projectDir)
+  except (OSError, ValueError) as error:
+    raise BoardError(f".board/config.json 讀不懂，請先手動修正：{error}")
+  if not isinstance(userConfig, dict):
+    raise BoardError(".board/config.json 最外層要是物件，請先手動修正")
+  current = userConfig.get(role)
+  roleConfig = dict(current) if isinstance(current, dict) else {}
+  # 自訂的 command 指向某一個 CLI 的執行檔；換了 CLI 還用它，啟動時會帶錯參數
+  if roleConfig.get("command") and cli != roleConfig.get("cli", defaultConfig[role]["cli"]):
+    raise BoardError(f"{role} 有自訂 command，換 CLI 前要先到 .board/config.json 改 command")
+  roleConfig["cli"] = cli
+  if model:
+    roleConfig["model"] = model
+  else:
+    roleConfig.pop("model", None)
+  userConfig[role] = roleConfig
+  writeUserConfig(projectDir, userConfig)
 
 
 def nowText():
@@ -195,7 +255,8 @@ def newTaskState(planIdValue, task, config):
     "plan": planIdValue, "task": task["id"], "text": task["text"],
     "dependsOn": list(task["dependsOn"]), "requirementIds": list(task["requirementIds"]),
     "status": TaskStatus.queued, "round": 1, "maxRounds": config["maxRounds"],
-    "agent": None, "reviewAgent": None, "sessionId": None, "sessionCli": None, "resumable": False,
+    "agent": None, "reviewAgent": None, "sessionId": None, "sessionCli": None, "sessionModel": None,
+    "resumable": False, "reviewCli": None, "reviewModel": None,
     "needsClean": False,
     "failStreak": 0, "needs": None, "userNote": "", "userDone": False,
     "reviews": [], "lastReviewNotes": None, "lastCommit": None, "lastTest": None,
@@ -256,6 +317,7 @@ def onTaskStarted(taskState, event):
   taskState["sessionId"] = event["data"].get("sessionId")
   # 這個版本之前只有 Claude 寫程式，舊事件沒有 cli 就是 Claude 的對話
   taskState["sessionCli"] = event["data"].get("cli", "claude")
+  taskState["sessionModel"] = event["data"].get("model")
   taskState["needsClean"] = False
   taskState["needs"] = None
   taskState["userDone"] = False
@@ -266,6 +328,7 @@ def rememberSession(taskState, data):
   if data.get("sessionId"):
     taskState["sessionId"] = data["sessionId"]
     taskState["sessionCli"] = data.get("cli", taskState["sessionCli"])
+    taskState["sessionModel"] = data.get("model", taskState["sessionModel"])
 
 
 def onTaskWritten(taskState, event):
@@ -300,6 +363,9 @@ def onTestRun(taskState, event):
 def onReviewStarted(taskState, event):
   taskState["status"] = TaskStatus.reviewing
   taskState["reviewAgent"] = event["agent"]
+  # 儀表板照審查啟動時的 CLI 解析它的 log；中途換了設定也不會用錯格式
+  taskState["reviewCli"] = event["data"].get("cli")
+  taskState["reviewModel"] = event["data"].get("model")
 
 
 def onReviewPassed(taskState, event):
