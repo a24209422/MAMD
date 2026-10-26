@@ -1,9 +1,9 @@
 // 右側儀表板助手：只用最新的 /api/state 回答，規則式比對，不呼叫任何模型
 const botSender = { name: '儀表板助手', icon: 'chat', color: 'var(--green)' };
-const botQuickAsks = ['等你處理的有哪些？', '整體進度', 'Context 偏高的有誰？', 'claude 在做什麼？'];
+const botQuickAsks = ['等你處理的有哪些？', '整體進度', 'Context 偏高的有誰？', 'writer 在做什麼？'];
 let chatOpen = false;
 
-// 比對前去掉空白、連字號、底線，「Claude-Sub1」「claude sub1」都認得
+// 比對前去掉空白、連字號、底線，「Writer-Sub1」「writer sub1」都認得
 function normalizeAsk(text) {
   return String(text).toLowerCase().replace(/[\s\-_]/g, '');
 }
@@ -33,7 +33,7 @@ function botReply(text) {
   const state = app.state;
   if (!state) return '還沒讀到資料，等一下再問。';
   const asked = normalizeAsk(text);
-  // 長的先比，P0001T10 才不會被 P0001T1 搶先、claude-sub1 才不會被 claude 搶先
+  // 長的先比，P0001T10 才不會被 P0001T1 搶先、writer-sub1 才不會被 writer 搶先
   const longestFirst = (items, keyOf) => [...items].sort((a, b) => keyOf(b).length - keyOf(a).length);
   const task = longestFirst(state.tasks, item => item.plan + item.task)
     .find(item => asked.includes(normalizeAsk(item.plan + item.task)));
@@ -67,7 +67,7 @@ function botReply(text) {
     if (state.needsYou.length) lines.push(`等你處理 ${state.needsYou.length} 個任務`);
     return listHtml(lines);
   }
-  return '我可以查：某個 agent 在做什麼（例如「claude 在做什麼？」）、某個任務或 plan（例如「P0002 T2」）、等你處理的有哪些、Context 偏高的有誰、整體進度。';
+  return '我可以查：某個 agent 在做什麼（例如「writer 在做什麼？」）、某個任務或 plan（例如「P0002 T2」）、等你處理的有哪些、Context 偏高的有誰、整體進度。';
 }
 
 function clockNow() {

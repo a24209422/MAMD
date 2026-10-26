@@ -29,11 +29,11 @@ function renderConsole(state) {
     return;
   }
   const cardState = agentCardState(agent);
-  const info = groupInfo[agent.group];
+  const info = roleInfo[agent.role];
   $('#taskPanel').dataset.state = cardState;
   $('#taskHead').innerHTML = `
     <span class="agent-icon">${icon('robot')}</span>
-    <h3 class="agent-name">${escapeHtml(agent.id)}<span>（${info.name}・${info.role}）</span></h3>
+    <h3 class="agent-name">${escapeHtml(agent.id)}<span>（${escapeHtml(cliLabel(agent.cli))}・${info.role}）</span></h3>
     <span class="state" data-state="${cardState}">${escapeHtml(agent.status)}</span>`;
   $('#workerPicker').innerHTML = state.agents.map(item =>
     `<button class="mini" type="button" data-agent="${escapeHtml(item.id)}" data-state="${agentCardState(item)}" aria-pressed="${item.id === agent.id}">${escapeHtml(item.id)}</button>`

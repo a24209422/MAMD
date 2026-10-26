@@ -59,7 +59,7 @@ def test_servesPageAndState(running):
   assert status == 200 and b"<html" in page.lower()
   status, state = call(port, "GET", "/api/state")
   assert status == 200 and state["project"] == str(projectDir.resolve())
-  assert [agent["id"] for agent in state["agents"]][:1] == ["claude"]
+  assert [agent["id"] for agent in state["agents"]][:1] == ["writer"]
 
 
 def test_unknownRoutesAndNamesAre404(running):

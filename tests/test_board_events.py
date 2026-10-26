@@ -82,10 +82,10 @@ def test_lockGivesUpWhenFileCannotBeCreated(tmp_path, monkeypatch):
   assert time.time() - startTime < 2
 
 
-def test_defaultConfigHasContextWindows(tmp_path):
+def test_defaultConfigHasRolesInsteadOfLegacyKeys(tmp_path):
   config = board_core.loadConfig(tmp_path)
-  assert config["claudeContextWindow"] == 200000
-  assert config["codexContextWindow"] == 475000
+  assert (config["writer"], config["reviewer"]) == ({"cli": "claude"}, {"cli": "codex"})
+  assert not set(board_core.legacyConfigKeys) & set(config)
 
 
 def test_roleSpecDefaultsAndOverrides(tmp_path):

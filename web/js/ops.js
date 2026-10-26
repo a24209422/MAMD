@@ -7,16 +7,16 @@ const opsTabs = [
 // open 記住每一筆展開了哪個確認框，results 記住失敗訊息；每 2 秒重畫時照這裡畫回去
 const opsUi = { tab: 'feed', feedFilter: 'all', open: {}, results: {}, warnings: {}, alertIds: '' };
 const stuckMs = 5 * 60 * 1000;
-const retryToQueue = '回到排隊，Claude 接手（會附上你的說明）';
+const retryToQueue = '回到排隊，寫程式的 agent 接手（會附上你的說明）';
 const retryHints = {
-  rounds: '輪數上限 +1，Claude 帶著最新審查意見和你的說明再改一輪',
+  rounds: '輪數上限 +1，寫程式的 agent 帶著最新審查意見和你的說明再改一輪',
   blocked: retryToQueue,
   noChanges: retryToQueue,
   commitFailed: retryToQueue,
   internalError: retryToQueue,
   agentFailed: '回到失敗的那個階段重跑',
-  invalidReview: '重新審查（說明不會交給 Codex）',
-  mergeConflict: '再交給 Claude 解一次（會附上你的說明）',
+  invalidReview: '重新審查（說明不會交給審查的 agent）',
+  mergeConflict: '再交給寫程式的 agent 解一次（會附上你的說明）',
   mergeFailed: '重試合併',
 };
 const readAlerts = loadReadAlerts();
@@ -46,8 +46,8 @@ function pruneReadAlerts(alerts) {
 }
 
 function whoColor(who) {
-  if (who.startsWith('claude')) return 'var(--blue)';
-  if (who.startsWith('codex')) return 'var(--violet)';
+  if (who.startsWith('writer')) return 'var(--blue)';
+  if (who.startsWith('reviewer')) return 'var(--violet)';
   return who === '你' ? 'var(--amber)' : 'var(--green)';
 }
 
@@ -193,7 +193,7 @@ function needsItem(item) {
       <p>${escapeHtml(item.title)}</p>
       <p>${escapeHtml(item.reason)}</p>
       ${conflicts}
-      <div class="op-form"><input type="text" data-draft="note:${escapeHtml(item.plan)}/${escapeHtml(item.task)}" placeholder="給 Claude 的說明（選填）" aria-label="給 Claude 的說明"></div>
+      <div class="op-form"><input type="text" data-draft="note:${escapeHtml(item.plan)}/${escapeHtml(item.task)}" placeholder="給寫程式的 agent 的說明（選填）" aria-label="給寫程式的 agent 的說明"></div>
       ${actions}${resultLine(key)}
     </li>`;
 }

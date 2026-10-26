@@ -1,10 +1,16 @@
-// 總覽的三層：conductor、Claude／Codex 兩組、每個 agent 身分
-const groupInfo = {
-  claude: { name: 'Claude', role: '寫程式', icon: 'code', accent: 'blue', busyText: '寫程式中',
+// 總覽的三層：conductor、寫程式／審查兩個角色、每個 agent 身分
+const roleInfo = {
+  writer: { role: '寫程式', icon: 'code', accent: 'blue', busyText: '寫程式中',
     duties: ['寫程式', '跑測試', '照審查意見修改', '解合併衝突'] },
-  codex: { name: 'Codex', role: '審查', icon: 'shield', accent: 'violet', busyText: '審查中',
+  reviewer: { role: '審查', icon: 'shield', accent: 'violet', busyText: '審查中',
     duties: ['審查 diff', '列出必改與建議', '確認解衝突沒弄壞其他任務'] },
 };
+// 每個角色用哪個 CLI 由 .board/config.json 決定，卡片標題跟著設定顯示
+const cliNames = { claude: 'Claude', codex: 'Codex' };
+
+function cliLabel(cli) {
+  return cliNames[cli] || cli || '';
+}
 
 function activePlans(state) {
   return state.plans.filter(plan => plan.status === '進行中');
@@ -38,22 +44,23 @@ function renderLead(state) {
     : '<li>沒有進行中的 plan</li>';
 }
 
-function groupAgents(state, group) {
-  return state.agents.filter(agent => agent.group === group);
+function roleAgents(state, role) {
+  return state.agents.filter(agent => agent.role === role);
 }
 
 function renderGroups(state) {
-  $('#pair').innerHTML = Object.entries(groupInfo).map(([group, info]) => {
-    const agents = groupAgents(state, group);
+  $('#pair').innerHTML = Object.entries(roleInfo).map(([role, info]) => {
+    const agents = roleAgents(state, role);
     const busy = agents.filter(agent => busyStatuses.includes(agent.status));
     const model = agents.length ? agents[0].model : null;
+    const cli = agents.length ? agents[0].cli : null;
     const stateKey = state.paused ? 'paused' : busy.length ? 'run' : 'idle';
     const stateLabel = { paused: '已暫停', run: '運行中', idle: '閒置' }[stateKey];
     const doing = state.paused ? '已暫停' : busy.length ? `${busy.length} 個${info.busyText}` : '閒置';
     return `
       <article class="agent agent-mid" data-state="${stateKey}" data-accent="${info.accent}">
         <div class="agent-head">
-          <h3 class="agent-name"><span class="agent-icon">${icon(info.icon)}</span>${info.name}<span>（${info.role}）</span></h3>
+          <h3 class="agent-name"><span class="agent-icon">${icon(info.icon)}</span>${escapeHtml(cliLabel(cli))}<span>（${info.role}）</span></h3>
           ${model ? `<span class="tag" data-accent="${info.accent}">${escapeHtml(model)}</span>` : ''}
           <span class="state" data-state="${stateKey}">${stateLabel}</span>
         </div>
@@ -91,10 +98,10 @@ function agentCard(state, agent) {
 }
 
 function renderAgents(state) {
-  $('#squads').innerHTML = Object.keys(groupInfo).map(group => {
-    const agents = groupAgents(state, group);
+  $('#squads').innerHTML = Object.keys(roleInfo).map(role => {
+    const agents = roleAgents(state, role);
     return `
-      <div class="squad" style="--n: ${Math.max(1, agents.length)}" aria-label="${groupInfo[group].name} 的 agent 身分">
+      <div class="squad" style="--n: ${Math.max(1, agents.length)}" aria-label="${roleInfo[role].role}的 agent 身分">
         ${agents.map(agent => agentCard(state, agent)).join('')}
       </div>`;
   }).join('');

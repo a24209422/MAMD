@@ -47,7 +47,7 @@ def dashboard(gitProject, writePlan):
   boardDir = gitProject / ".board"
   boardDir.mkdir(exist_ok=True)
   (boardDir / "config.json").write_text(
-    json.dumps({"maxParallel": 2, "claudeCommand": ["claude", "--model", "sonnet"]}), encoding="utf-8")
+    json.dumps({"maxParallel": 2, "writer": {"cli": "claude", "model": "sonnet"}}), encoding="utf-8")
   writePlan("0001-upload.md", uploadRows, planId="P0001", title="批次上傳",
             extraMeta="area: [前端/上傳, 後端/上傳]\n", projectDir=gitProject)
   writePlan("0002-thumb.md", thumbRows, planId="P0002", title="背景縮圖", extraMeta="area: [後端/縮圖]\n",
@@ -55,13 +55,13 @@ def dashboard(gitProject, writePlan):
   assert board.cmdSubmit(gitProject, "P0001") == 0
   assert board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y") == 0
   assert board.cmdSubmit(gitProject, "P0002") == 0
-  appendEvent(gitProject, "taskStarted", plan="P0001", task="T1", agent="claude", roundNumber=1, data={"mode": "write"})
+  appendEvent(gitProject, "taskStarted", plan="P0001", task="T1", agent="writer", roundNumber=1, data={"mode": "write"})
   logsDir = boardDir / "logs"
   logsDir.mkdir()
   (logsDir / "P0001-T1-r1-write-20261026-100000.log").write_text(
     "".join(json.dumps(record) + "\n" for record in claudeLog), encoding="utf-8")
   appendEvent(gitProject, "needsYou", plan="P0001", task="T2", roundNumber=1,
-              data={"kind": "blocked", "reason": "Claude 回報卡住：缺少 API 位址"})
+              data={"kind": "blocked", "reason": "寫程式的 agent 回報卡住：缺少 API 位址"})
   httpServer = server.makeServer(gitProject, 0, token)
   thread = threading.Thread(target=httpServer.serve_forever, daemon=True)
   thread.start()
@@ -103,10 +103,21 @@ def test_overviewShowsConductorGroupsAndAgents(dashboard, tmp_path):
   dom = renderDom(tmp_path, dashboard + "#token=" + token)
   assert "conductor" in dom and "沒有啟動" in dom
   assert "進行中 1 份 plan" in dom and "P0001 批次上傳" in dom
-  assert 'data-agent="claude-sub1"' in dom and 'data-agent="codex-sub1"' in dom
-  assert 'data-agent="codex-sub2"' not in dom
+  assert 'data-agent="writer-sub1"' in dom and 'data-agent="reviewer-sub1"' in dom
+  assert 'data-agent="reviewer-sub2"' not in dom
+  assert "Claude<span>（寫程式）</span>" in dom and "Codex<span>（審查）</span>" in dom
   assert "Write upload.py" in dom and "75%" in dom and "sonnet" in dom
   assert "唯讀" not in dom
+
+
+@needsBrowser
+def test_overviewShowsChosenCliPerRole(dashboard, gitProject, tmp_path):
+  (gitProject / ".board" / "config.json").write_text(json.dumps({
+    "maxParallel": 2, "writer": {"cli": "codex", "model": "gpt-6.1-sol"}, "reviewer": {"cli": "claude", "model": "opus"},
+  }), encoding="utf-8")
+  dom = renderDom(tmp_path, dashboard + "#token=" + token)
+  assert "Codex<span>（寫程式）</span>" in dom and "Claude<span>（審查）</span>" in dom
+  assert "gpt-6.1-sol" in dom and "opus" in dom
 
 
 @needsBrowser
@@ -147,4 +158,4 @@ def test_consoleShowsBusyAgentDetail(dashboard, tmp_path):
 def test_assistantGreetsAndOffersQuickAsks(dashboard, tmp_path):
   dom = renderDom(tmp_path, dashboard)
   assert "你好，我是儀表板助手" in dom
-  assert 'data-ask="等你處理的有哪些？"' in dom and 'data-ask="claude 在做什麼？"' in dom
+  assert 'data-ask="等你處理的有哪些？"' in dom and 'data-ask="writer 在做什麼？"' in dom

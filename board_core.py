@@ -30,11 +30,6 @@ defaultConfig = {
   "pollSeconds": 2,
   "writer": {"cli": "claude"},
   "reviewer": {"cli": "codex"},
-  "claudeCommand": None,
-  "codexCommand": None,
-  "claudeAllowedTools": [],
-  "claudeContextWindow": 200000,
-  "codexContextWindow": 475000,
   "tddCrap": False,
 }
 

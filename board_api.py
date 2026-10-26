@@ -5,12 +5,12 @@ from pathlib import Path
 import board_git
 import board_logs
 from board import approveWarnings, planBlockers, stopReason
-from board_core import (PlanStatus, TaskStatus, agentLanes, boardDir, deriveState, loadConfig, loadPlans,
-                        planTasks, readEvents, taskKey, tasksWithStatus)
+from board_core import (PlanStatus, TaskStatus, agentLanes, boardDir, configProblems, deriveState, loadConfig,
+                        loadPlans, planTasks, readEvents, readUserConfig, roleNames, roleSpec, taskKey,
+                        tasksWithStatus)
 from conductor import formatEvent, processAlive, readLockPid
 from rtm_graph import asList, formatList, parseArea
 
-agentGroups = ("claude", "codex")
 recentEventCount = 50
 userEventTypes = {"planApproved", "planRejected", "planAbandoned", "userDecision", "resumed"}
 emptyProblems = {"red": [], "orange": [], "yellow": []}
@@ -23,6 +23,8 @@ def loadSnapshot(projectDir):
   plans = loadPlans(projectDir, warnings)
   events = readEvents(projectDir)
   config = loadConfig(projectDir)
+  # 設定寫錯時 conductor 會拒絕啟動，儀表板也要說出原因
+  warnings += configProblems(readUserConfig(projectDir))
   return {"plans": plans, "events": events, "config": config, "warnings": warnings,
           "state": deriveState(events, plans, config)}
 
@@ -31,14 +33,6 @@ def conductorStatus(projectDir):
   pid = readLockPid(projectDir)
   running = bool(pid) and processAlive(pid)
   return {"running": running, "pid": pid if running else None}
-
-
-def commandModel(command):
-  if command and "--model" in command:
-    index = command.index("--model")
-    if index + 1 < len(command):
-      return command[index + 1]
-  return None
 
 
 def eventWho(event):
@@ -60,8 +54,8 @@ def eventView(event):
           "agent": event.get("agent"), "round": event.get("round"), "who": eventWho(event), "text": text.strip()}
 
 
-def agentGroupsOf(config):
-  return {agentId: group for group in agentGroups for agentId in agentLanes(group, config)}
+def agentRolesOf(config):
+  return {agentId: role for role in roleNames for agentId in agentLanes(role, config)}
 
 
 def busyTaskOf(state, agentId):
@@ -73,9 +67,10 @@ def busyTaskOf(state, agentId):
   return None, None
 
 
-def agentView(projectDir, snapshot, agentId, group):
+def agentView(projectDir, snapshot, agentId, role):
   state, config = snapshot["state"], snapshot["config"]
-  view = {"id": agentId, "group": group, "model": commandModel(config.get(f"{group}Command")),
+  spec = roleSpec(config, role)
+  view = {"id": agentId, "role": role, "cli": spec["cli"], "model": spec["model"],
           "status": "閒置", "plan": None, "task": None, "round": None,
           "action": None, "lastActivity": None, "context": None}
   if state["paused"]:
@@ -85,12 +80,12 @@ def agentView(projectDir, snapshot, agentId, group):
   if taskState is None:
     return view
   view.update(plan=taskState["plan"], task=taskState["task"], round=taskState["round"],
-              context={"tokens": None, "window": config[f"{group}ContextWindow"]})
+              context={"tokens": None, "window": spec["contextWindow"]})
   view["status"] = "審查中" if kind == "review" else ("解衝突中" if taskState["resolving"] else "寫程式中")
   logPath = board_logs.findLog(boardDir(projectDir) / "logs", taskState["plan"], taskState["task"],
                                taskState["round"], kind)
   if logPath:
-    summary = board_logs.logSummary(logPath, group, kind)
+    summary = board_logs.logSummary(logPath, spec["cli"], kind)
     view.update(action=summary["action"], lastActivity=summary["lastActivity"])
     view["context"]["tokens"] = summary["tokens"]
   return view
@@ -146,7 +141,7 @@ def stateView(projectDir):
   snapshot = loadSnapshot(projectDir)
   state = snapshot["state"]
   events = [event for event in snapshot["events"] if event.get("type")]
-  agents = agentGroupsOf(snapshot["config"])
+  agents = agentRolesOf(snapshot["config"])
   return {
     "project": str(Path(projectDir).resolve()),
     "paused": state["paused"],
@@ -156,7 +151,7 @@ def stateView(projectDir):
     "needsYou": needsYouView(projectDir, snapshot),
     "plans": [planSummary(snapshot, planIdValue) for planIdValue in snapshot["plans"]],
     "tasks": [taskView(projectDir, taskState) for taskState in state["tasks"].values()],
-    "agents": [agentView(projectDir, snapshot, agentId, group) for agentId, group in agents.items()],
+    "agents": [agentView(projectDir, snapshot, agentId, role) for agentId, role in agents.items()],
     "recentEvents": [eventView(event) for event in reversed(events[-recentEventCount:])],
   }
 
@@ -202,19 +197,20 @@ def lastJobOf(events, agentId):
   for event in reversed(events):
     if event.get("agent") == agentId and event.get("type") in ("taskStarted", "reviewStarted"):
       kind = "write" if event["type"] == "taskStarted" else "review"
-      return event.get("plan"), event.get("task"), event.get("round"), kind
+      return event.get("plan"), event.get("task"), event.get("round"), kind, (event.get("data") or {}).get("cli")
   return None
 
 
 def agentLogView(projectDir, agentId):
   snapshot = loadSnapshot(projectDir)
-  group = agentGroupsOf(snapshot["config"]).get(agentId)
-  if group is None:
+  role = agentRolesOf(snapshot["config"]).get(agentId)
+  if role is None:
     return None
+  spec = roleSpec(snapshot["config"], role)
   job = lastJobOf(snapshot["events"], agentId)
   if job is None:
     return {"agent": agentId, "file": None}
-  planIdValue, taskId, roundNumber, kind = job
+  planIdValue, taskId, roundNumber, kind, cli = job
   busyTask, _ = busyTaskOf(snapshot["state"], agentId)
   view = {"agent": agentId, "plan": planIdValue, "task": taskId, "round": roundNumber, "kind": kind,
           "file": None, "running": busyTask is not None, "messages": [], "tools": [], "context": None,
@@ -222,9 +218,10 @@ def agentLogView(projectDir, agentId):
   logPath = board_logs.findLog(boardDir(projectDir) / "logs", planIdValue, taskId, roundNumber, kind)
   if logPath is None:
     return view
-  detail = board_logs.logDetail(logPath, group, kind)
+  # log 是當時的 CLI 寫的；之後改了設定，也要照當時的格式解析
+  detail = board_logs.logDetail(logPath, cli or spec["cli"], kind)
   view.update(file=logPath.name, messages=detail["messages"], tools=detail["tools"], truncated=detail["truncated"],
-              context={"tokens": detail["tokens"], "window": snapshot["config"][f"{group}ContextWindow"]})
+              context={"tokens": detail["tokens"], "window": spec["contextWindow"]})
   return view
 
 
