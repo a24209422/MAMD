@@ -21,7 +21,7 @@ import board_api
 from board_core import BoardError, PlanStatus, roleChoiceText, saveRoleChoice
 
 webDir = Path(__file__).resolve().parent / "web"
-scriptNames = ["core", "overview", "plan", "ops", "console", "assistant", "main"]
+scriptNames = ["core", "overview", "plan", "ops", "console", "assistant", "models", "main"]
 staticFiles = {"/": ("index.html", "text/html; charset=utf-8")}
 staticFiles.update({f"/js/{name}.js": (f"js/{name}.js", "text/javascript; charset=utf-8") for name in scriptNames})
 maxBodyBytes = 64 * 1024

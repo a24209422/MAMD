@@ -106,7 +106,9 @@ python <agent-board>\install_skill.py
 
 - 兩個都不寫時：Claude 寫程式、Codex 審查，用各自的預設模型
 - 同時跑的 agent 身分（`writer`、`writer-sub1`…、`reviewer`…）都用所屬角色的設定
-- 改完要重開 conductor。換了寫程式的 CLI 之後，進行中的任務下一輪會開新對話，接不回上一輪
+- 也可以在儀表板的「模型」分頁改 `cli` 和 `model`，其他欄位還是要改設定檔。儀表板只接受英數字開頭、由英數字和 `. _ - : / [ ]` 組成的模型名稱；角色有自訂 `command` 時，要換 CLI 得先改設定檔
+- conductor 每一輪都會重讀 `writer`、`reviewer`：改了之後從下一個新啟動的 agent 開始用，正在跑的不受影響。其他設定（`maxParallel`、`testCommand` 等）改了要重開 conductor
+- 換了寫程式的 CLI 或模型之後，進行中的任務下一輪會開新對話，接不回上一輪
 - 權限：
   - Claude 寫程式：只能執行 `testCommand` 和 `allowedTools` 列的指令
   - Codex 寫程式：在 `workspace-write` 沙箱裡，只能寫入這個任務的 worktree，但不能限制它執行哪些指令
@@ -132,7 +134,7 @@ python <agent-board>\install_skill.py
 
 ## 儀表板
 
-在瀏覽器看即時狀態，也可以在網頁上核准、退回、放棄、`decide`、停止和繼續。
+在瀏覽器看即時狀態，也可以在網頁上核准、退回、放棄、`decide`、停止和繼續，以及在「模型」分頁換寫程式、審查的 CLI 和模型（見「換模型」）。
 
 1. 在你自己開的終端機執行（不能讓 agent 啟動：網址裡的 token 等於核准權限）：
 

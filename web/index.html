@@ -1097,6 +1097,26 @@ button, input, select { font: inherit; color: inherit; }
 .tool-list details { display: grid; gap: 6px; padding: 6px 8px; border: 1px dashed var(--line-2); }
 .tool-list summary { cursor: pointer; color: var(--fg); font-size: 12px; overflow-wrap: anywhere; }
 
+/* ---------- 模型：寫程式、審查各自選 CLI 和模型 ---------- */
+.models-page { gap: 26px; align-content: start; }
+.models-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap); }
+.role-setting { gap: 12px; }
+.field { display: grid; gap: 4px; color: var(--fg-3); font: 12px/1.5 var(--font-cjk); }
+.field select, .field input {
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--ground);
+  border: 1px solid var(--line-2);
+  color: var(--fg);
+  font: 12.5px/1.5 var(--font-mono);
+}
+.field select:disabled, .field input:disabled { opacity: 0.55; cursor: not-allowed; }
+.role-actions { display: flex; justify-content: flex-end; }
+.models-tips { margin: 0; padding-left: 1.2em; display: grid; gap: 4px; color: var(--fg-2); font: 12px/1.6 var(--font-cjk); }
+@container stage (max-width: 900px) {
+  .models-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* ---------- 窄螢幕 ----------
    stage：中間區域的寬度，兩側欄展開收合都會變
    tiers：總覽裡三層卡片那一塊的寬度，左邊多了切換格，所以跟 stage 分開算 */
@@ -1316,12 +1336,27 @@ button, input, select { font: inherit; color: inherit; }
           </section>
         </section>
 
+        <!-- 模型：寫程式、審查各自選 CLI 和模型 -->
+        <section class="page models-page" data-page="models" aria-label="模型" hidden>
+          <div class="models-grid" id="modelsBody"></div>
+          <section class="boxed" aria-label="說明">
+            <span class="box-label">說明</span>
+            <ul class="models-tips">
+              <li>存檔後，conductor 從下一個新啟動的 agent 開始用新設定；正在跑的 agent 不受影響</li>
+              <li>換了 CLI 或模型之後，進行中的任務下一輪會開新對話</li>
+              <li>第三層的 agent 身分都跟著所屬角色的設定</li>
+              <li>寫 plan 的 agent 是你自己開的，模型在開的時候選</li>
+              <li>command、allowedTools、contextWindow 要改 .board/config.json</li>
+            </ul>
+          </section>
+        </section>
+
         <!-- 其他跳轉頁：還沒有內容 -->
         <section class="page" data-page="placeholder" hidden>
           <div class="boxed empty">
             <span class="box-label" id="emptyLabel">任務</span>
             <strong>這一頁還沒有內容</strong>
-            <p class="muted">目前有畫面的是「總覽」、「任務」（plan 追溯樹）和「控制台」（agent 身分的詳細資料）。</p>
+            <p class="muted">目前有畫面的是「總覽」、「任務」（plan 追溯樹）、「模型」和「控制台」（agent 身分的詳細資料）。</p>
           </div>
         </section>
       </div>
@@ -1357,6 +1392,7 @@ button, input, select { font: inherit; color: inherit; }
 <script src="js/ops.js"></script>
 <script src="js/console.js"></script>
 <script src="js/assistant.js"></script>
+<script src="js/models.js"></script>
 <script src="js/main.js"></script>
 </body>
 </html>

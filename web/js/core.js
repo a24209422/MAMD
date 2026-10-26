@@ -9,7 +9,7 @@ const pages = [
   { key: 'topology', label: '拓撲', icon: 'nodes' },
   { key: 'settings', label: '設定', icon: 'gear' },
 ];
-const builtPages = ['overview', 'tasks', 'console'];
+const builtPages = ['overview', 'tasks', 'models', 'console'];
 const iconPaths = {
   expand: '<path d="M5 6l6 6-6 6M12 6l6 6-6 6"/>',
   grid: '<rect x="4" y="4" width="7" height="7"/><rect x="13" y="4" width="7" height="7"/><rect x="4" y="13" width="7" height="7"/><rect x="13" y="13" width="7" height="7"/>',

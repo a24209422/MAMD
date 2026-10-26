@@ -159,3 +159,15 @@ def test_assistantGreetsAndOffersQuickAsks(dashboard, tmp_path):
   dom = renderDom(tmp_path, dashboard)
   assert "你好，我是儀表板助手" in dom
   assert 'data-ask="等你處理的有哪些？"' in dom and 'data-ask="writer 在做什麼？"' in dom
+
+
+@needsBrowser
+def test_modelsPageShowsRoleSettings(dashboard, tmp_path):
+  dom = renderDom(tmp_path, dashboard + "#models")
+  section = re.search(r'<section class="page models-page"[^>]*>', dom)
+  assert section and "hidden" not in section.group(0)
+  assert "目前：Claude・sonnet" in dom and "目前：Codex・預設模型" in dom
+  assert 'data-draft="role-model:writer" value="sonnet"' in dom
+  assert '<option value="opus"></option>' in dom
+  # 沒帶 token 只能看
+  assert 'data-save-role="writer" disabled' in dom
