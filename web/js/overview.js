@@ -52,8 +52,8 @@ function renderGroups(state) {
   $('#pair').innerHTML = Object.entries(roleInfo).map(([role, info]) => {
     const agents = roleAgents(state, role);
     const busy = agents.filter(agent => busyStatuses.includes(agent.status));
-    const model = agents.length ? agents[0].model : null;
-    const cli = agents.length ? agents[0].cli : null;
+    // 標題照設定檔的角色設定；第一個身分可能還在用換設定之前的 CLI 跑
+    const { cli, model } = state.roles[role];
     const stateKey = state.paused ? 'paused' : busy.length ? 'run' : 'idle';
     const stateLabel = { paused: '已暫停', run: '運行中', idle: '閒置' }[stateKey];
     const doing = state.paused ? '已暫停' : busy.length ? `${busy.length} 個${info.busyText}` : '閒置';

@@ -5,9 +5,9 @@ from pathlib import Path
 import board_git
 import board_logs
 from board import approveWarnings, planBlockers, stopReason
-from board_core import (PlanStatus, TaskStatus, agentLanes, boardDir, configProblems, deriveState, loadConfig,
-                        loadPlans, planTasks, readEvents, readUserConfig, roleNames, roleSpec, taskKey,
-                        tasksWithStatus)
+from board_core import (PlanStatus, TaskStatus, agentLanes, boardDir, configProblems, defaultContextWindows,
+                        deriveState, loadConfig, loadPlans, planTasks, readEvents, readUserConfig, roleNames,
+                        roleSpec, taskKey, tasksWithStatus)
 from conductor import formatEvent, processAlive, readLockPid
 from rtm_graph import asList, formatList, parseArea
 
@@ -67,6 +67,25 @@ def busyTaskOf(state, agentId):
   return None, None
 
 
+def runningLaunch(taskState, kind, spec):
+  # 忙碌中的 agent 照它啟動時記下的 CLI、模型；中途換了設定也不會用錯格式解析 log。舊事件沒記的照設定
+  if kind == "review":
+    cli, model = taskState["reviewCli"], taskState["reviewModel"]
+  else:
+    cli, model = taskState["sessionCli"], taskState["sessionModel"]
+  return (cli, model) if cli else (spec["cli"], spec["model"])
+
+
+def contextWindowFor(spec, cli):
+  # 設定的 contextWindow 是給設定裡的 CLI 用的；跑的是另一個 CLI 時用那個 CLI 的預設值
+  return spec["contextWindow"] if cli == spec["cli"] else defaultContextWindows.get(cli)
+
+
+def roleView(config, role):
+  spec = roleSpec(config, role)
+  return {"cli": spec["cli"], "model": spec["model"], "customCommand": bool(spec["command"])}
+
+
 def agentView(projectDir, snapshot, agentId, role):
   state, config = snapshot["state"], snapshot["config"]
   spec = roleSpec(config, role)
@@ -79,13 +98,14 @@ def agentView(projectDir, snapshot, agentId, role):
   taskState, kind = busyTaskOf(state, agentId)
   if taskState is None:
     return view
-  view.update(plan=taskState["plan"], task=taskState["task"], round=taskState["round"],
-              context={"tokens": None, "window": spec["contextWindow"]})
+  cli, model = runningLaunch(taskState, kind, spec)
+  view.update(plan=taskState["plan"], task=taskState["task"], round=taskState["round"], cli=cli, model=model,
+              context={"tokens": None, "window": contextWindowFor(spec, cli)})
   view["status"] = "審查中" if kind == "review" else ("解衝突中" if taskState["resolving"] else "寫程式中")
   logPath = board_logs.findLog(boardDir(projectDir) / "logs", taskState["plan"], taskState["task"],
                                taskState["round"], kind)
   if logPath:
-    summary = board_logs.logSummary(logPath, spec["cli"], kind)
+    summary = board_logs.logSummary(logPath, cli, kind)
     view.update(action=summary["action"], lastActivity=summary["lastActivity"])
     view["context"]["tokens"] = summary["tokens"]
   return view
@@ -148,6 +168,7 @@ def stateView(projectDir):
     "pauseReason": state["pauseReason"],
     "conductor": conductorStatus(projectDir),
     "warnings": snapshot["warnings"],
+    "roles": {role: roleView(snapshot["config"], role) for role in roleNames},
     "needsYou": needsYouView(projectDir, snapshot),
     "plans": [planSummary(snapshot, planIdValue) for planIdValue in snapshot["plans"]],
     "tasks": [taskView(projectDir, taskState) for taskState in state["tasks"].values()],
@@ -219,9 +240,10 @@ def agentLogView(projectDir, agentId):
   if logPath is None:
     return view
   # log 是當時的 CLI 寫的；之後改了設定，也要照當時的格式解析
-  detail = board_logs.logDetail(logPath, cli or spec["cli"], kind)
+  cli = cli or spec["cli"]
+  detail = board_logs.logDetail(logPath, cli, kind)
   view.update(file=logPath.name, messages=detail["messages"], tools=detail["tools"], truncated=detail["truncated"],
-              context={"tokens": detail["tokens"], "window": spec["contextWindow"]})
+              context={"tokens": detail["tokens"], "window": contextWindowFor(spec, cli)})
   return view
 
 

@@ -172,3 +172,20 @@ def test_refusesToStartWithoutConsole(gitProject):
                              stdin=subprocess.PIPE, timeout=60)
   assert completed.returncode == 2
   assert "只能由使用者在終端機啟動" in completed.stdout
+
+
+def test_saveRoleWritesConfigAndRejectsBadInput(running):
+  projectDir, port = running
+  configFile = projectDir / ".board" / "config.json"
+  assert post(port, "/api/roles/writer", {"cli": "codex"}, withToken="wrong")[0] == 403
+  assert post(port, "/api/roles/boss", {"cli": "codex"})[0] == 404
+  assert post(port, "/api/roles/writer", {"cli": 3})[0] == 400
+  status, payload = post(port, "/api/roles/writer", {"cli": "codex", "model": "gpt&calc"})
+  assert status == 400 and payload["ok"] is False and "模型名稱" in payload["message"]
+  assert not configFile.exists()
+  status, payload = post(port, "/api/roles/writer", {"cli": "codex", "model": " gpt-6.1-sol "})
+  assert status == 200 and payload["ok"] is True
+  assert payload["message"] == "已儲存：writer 改用 Codex（gpt-6.1-sol），從下一個新啟動的 agent 開始用"
+  assert json.loads(configFile.read_text(encoding="utf-8")) == {"writer": {"cli": "codex", "model": "gpt-6.1-sol"}}
+  _, state = call(port, "GET", "/api/state")
+  assert state["roles"]["writer"] == {"cli": "codex", "model": "gpt-6.1-sol", "customCommand": False}

@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 
 import board
 import board_api
-from board_core import BoardError, PlanStatus
+from board_core import BoardError, PlanStatus, roleChoiceText, saveRoleChoice
 
 webDir = Path(__file__).resolve().parent / "web"
 scriptNames = ["core", "overview", "plan", "ops", "console", "assistant", "main"]
@@ -42,6 +42,7 @@ postRoutes = [
   (re.compile(rf"^/api/tasks/({idText})/({idText})/decide$"), "decide"),
   (re.compile(r"^/api/stop$"), "stop"),
   (re.compile(r"^/api/resume$"), "resume"),
+  (re.compile(r"^/api/roles/(writer|reviewer)$"), "saveRole"),
 ]
 
 
@@ -103,6 +104,19 @@ class Dashboard:
 
   def resume(self, body):
     return 200, self.runCommand(board.cmdResume)
+
+  def saveRole(self, role, body):
+    cli, model = body.get("cli"), body.get("model") or ""
+    if not isinstance(cli, str) or not isinstance(model, str):
+      return 400, {"ok": False, "message": "cli、model 要是文字"}
+    model = model.strip()
+    # 和其他寫入共用鎖：兩個分頁同時存，讀改寫才不會互相蓋掉
+    with self.writeLock:
+      try:
+        saveRoleChoice(self.projectDir, role, cli, model)
+      except BoardError as error:
+        return 400, {"ok": False, "message": str(error)}
+    return 200, {"ok": True, "message": f"已儲存：{role} 改用 {roleChoiceText(cli, model)}，從下一個新啟動的 agent 開始用"}
 
   def reportError(self, error):
     message = f"{type(error).__name__}: {error}"

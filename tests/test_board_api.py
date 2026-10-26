@@ -240,7 +240,7 @@ def test_taskDiffViewBranchPendingMergedAndMissing(approvedProject):
 def test_swappedRolesUseEachCliFormat(approvedProject):
   writeConfig(approvedProject, writer={"cli": "codex", "model": "gpt-6.1-sol"}, reviewer={"cli": "claude", "model": "opus"})
   appendEvent(approvedProject, "taskStarted", plan="P0001", task="T1", agent="writer", roundNumber=1,
-              data={"mode": "write", "cli": "codex"})
+              data={"mode": "write", "cli": "codex", "model": "gpt-6.1-sol"})
   writeLog(approvedProject, "P0001-T1-r1-write-20261026-100000.log", codexLog)
   agents = agentsById(board_api.stateView(approvedProject))
   assert (agents["writer"]["cli"], agents["writer"]["model"]) == ("codex", "gpt-6.1-sol")
@@ -263,3 +263,35 @@ def test_badCliStillShowsWarningInsteadOfCrashing(approvedProject):
   view = board_api.stateView(approvedProject)
   assert view["warnings"] == ["writer.cli 只能是 claude 或 codex，現在是 ['codex']"]
   assert agentsById(view)["writer"]["context"] is None
+
+
+def test_stateViewListsRoleSettings(approvedProject):
+  writeConfig(approvedProject, writer={"cli": "codex", "model": "gpt-6.1-sol", "command": ["C:/tools/codex.cmd"]})
+  assert board_api.stateView(approvedProject)["roles"] == {
+    "writer": {"cli": "codex", "model": "gpt-6.1-sol", "customCommand": True},
+    "reviewer": {"cli": "codex", "model": None, "customCommand": False},
+  }
+
+
+def test_busyAgentsShowSettingsTheyStartedWith(approvedProject):
+  # 設定已經換成 Claude（opus）寫程式、Codex 審查，還在跑的是換設定之前啟動的 agent
+  writeConfig(approvedProject, writer={"cli": "claude", "model": "opus"}, reviewer={"cli": "codex"})
+  appendEvent(approvedProject, "taskStarted", plan="P0001", task="T1", agent="writer", roundNumber=1,
+              data={"mode": "write", "cli": "codex", "model": "gpt-6.1-sol"})
+  writeLog(approvedProject, "P0001-T1-r1-write-20261026-100000.log", codexLog)
+  appendEvent(approvedProject, "taskStarted", plan="P0001", task="T2", agent="writer-sub1", roundNumber=1,
+              data={"mode": "write"})
+  appendEvent(approvedProject, "taskWritten", plan="P0001", task="T2", agent="writer-sub1", roundNumber=1,
+              data={"commit": "abc", "mode": "write"})
+  appendEvent(approvedProject, "reviewStarted", plan="P0001", task="T2", agent="reviewer", roundNumber=1,
+              data={"cli": "claude", "model": "sonnet"})
+  writeLog(approvedProject, "P0001-T2-r1-review1-20261026-100500.log", claudeLog)
+  agents = agentsById(board_api.stateView(approvedProject))
+  writer, reviewer = agents["writer"], agents["reviewer"]
+  assert (writer["cli"], writer["model"], writer["action"]) == ("codex", "gpt-6.1-sol", "回覆寫程式結果")
+  assert writer["context"] == {"tokens": 18094, "window": 475000}
+  assert (reviewer["cli"], reviewer["model"]) == ("claude", "sonnet")
+  assert reviewer["context"]["window"] == 200000 and reviewer["context"]["tokens"] is not None
+  # 閒置的身分照目前的設定
+  assert (agents["writer-sub1"]["cli"], agents["writer-sub1"]["model"]) == ("claude", "opus")
+  assert board_api.agentLogView(approvedProject, "writer")["context"] == {"tokens": 18094, "window": 475000}
