@@ -1,4 +1,4 @@
-"""agent-board 指令列：Codex 寫 plan 時用的 submit／status，以及你操作用的指令。
+"""agent-board 指令列：寫 plan 的 agent（Codex 或 Claude）用的 submit／status，以及你操作用的指令。
 
 用法：python board.py [--project 專案資料夾] <指令> ...
 """
@@ -25,6 +25,12 @@ tddPackages = ["pytest", "coverage", "radon"]
 agentsStartMarker = "<!-- agent-board:start（board.py init 產生，重跑 init 會整段換成最新版） -->"
 agentsEndMarker = "<!-- agent-board:end -->"
 requiredIgnores = [".board/", "plans/_review/"]
+planSkillPath = Path(".claude") / "skills" / "agent-board-plan" / "SKILL.md"
+planSkillMarker = "<!-- agent-board:skill（board.py init 產生，重跑 init 會整份換成最新版） -->"
+# disable-model-invocation：只有使用者打 /agent-board-plan 才會用，寫程式的 Claude 不會自己叫出來
+planSkillFrontmatter = ("---\nname: agent-board-plan\n"
+                        "description: 照 agent-board 的流程把需求寫成 plan 並送出，只寫 plan、不寫程式\n"
+                        "disable-model-invocation: true\n---")
 
 
 def hasWindowsConsole(stream):
@@ -142,7 +148,7 @@ def cmdApprove(projectDir, planIdValue, confirm=input):
   # submit 之後 plan 檔仍可能被改；核准時要用和 submit 相同的標準再擋一次，否則沒有編號的任務會進到快照
   blockers = planBlockers(plans[planIdValue])
   if blockers:
-    print(f"{planIdValue} 送出後又被改出問題，不能核准，請 Codex 修好再送出：")
+    print(f"{planIdValue} 送出後又被改出問題，不能核准，請寫 plan 的 agent 修好再送出：")
     for message in blockers:
       print("  紅｜" + message)
     return 1
@@ -171,7 +177,7 @@ def cmdReject(projectDir, planIdValue, reason):
     print(f"{planIdValue} 不是「待核准」，不能退回")
     return 1
   appendEvent(projectDir, "planRejected", plan=planIdValue, data={"reason": reason})
-  print(f"{planIdValue} 已退回。請到 Codex 終端機請它照原因修改後再送出。")
+  print(f"{planIdValue} 已退回。請寫 plan 的 agent（Codex 或 Claude）照原因修改後再送出。")
   return 0
 
 
@@ -281,12 +287,15 @@ def agentsProblem(text):
   return None
 
 
+def renderedSnippet():
+  # 每個人 clone 的位置不同，寫 plan 的 agent 要照規則裡的路徑執行 submit，寫入時換成這份 board.py 的實際位置
+  boardPy = f'"{boardPyPath}"' if " " in str(boardPyPath) else str(boardPyPath)
+  return snippetPath.read_text(encoding="utf-8").strip("\n").replace("{{boardPy}}", boardPy)
+
+
 def updatedAgents(text):
   eol = lineEnding(text)
-  # 每個人 clone 的位置不同，Codex 要照 AGENTS.md 裡的路徑執行 submit，寫入時換成這份 board.py 的實際位置
-  boardPy = f'"{boardPyPath}"' if " " in str(boardPyPath) else str(boardPyPath)
-  snippet = snippetPath.read_text(encoding="utf-8").strip("\n").replace("{{boardPy}}", boardPy)
-  block =eol.join([agentsStartMarker, *snippet.split("\n"), agentsEndMarker]) + eol
+  block = eol.join([agentsStartMarker, *renderedSnippet().split("\n"), agentsEndMarker]) + eol
   lines = text.splitlines(keepends=True)
   starts, ends = agentsMarkers([line.rstrip("\r\n") for line in lines])
   if starts:
@@ -294,6 +303,18 @@ def updatedAgents(text):
   if not text:
     return block
   return withTrailingNewline(text, eol) + eol + block
+
+
+def planSkillText():
+  return "\n".join([planSkillFrontmatter, "", planSkillMarker, "", "使用者在 /agent-board-plan 後面寫的就是需求。", "",
+                    renderedSnippet()]) + "\n"
+
+
+def planSkillProblem(text):
+  # 同名的 skill 沒有 init 的標記，可能是使用者自己寫的，不覆蓋
+  if text and planSkillMarker not in text:
+    return f"{planSkillPath.as_posix()} 已經存在但不是 init 產生的，請先改名或刪掉再執行 init"
+  return None
 
 
 def updatedGitignore(text):
@@ -359,8 +380,9 @@ def cmdInit(projectDir, tdd=False, sources=None, testsDir=None):
   elif not board_git.runGit(projectDir, "rev-parse", "--verify", "-q", "HEAD", check=False):
     problems.append("還沒有任何 commit：先 commit 一次，conductor 要從目前的 commit 開 plan 分支")
   agentsPath, ignorePath = projectDir / "AGENTS.md", projectDir / ".gitignore"
-  agentsText = readKeepingNewlines(agentsPath)
-  problems += [problem for problem in [agentsProblem(agentsText)] if problem]
+  skillPath = projectDir / planSkillPath
+  agentsText, skillText = readKeepingNewlines(agentsPath), readKeepingNewlines(skillPath)
+  problems += [problem for problem in [agentsProblem(agentsText), planSkillProblem(skillText)] if problem]
   config, command = None, None
   if tdd:
     config, configProblem = readRawConfig(projectDir)
@@ -393,6 +415,14 @@ def cmdInit(projectDir, tdd=False, sources=None, testsDir=None):
     print(f".gitignore：補上 {'、'.join(missing)}")
   else:
     print(".gitignore：已是最新")
+  newSkill, skillName = planSkillText(), planSkillPath.as_posix()
+  if newSkill == skillText:
+    print(f"{skillName}：已是最新")
+  else:
+    writeKeepingNewlines(skillPath, newSkill)
+    changed.append(skillName)
+    print(f"{skillName}：{'已換成最新版' if skillText else '已建立'}"
+          "（在 Claude Code 打 /agent-board-plan 加上需求，就由 Claude 寫 plan）")
   if tdd:
     config.update(tddCrap=True, testCommand=command)
     writeKeepingNewlines(boardDir(projectDir) / "config.json", json.dumps(config, ensure_ascii=False, indent=2) + "\n")
@@ -410,7 +440,7 @@ def cmdInit(projectDir, tdd=False, sources=None, testsDir=None):
     print(f"  git add {' '.join(changed)}")
     print('  git commit -m "啟用 agent-board"')
   else:
-    print("AGENTS.md、.gitignore 都沒有改動，不用 commit")
+    print("AGENTS.md、.gitignore、agent-board-plan skill 都沒有改動，不用 commit")
   return 0
 
 
@@ -435,7 +465,7 @@ def buildParser():
   sub.add_parser("cleanup").add_argument("plan")
   sub.add_parser("index")
   init = sub.add_parser("init")
-  init.add_argument("--tdd", action="store_true", help="Claude 照 tdd-crap 寫程式（只適用 Python 專案）")
+  init.add_argument("--tdd", action="store_true", help="寫程式的 agent 照 tdd-crap 寫程式（只適用 Python 專案）")
   init.add_argument("--source", action="append", help="原始碼資料夾，可以重複，預設 src")
   init.add_argument("--tests", help="測試資料夾，預設 tests")
   return parser

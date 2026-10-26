@@ -202,7 +202,7 @@ def test_stopWritesReasonConstant(gitProject):
   assert board_core.readEvents(gitProject)[-1]["data"] == {"reason": board.stopReason}
 
 
-snippetHeading = "## agent-board 流程（Codex 寫 plan 時遵守）"
+snippetHeading = "## agent-board 流程（寫 plan 的 agent 遵守）"
 
 
 def readRaw(path):
@@ -238,7 +238,7 @@ def test_initCreatesAgentsAndGitignore(gitProject, capsys):
   snippet = (toolDir / "docs" / "AGENTS-snippet.md").read_text(encoding="utf-8").strip()
   assert snippet.replace("{{boardPy}}", str(board.boardPyPath)) in agents
   assert readRaw(gitProject / ".gitignore") == ".board/\nplans/_review/\n"
-  assert "git add AGENTS.md .gitignore" in capsys.readouterr().out
+  assert "git add AGENTS.md .gitignore .claude/skills/agent-board-plan/SKILL.md" in capsys.readouterr().out
   assert not (gitProject / ".board").exists()
 
 
@@ -288,6 +288,7 @@ def test_initRefusesManuallyPastedRules(gitProject, capsys):
   assert "第 3 行" in capsys.readouterr().out
   assert readRaw(gitProject / "AGENTS.md") == original
   assert not (gitProject / ".gitignore").exists()
+  assert not (gitProject / ".claude").exists()
 
 
 def test_initNeedsGitRepoWithCommit(tmp_path, capsys):
@@ -341,6 +342,7 @@ def test_initTddChecksEverythingBeforeWriting(gitProject, fakeTddCrap, monkeypat
   out = capsys.readouterr().out
   assert "找不到 tdd-crap" in out and "install_skill.py" in out
   assert not (gitProject / "AGENTS.md").exists() and not (gitProject / ".gitignore").exists()
+  assert not (gitProject / ".claude").exists()
 
 
 def test_initCommandLine(gitProject):
@@ -349,3 +351,25 @@ def test_initCommandLine(gitProject):
   completed = runInit(gitProject)
   assert completed.returncode == 0 and "AGENTS.md" in completed.stdout
   assert (gitProject / "AGENTS.md").exists()
+
+
+def test_initWritesPlanSkillForClaude(gitProject, capsys):
+  assert board.cmdInit(gitProject) == 0
+  skill = readRaw(gitProject / ".claude" / "skills" / "agent-board-plan" / "SKILL.md")
+  assert skill.startswith("---\nname: agent-board-plan\n")
+  assert "disable-model-invocation: true" in skill and board.planSkillMarker in skill
+  assert snippetHeading in skill
+  assert f"python {Path(board.__file__).resolve()} submit P0007" in skill
+  capsys.readouterr()
+  assert board.cmdInit(gitProject) == 0
+  out = capsys.readouterr().out
+  assert ".claude/skills/agent-board-plan/SKILL.md：已是最新" in out and "不用 commit" in out
+
+
+def test_initRefusesSkillItDidNotWrite(gitProject, capsys):
+  mine = "---\nname: agent-board-plan\n---\n我自己的\n"
+  writeRaw(gitProject / ".claude" / "skills" / "agent-board-plan" / "SKILL.md", mine)
+  assert board.cmdInit(gitProject) == 1
+  assert "不是 init 產生的" in capsys.readouterr().out
+  assert readRaw(gitProject / ".claude" / "skills" / "agent-board-plan" / "SKILL.md") == mine
+  assert not (gitProject / "AGENTS.md").exists()

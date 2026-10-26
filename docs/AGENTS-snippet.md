@@ -1,4 +1,4 @@
-## agent-board 流程（Codex 寫 plan 時遵守）
+## agent-board 流程（寫 plan 的 agent 遵守）
 
 使用者說需求時，你負責寫 plan，不要自己寫程式。
 
