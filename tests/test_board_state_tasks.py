@@ -234,3 +234,22 @@ def test_writeWithoutClaudeStillClearsNeedsClean():
                          conflicts=[])
   state = task(stateAfter(*passCycle(1), conflicted(), started(2), failed, cleanWrite))
   assert state["needsClean"] is False
+
+
+def test_codexSessionIsRememberedWhenWritten():
+  start = makeEvent("taskStarted", plan="P0001", task="T1", roundNumber=1, agent="writer", sessionId=None, cli="codex")
+  writtenEvent = makeEvent("taskWritten", plan="P0001", task="T1", commit="c1", sessionId="thread-1", cli="codex")
+  state = task(stateAfter(start, writtenEvent))
+  assert (state["sessionId"], state["sessionCli"], state["resumable"]) == ("thread-1", "codex", True)
+
+
+def test_startEventsWithoutCliAreClaudeSessions():
+  state = task(stateAfter(started(1)))
+  assert (state["sessionId"], state["sessionCli"]) == ("session-1", "claude")
+
+
+def test_blockedRemembersCodexSession():
+  start = makeEvent("taskStarted", plan="P0001", task="T1", roundNumber=1, agent="writer", sessionId=None, cli="codex")
+  blocked = makeEvent("taskBlocked", plan="P0001", task="T1", reason="缺資料", sessionId="thread-9", cli="codex")
+  state = task(stateAfter(start, blocked))
+  assert (state["sessionId"], state["sessionCli"]) == ("thread-9", "codex")

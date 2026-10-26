@@ -14,8 +14,9 @@ from pathlib import Path
 
 import board_agents
 import board_git
-from board_core import (BoardError, PlanStatus, TaskStatus, agentLanes, appendEvent, boardDir, deriveState,
-                        isPlanFinished, loadConfig, loadPlans, readEvents, readyTasks, taskKey, tasksWithStatus)
+from board_core import (BoardError, PlanStatus, TaskStatus, agentLanes, appendEvent, boardDir, configProblems,
+                        deriveState, isPlanFinished, loadConfig, loadPlans, readEvents, readUserConfig, readyTasks,
+                        taskKey, tasksWithStatus)
 from board_prompts import buildResolvePrompt, buildReviewPrompt, buildWritePrompt, claudeRules, codexRules
 from board_review import (codexReviewSchema, renderReviewMarkdown, reviewFileName, validateClaudeResult,
                           validateReview)
@@ -570,6 +571,12 @@ def main(argv=None):
   # 不是 git repo 時 worktree、commit、合併全都做不了，與其每一輪都報錯，不如一開始就停
   if board_git.runGit(projectDir, "rev-parse", "--is-inside-work-tree", check=False) != "true":
     print(f"{projectDir} 不是 git repo，conductor 需要用 git 建立 worktree")
+    return 1
+  problems = configProblems(readUserConfig(projectDir))
+  if problems:
+    print(".board/config.json 要先修正：")
+    for problem in problems:
+      print("  " + problem)
     return 1
   # 兩個 conductor 同時跑時，後開的會把前一個正在跑的任務當成中斷並清掉 worktree
   if not acquireConductorLock(projectDir):

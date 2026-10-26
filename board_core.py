@@ -11,12 +11,25 @@ from rtm_graph import analyzePlan, asList, planId
 boardDirName = ".board"
 eventsFileName = "events.jsonl"
 lockFileName = "events.lock"
+roleNames = ("writer", "reviewer")
+cliNames = ("claude", "codex")
+defaultContextWindows = {"claude": 200000, "codex": 475000}
+# 舊版設定的 key 和新寫法；conductor 看到舊的就拒絕啟動，免得設定被默默忽略
+legacyConfigKeys = {
+  "claudeCommand": "writer.command",
+  "codexCommand": "reviewer.command",
+  "claudeAllowedTools": "writer.allowedTools",
+  "claudeContextWindow": "writer.contextWindow",
+  "codexContextWindow": "reviewer.contextWindow",
+}
 defaultConfig = {
   "maxParallel": 3,
   "maxRounds": 3,
   "timeoutMinutes": 30,
   "testCommand": "",
   "pollSeconds": 2,
+  "writer": {"cli": "claude"},
+  "reviewer": {"cli": "codex"},
   "claudeCommand": None,
   "codexCommand": None,
   "claudeAllowedTools": [],
@@ -34,12 +47,49 @@ def boardDir(projectDir):
   return Path(projectDir) / boardDirName
 
 
+def readUserConfig(projectDir):
+  configPath = boardDir(projectDir) / "config.json"
+  if not configPath.exists():
+    return {}
+  return json.loads(configPath.read_text(encoding="utf-8-sig"))
+
+
 def loadConfig(projectDir):
   config = dict(defaultConfig)
-  configPath = boardDir(projectDir) / "config.json"
-  if configPath.exists():
-    config.update(json.loads(configPath.read_text(encoding="utf-8-sig")))
+  config.update(readUserConfig(projectDir))
   return config
+
+
+def roleSpec(config, role):
+  raw = config.get(role)
+  # 寫錯格式時 configProblems 會擋下 conductor；這裡只求不當掉，儀表板才看得到警告
+  raw = raw if isinstance(raw, dict) else {}
+  cli = raw.get("cli") or defaultConfig[role]["cli"]
+  return {"cli": cli, "model": raw.get("model") or None, "command": raw.get("command") or None,
+          "contextWindow": raw.get("contextWindow") or defaultContextWindows.get(cli),
+          "allowedTools": list(raw.get("allowedTools") or [])}
+
+
+def configProblems(userConfig):
+  problems = [f"{key} 已經不用了，請改寫成 {replacement}（見 README 的「換模型」）"
+              for key, replacement in legacyConfigKeys.items() if key in userConfig]
+  for role in roleNames:
+    if role not in userConfig:
+      continue
+    raw = userConfig[role]
+    if not isinstance(raw, dict):
+      problems.append(f'{role} 要寫成物件，例如 {{"cli": "claude", "model": "opus"}}')
+      continue
+    cli = raw.get("cli", defaultConfig[role]["cli"])
+    if cli not in cliNames:
+      problems.append(f"{role}.cli 只能是 claude 或 codex，現在是 {cli}")
+    if raw.get("model") is not None and not isinstance(raw["model"], str):
+      problems.append(f'{role}.model 要是文字，例如 "opus"')
+    command = raw.get("command")
+    if command is not None and not (isinstance(command, list) and command
+                                    and all(isinstance(part, str) for part in command)):
+      problems.append(f'{role}.command 要是文字陣列，例如 ["C:/tools/claude.exe"]')
+  return problems
 
 
 def nowText():
@@ -150,7 +200,8 @@ def newTaskState(planIdValue, task, config):
     "plan": planIdValue, "task": task["id"], "text": task["text"],
     "dependsOn": list(task["dependsOn"]), "requirementIds": list(task["requirementIds"]),
     "status": TaskStatus.queued, "round": 1, "maxRounds": config["maxRounds"],
-    "agent": None, "reviewAgent": None, "sessionId": None, "resumable": False, "needsClean": False,
+    "agent": None, "reviewAgent": None, "sessionId": None, "sessionCli": None, "resumable": False,
+    "needsClean": False,
     "failStreak": 0, "needs": None, "userNote": "", "userDone": False,
     "reviews": [], "lastReviewNotes": None, "lastCommit": None, "lastTest": None,
     "resolving": False, "conflictFiles": [], "conflictCount": 0, "lastWriteMode": "write",
@@ -208,9 +259,18 @@ def onTaskStarted(taskState, event):
   taskState["round"] = event["round"]
   taskState["agent"] = event["agent"]
   taskState["sessionId"] = event["data"].get("sessionId")
+  # 這個版本之前只有 Claude 寫程式，舊事件沒有 cli 就是 Claude 的對話
+  taskState["sessionCli"] = event["data"].get("cli", "claude")
   taskState["needsClean"] = False
   taskState["needs"] = None
   taskState["userDone"] = False
+
+
+def rememberSession(taskState, data):
+  # Codex 的對話編號要等它跑起來才知道，所以寫完、卡住時再記一次
+  if data.get("sessionId"):
+    taskState["sessionId"] = data["sessionId"]
+    taskState["sessionCli"] = data.get("cli", taskState["sessionCli"])
 
 
 def onTaskWritten(taskState, event):
@@ -218,6 +278,7 @@ def onTaskWritten(taskState, event):
   taskState["lastCommit"] = event["data"].get("commit")
   taskState["failStreak"] = 0
   taskState["resumable"] = True
+  rememberSession(taskState, event["data"])
   # 你的補充說明只要交給 Claude 一次，寫成功之後就不再附上
   taskState["userNote"] = ""
   # 審查要知道這一輪是不是在解衝突，才會特別檢查有沒有弄壞其他任務已經合併的內容
@@ -234,6 +295,7 @@ def onTaskBlocked(taskState, event):
   taskState["status"] = TaskStatus.needsYou
   taskState["needs"] = {"kind": "blocked", "reason": "Claude 回報卡住：" + event["data"].get("reason", "")}
   taskState["resumable"] = True
+  rememberSession(taskState, event["data"])
 
 
 def onTestRun(taskState, event):

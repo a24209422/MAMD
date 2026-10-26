@@ -281,6 +281,16 @@ def test_mainRefusesMissingFolderAndNonGitFolder(tmp_path, monkeypatch, capsys):
   assert not lockPathOf(plainDir).exists()
 
 
+def test_mainRefusesLegacyConfig(gitProject, capsys):
+  (gitProject / ".board").mkdir(exist_ok=True)
+  (gitProject / ".board" / "config.json").write_text('{"claudeCommand": ["claude"]}', encoding="utf-8")
+  assert conductorModule.main([str(gitProject)]) == 1
+  out = capsys.readouterr().out
+  assert ".board/config.json 要先修正：" in out
+  assert "claudeCommand 已經不用了" in out
+  assert not lockPathOf(gitProject).exists()
+
+
 def test_mainRefusesSecondConductor(gitProject, monkeypatch, capsys):
   lockPath = lockPathOf(gitProject)
   lockPath.parent.mkdir(parents=True, exist_ok=True)

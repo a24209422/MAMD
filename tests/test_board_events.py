@@ -1,3 +1,4 @@
+import json
 import os
 import threading
 import time
@@ -85,3 +86,37 @@ def test_defaultConfigHasContextWindows(tmp_path):
   config = board_core.loadConfig(tmp_path)
   assert config["claudeContextWindow"] == 200000
   assert config["codexContextWindow"] == 475000
+
+
+def test_roleSpecDefaultsAndOverrides(tmp_path):
+  config = board_core.loadConfig(tmp_path)
+  assert board_core.roleSpec(config, "writer") == {"cli": "claude", "model": None, "command": None,
+                                                    "contextWindow": 200000, "allowedTools": []}
+  assert board_core.roleSpec(config, "reviewer")["cli"] == "codex"
+  assert board_core.roleSpec(config, "reviewer")["contextWindow"] == 475000
+  (tmp_path / ".board").mkdir()
+  (tmp_path / ".board" / "config.json").write_text(json.dumps({
+    "writer": {"cli": "codex", "model": "gpt-6.1-sol"},
+    "reviewer": {"cli": "claude", "model": "opus", "contextWindow": 1000000},
+  }), encoding="utf-8")
+  config = board_core.loadConfig(tmp_path)
+  assert board_core.roleSpec(config, "writer") == {"cli": "codex", "model": "gpt-6.1-sol", "command": None,
+                                                    "contextWindow": 475000, "allowedTools": []}
+  assert board_core.roleSpec(config, "reviewer")["contextWindow"] == 1000000
+  assert board_core.readUserConfig(tmp_path)["writer"]["cli"] == "codex"
+  assert board_core.readUserConfig(tmp_path / "nowhere") == {}
+
+
+def test_configProblemsFlagsLegacyKeysAndBadRoles():
+  assert board_core.configProblems({}) == []
+  assert board_core.configProblems({"writer": {"cli": "codex", "model": "gpt-6.1-sol"}, "reviewer": {}}) == []
+  problems = board_core.configProblems({"claudeCommand": ["claude"], "writer": {"cli": "gemini", "model": 3},
+                                        "reviewer": "codex"})
+  assert problems == [
+    "claudeCommand 已經不用了，請改寫成 writer.command（見 README 的「換模型」）",
+    "writer.cli 只能是 claude 或 codex，現在是 gemini",
+    'writer.model 要是文字，例如 "opus"',
+    'reviewer 要寫成物件，例如 {"cli": "claude", "model": "opus"}',
+  ]
+  assert board_core.configProblems({"writer": {"command": "claude"}}) == [
+    'writer.command 要是文字陣列，例如 ["C:/tools/claude.exe"]']
