@@ -122,6 +122,16 @@ def test_configProblemsFlagsLegacyKeysAndBadRoles():
     'writer.command 要是文字陣列，例如 ["C:/tools/claude.exe"]']
 
 
+def test_badAllowedToolsAreReportedWithoutCrashing():
+  assert board_core.configProblems({"writer": {"allowedTools": ["Bash(npm i*)"]}}) == []
+  message = 'writer.allowedTools 要是文字陣列，例如 ["Bash(npm install*)"]'
+  for value in (True, "Bash(npm i*)", ["Bash(npm i*)", 3]):
+    assert board_core.configProblems({"writer": {"allowedTools": value}}) == [message]
+  # 儀表板和 conductor 讀設定時不能當掉，也不能把字串拆成一個個字元
+  for value in (True, "Bash(npm i*)"):
+    assert board_core.roleSpec({"writer": {"allowedTools": value}}, "writer")["allowedTools"] == []
+
+
 def writeUserConfigFile(projectDir, config):
   (projectDir / ".board").mkdir(exist_ok=True)
   (projectDir / ".board" / "config.json").write_text(json.dumps(config), encoding="utf-8")

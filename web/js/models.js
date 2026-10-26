@@ -11,7 +11,8 @@ function roleDraftKeys(role) {
 function roleChoice(state, role) {
   const keys = roleDraftKeys(role);
   const saved = state.roles[role];
-  return { cli: drafts[keys.cli] ?? saved.cli, model: drafts[keys.model] ?? (saved.model || '') };
+  // 設定檔手寫成數字之類時也當文字處理，按儲存才不會在 trim 時出錯
+  return { cli: drafts[keys.cli] ?? saved.cli, model: drafts[keys.model] ?? String(saved.model ?? '') };
 }
 
 function roleSettingCard(state, role) {
@@ -73,8 +74,11 @@ async function saveRole(role) {
 }
 
 $('#modelsBody').addEventListener('change', event => {
-  // 換 CLI 時，建議的模型清單和提示字要跟著換
-  if (event.target.matches('[data-role-cli]')) refresh(renderModels);
+  if (!event.target.matches('[data-role-cli]')) return;
+  // 模型名稱跟著 CLI：Claude 的 sonnet 交給 Codex 要到執行時才失敗，所以換 CLI 就清空、回到新 CLI 的預設模型
+  drafts[roleDraftKeys(event.target.dataset.roleCli).model] = '';
+  // 建議的模型清單和提示字也要跟著換
+  refresh(renderModels);
 });
 
 $('#modelsBody').addEventListener('click', event => {

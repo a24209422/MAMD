@@ -81,7 +81,7 @@ python <agent-board>\install_skill.py
    ```
 
    - `maxParallel` 是寫程式、審查各自同時跑的上限：設 1 代表同時最多 1 個寫程式加 1 個審查
-   - 改了 `.board/config.json` 要重開 conductor 才生效（例如任務卡住後才加 `allowedTools`）
+   - `writer`、`reviewer` 兩段（例如任務卡住後才加 `allowedTools`）改了之後，conductor 從下一個新啟動的 agent 開始用；其他設定改了要重開 conductor 才生效
    - `testCommand` 在 conductor 裡同步執行，跑測試時 conductor 不會排新工作，測試要夠快
    - 寫程式、審查要用哪個 CLI 和模型，見「換模型」
 

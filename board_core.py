@@ -71,9 +71,11 @@ def roleSpec(config, role):
   # 寫錯格式時 configProblems 會擋下 conductor；這裡只求不當掉，儀表板才看得到警告
   raw = raw if isinstance(raw, dict) else {}
   cli = raw.get("cli") or defaultConfig[role]["cli"]
+  allowedTools = raw.get("allowedTools")
   return {"cli": cli, "model": raw.get("model") or None, "command": raw.get("command") or None,
           "contextWindow": raw.get("contextWindow") or (defaultContextWindows.get(cli) if isinstance(cli, str) else None),
-          "allowedTools": list(raw.get("allowedTools") or [])}
+          # 字串不能用 list() 拆成一個個字元，其他型別也只求不當掉；configProblems 會回報
+          "allowedTools": list(allowedTools) if isinstance(allowedTools, list) else []}
 
 
 def configProblems(userConfig):
@@ -95,6 +97,10 @@ def configProblems(userConfig):
     if command is not None and not (isinstance(command, list) and command
                                     and all(isinstance(part, str) for part in command)):
       problems.append(f'{role}.command 要是文字陣列，例如 ["C:/tools/claude.exe"]')
+    allowedTools = raw.get("allowedTools")
+    if allowedTools is not None and not (isinstance(allowedTools, list)
+                                         and all(isinstance(tool, str) for tool in allowedTools)):
+      problems.append(f'{role}.allowedTools 要是文字陣列，例如 ["Bash(npm install*)"]')
   return problems
 
 

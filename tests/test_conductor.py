@@ -556,3 +556,14 @@ def test_reviewRetryKeepsSettingsOfFirstAttempt(startBoard):
   assert second["argv"][:2] == ["exec", "-C"] and second["argv"][second["argv"].index("-m") + 1] == "m1"
   reviews = eventsOf(conductor, "reviewStarted")
   assert [(event["data"]["cli"], event["data"]["model"]) for event in reviews] == [("codex", "m1")]
+
+
+def test_badAllowedToolsWhileRunningKeepsPreviousRoles(startBoard):
+  firstConductor, scenarioDir = startBoard(oneTask)
+  lines = []
+  conductor = watchingConductor(firstConductor.projectDir, lines)
+  writeConfigFile(conductor.projectDir, fakeConfig(writer=fakeRole("claude", allowedTools=True)))
+  runUntil(conductor, planDone)
+  warning = ('警告｜.board/config.json 有問題，繼續用原本的寫程式、審查設定：'
+             'writer.allowedTools 要是文字陣列，例如 ["Bash(npm install*)"]')
+  assert lines.count(warning) == 1
