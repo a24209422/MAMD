@@ -84,7 +84,8 @@ def contextWindowFor(spec, cli):
 
 def roleView(config, role):
   spec = roleSpec(config, role)
-  return {"cli": spec["cli"], "model": spec["model"], "customCommand": bool(spec["command"])}
+  return {"cli": spec["cli"], "model": spec["model"], "reasoningEffort": spec["reasoningEffort"],
+          "customCommand": bool(spec["command"])}
 
 
 def agentView(projectDir, snapshot, agentId, role):

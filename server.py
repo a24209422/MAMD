@@ -18,7 +18,9 @@ from urllib.parse import urlsplit
 
 import board
 import board_api
-from board_core import BoardError, PlanStatus, roleChoiceText, saveRoleChoice
+import board_models
+from board_core import (BoardError, PlanStatus, cliNames, loadConfig, modelNamePattern, modelNameRule,
+                        roleChoiceText, roleSpec, saveRoleChoice)
 
 webDir = Path(__file__).resolve().parent / "web"
 scriptNames = ["core", "overview", "plan", "ops", "console", "assistant", "models", "main"]
@@ -43,6 +45,7 @@ postRoutes = [
   (re.compile(r"^/api/stop$"), "stop"),
   (re.compile(r"^/api/resume$"), "resume"),
   (re.compile(r"^/api/roles/(writer|reviewer)$"), "saveRole"),
+  (re.compile(r"^/api/models/(writer|reviewer)$"), "models"),
 ]
 
 
@@ -54,6 +57,7 @@ class Dashboard:
     self.writeLock = threading.RLock()
     self.errorLock = threading.Lock()
     self.reportedErrors = set()
+    self.modelCatalog = board_models.ModelCatalog(self.projectDir)
 
   def tokenMatches(self, given):
     return hmac.compare_digest(given.encode("utf-8"), self.token.encode("utf-8"))
@@ -106,17 +110,46 @@ class Dashboard:
     return 200, self.runCommand(board.cmdResume)
 
   def saveRole(self, role, body):
-    cli, model = body.get("cli"), body.get("model") or ""
-    if not isinstance(cli, str) or not isinstance(model, str):
-      return 400, {"ok": False, "message": "cli、model 要是文字"}
-    model = model.strip()
+    cli, model, effort = body.get("cli"), body.get("model", ""), body.get("reasoningEffort", "")
+    if not all(isinstance(value, str) for value in (cli, model, effort)):
+      return 400, {"ok": False, "message": "cli、model、reasoningEffort 要是文字"}
+    model, effort = model.strip(), effort.strip()
     # 和其他寫入共用鎖：兩個分頁同時存，讀改寫才不會互相蓋掉
     with self.writeLock:
       try:
-        saveRoleChoice(self.projectDir, role, cli, model)
+        if model and not modelNamePattern.fullmatch(model):
+          raise BoardError(modelNameRule)
+        command = self.modelCommand(role, cli)
+        if model or effort:
+          catalog = self.modelCatalog.get(cli, command)
+          if not catalog["ok"]:
+            raise BoardError(catalog["message"])
+          board_models.validateChoice(catalog["models"], model, effort)
+        saveRoleChoice(self.projectDir, role, cli, model, effort)
       except BoardError as error:
         return 400, {"ok": False, "message": str(error)}
-    return 200, {"ok": True, "message": f"已儲存：{role} 改用 {roleChoiceText(cli, model)}，從下一個新啟動的 agent 開始用"}
+    return 200, {"ok": True, "message": f"已儲存：{role} 改用 {roleChoiceText(cli, model, effort)}，從下一個新啟動的 agent 開始用"}
+
+  def modelCommand(self, role, cli):
+    if cli not in cliNames:
+      raise BoardError("CLI 只能是 claude 或 codex")
+    try:
+      spec = roleSpec(loadConfig(self.projectDir), role)
+    except (OSError, ValueError) as error:
+      raise BoardError(f".board/config.json 讀不懂，請先手動修正：{error}") from error
+    if spec["command"] is not None and (not isinstance(spec["command"], list) or not all(isinstance(part, str) for part in spec["command"])):
+      raise BoardError(f"{role}.command 要是指令文字陣列")
+    if spec["command"] and cli != spec["cli"]:
+      raise BoardError(f"{role} 有自訂 command，換 CLI 前要先到 .board/config.json 改 command")
+    return spec["command"]
+
+  def models(self, role, body):
+    cli = body.get("cli")
+    try:
+      command = self.modelCommand(role, cli)
+    except (BoardError, OSError, ValueError) as error:
+      return 400, {"ok": False, "message": str(error), "models": []}
+    return 200, self.modelCatalog.get(cli, command, refresh=body.get("refresh") is True)
 
   def reportError(self, error):
     message = f"{type(error).__name__}: {error}"

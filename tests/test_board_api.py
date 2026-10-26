@@ -268,8 +268,8 @@ def test_badCliStillShowsWarningInsteadOfCrashing(approvedProject):
 def test_stateViewListsRoleSettings(approvedProject):
   writeConfig(approvedProject, writer={"cli": "codex", "model": "gpt-6.1-sol", "command": ["C:/tools/codex.cmd"]})
   assert board_api.stateView(approvedProject)["roles"] == {
-    "writer": {"cli": "codex", "model": "gpt-6.1-sol", "customCommand": True},
-    "reviewer": {"cli": "codex", "model": None, "customCommand": False},
+    "writer": {"cli": "codex", "model": "gpt-6.1-sol", "customCommand": True, "reasoningEffort": None},
+    "reviewer": {"cli": "codex", "model": None, "customCommand": False, "reasoningEffort": None},
   }
 
 

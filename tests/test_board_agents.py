@@ -149,6 +149,19 @@ def test_buildClaudeArgvWithModel():
   assert argv[-2:] == ["--session-id", "sid-1"]
 
 
+def test_reasoningEffortReachesBothClisAndCodexResume(tmp_path):
+  claude = board_agents.buildClaudeArgv(["claude"], "sid", True, "rules", model="opus", reasoningEffort="max")
+  review = board_agents.buildClaudeReviewArgv(["claude"], "rules", reasoningEffort="high")
+  assert claude[claude.index("--effort") + 1] == "max" and claude[-2:] == ["--resume", "sid"]
+  assert review[review.index("--effort") + 1] == "high"
+  for thread in (None, "thread-1"):
+    argv = board_agents.buildCodexWriteArgv(["codex"], tmp_path, "s", "o", threadId=thread, reasoningEffort="ultra")
+    overrides = [argv[index + 1] for index, arg in enumerate(argv) if arg == "-c"]
+    assert 'model_reasoning_effort="ultra"' in overrides and argv[-1] == "-"
+  argv = board_agents.buildCodexArgv(["codex"], tmp_path, "s", "o", reasoningEffort="low")
+  assert argv[argv.index("-c") + 1] == 'model_reasoning_effort="low"'
+
+
 def test_buildClaudeReviewArgvIsReadOnly():
   argv = board_agents.buildClaudeReviewArgv(["claude"], "審查規則", model="sonnet")
   assert argv[:4] == ["claude", "--model", "sonnet", "-p"]

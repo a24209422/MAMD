@@ -107,7 +107,7 @@ class Conductor:
       if spec != self.roles[role]["spec"]:
         # 換成新的物件、不改舊的：正在跑的 job 手上還拿著舊設定
         self.roles[role] = self.roleLaunch(spec)
-        self.out(f"設定變更：{role} 改用 {roleChoiceText(spec['cli'], spec['model'])}，從下一個新啟動的 agent 開始用")
+        self.out(f"設定變更：{role} 改用 {roleChoiceText(spec['cli'], spec['model'], spec['reasoningEffort'])}，從下一個新啟動的 agent 開始用")
 
   def currentState(self):
     loadErrors = []
@@ -321,7 +321,7 @@ class Conductor:
     self.jobs[key] = info
     try:
       self.event("taskStarted", info, worktree=str(worktree), sessionId=info["sessionId"], resume=resume,
-                 mode=info["mode"], cli=cli, model=model)
+                 mode=info["mode"], cli=cli, model=model, reasoningEffort=launch["spec"]["reasoningEffort"])
     except Exception:
       self.jobs.pop(key, None)
       info["job"].kill()
@@ -331,12 +331,12 @@ class Conductor:
     launch = info["launch"]
     if info["cli"] == "claude":
       argv = board_agents.buildClaudeArgv(launch["command"], info["sessionId"], resume, writerRules("claude"),
-                                          self.claudeAllowedTools(launch["spec"]), info["model"])
+                                          self.claudeAllowedTools(launch["spec"]), info["model"], launch["spec"]["reasoningEffort"])
       return argv, prompt, board_agents.parseClaudeLine
     schemaPath = self.codexFiles(info, "write-schema.json", writeResultSchema,
                                  f"{info['plan']}-{info['task']}-r{info['round']}-write.json")
     argv = board_agents.buildCodexWriteArgv(launch["command"], worktree, schemaPath, info["outPath"],
-                                            info["sessionId"] if resume else None, info["model"])
+                                            info["sessionId"] if resume else None, info["model"], launch["spec"]["reasoningEffort"])
     # Codex 沒有附加系統提示的參數，規則放在 prompt 最前面
     return argv, writerRules("codex") + "\n\n" + prompt, board_agents.parseCodexLine
 
@@ -459,7 +459,7 @@ class Conductor:
     self.jobs[key] = info
     try:
       if attempt == 1:
-        self.event("reviewStarted", info, cli=info["cli"], model=info["model"])
+        self.event("reviewStarted", info, cli=info["cli"], model=info["model"], reasoningEffort=launch["spec"]["reasoningEffort"])
     except Exception:
       self.jobs.pop(key, None)
       info["job"].kill()
@@ -468,11 +468,12 @@ class Conductor:
   def reviewLaunch(self, info, worktree, prompt):
     command = info["launch"]["command"]
     if info["cli"] == "claude":
-      argv = board_agents.buildClaudeReviewArgv(command, reviewerRules, info["model"])
+      argv = board_agents.buildClaudeReviewArgv(command, reviewerRules, info["model"], info["launch"]["spec"]["reasoningEffort"])
       return argv, prompt, board_agents.parseClaudeLine
     schemaPath = self.codexFiles(info, "review-schema.json", reviewResultSchema,
                                  f"{info['plan']}-{info['task']}-r{info['round']}-review{info['attempt']}.json")
-    argv = board_agents.buildCodexArgv(command, worktree, schemaPath, info["outPath"], info["model"])
+    argv = board_agents.buildCodexArgv(command, worktree, schemaPath, info["outPath"], info["model"],
+                                     info["launch"]["spec"]["reasoningEffort"])
     return argv, reviewerRules + "\n\n" + prompt, board_agents.parseCodexLine
 
   def finishReview(self, plan, taskState, info):

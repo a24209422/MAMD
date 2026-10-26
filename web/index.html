@@ -1111,7 +1111,8 @@ button, input, select { font: inherit; color: inherit; }
   font: 12.5px/1.5 var(--font-mono);
 }
 .field select:disabled, .field input:disabled { opacity: 0.55; cursor: not-allowed; }
-.role-actions { display: flex; justify-content: flex-end; }
+.role-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.model-detail { overflow-wrap: anywhere; }
 .models-tips { margin: 0; padding-left: 1.2em; display: grid; gap: 4px; color: var(--fg-2); font: 12px/1.6 var(--font-cjk); }
 @container stage (max-width: 900px) {
   .models-grid { grid-template-columns: minmax(0, 1fr); }
@@ -1342,6 +1343,8 @@ button, input, select { font: inherit; color: inherit; }
           <section class="boxed" aria-label="說明">
             <span class="box-label">說明</span>
             <ul class="models-tips">
+              <li>模型、版本名稱與推理強度由本機 CLI 提供；供應商或 CLI 更新後可按「重新整理模型」重讀</li>
+              <li>推理強度只列出所選模型支援的選項；換 CLI 或模型時會重設為沿用 CLI 設定</li>
               <li>存檔後，conductor 從下一個新啟動的 agent 開始用新設定；正在跑的 agent 不受影響</li>
               <li>換了 CLI 或模型之後，進行中的任務下一輪會開新對話</li>
               <li>第三層的 agent 身分都跟著所屬角色的設定</li>

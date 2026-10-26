@@ -167,7 +167,27 @@ def test_modelsPageShowsRoleSettings(dashboard, tmp_path):
   section = re.search(r'<section class="page models-page"[^>]*>', dom)
   assert section and "hidden" not in section.group(0)
   assert "目前：Claude・sonnet" in dom and "目前：Codex・預設模型" in dom
-  assert 'data-draft="role-model:writer" value="sonnet"' in dom
-  assert '<option value="opus"></option>' in dom
+  assert 'data-role-model="writer" disabled' in dom
+  selected = re.search(r'<option[^>]*value="sonnet"[^>]*>', dom)
+  assert selected and "selected" in selected.group(0) and "disabled" in selected.group(0)
   # 沒帶 token 只能看
   assert 'data-save-role="writer" disabled' in dom
+
+
+@needsBrowser
+def test_modelsPageLoadsCliModelsAndEfforts(dashboard, tmp_path, monkeypatch):
+  import board_models
+  def discover(projectDir, cli, command, **kwargs):
+    model = "sonnet" if cli == "claude" else "gpt-test-new"
+    return [{"id": model, "displayName": "CLI New Version", "resolvedModel": "full-model-v2",
+             "description": "CLI model description", "efforts": [{"value": "high", "description": "Deep"}]}]
+  monkeypatch.setattr(board_models, "discoverModels", discover)
+  # 只在測試伺服器的 main.js 預填 sessionStorage；產品的 token 流程另有既有測試。
+  main = tmp_path / "main.js"
+  main.write_text(f"sessionStorage.setItem('boardToken', '{token}');\n" +
+                  (toolDir / "web/js/main.js").read_text(encoding="utf-8"), encoding="utf-8")
+  monkeypatch.setitem(server.staticFiles, "/js/main.js", (str(main), "text/javascript; charset=utf-8"))
+  dom = renderDom(tmp_path, dashboard + "#models")
+  assert "CLI New Version" in dom and "full-model-v2" in dom
+  assert 'data-role-effort="writer"' in dom and 'value="high"' in dom
+  assert "重新整理模型" in dom

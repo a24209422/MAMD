@@ -453,17 +453,19 @@ def test_stagedMarkersThenRetryStillAsksClaude(startBoard):
 
 def test_codexWriterResumesAndClaudeReviews(startBoard):
   conductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["fail", "pass"]}},
-                                      writer=fakeRole("codex", model="gpt-6.1-sol"),
-                                      reviewer=fakeRole("claude", model="opus"))
+                                      writer=fakeRole("codex", model="gpt-6.1-sol", reasoningEffort="high"),
+                                      reviewer=fakeRole("claude", model="opus", reasoningEffort="max"))
   runUntil(conductor, planDone)
   first, second = readCalls(scenarioDir, "write")
   assert first["argv"][first["argv"].index("-s") + 1] == "workspace-write"
   assert first["argv"][first["argv"].index("-m") + 1] == "gpt-6.1-sol"
   assert first["prompt"].startswith("你是自動流程裡負責寫程式的 agent。")
   assert second["argv"][:2] == ["exec", "resume"] and second["argv"][-2] == "thread-T1-1"
+  assert 'model_reasoning_effort="high"' in first["argv"] and 'model_reasoning_effort="high"' in second["argv"]
   assert "還沒達成需求" in second["prompt"]
   review = readCalls(scenarioDir, "review")[0]
   assert review["argv"][:2] == ["--model", "opus"]
+  assert review["argv"][review["argv"].index("--effort") + 1] == "max"
   assert review["argv"][review["argv"].index("--permission-mode") + 1] == "manual"
   assert review["prompt"].startswith("審查 plan P0001")
   assert board_git.runGit(conductor.projectDir, "show", "plan/P0001:T1.txt") == "T1 第 2 次"
@@ -472,6 +474,17 @@ def test_codexWriterResumesAndClaudeReviews(startBoard):
   assert starts[0]["data"]["sessionId"] is None and starts[1]["data"]["sessionId"] == "thread-T1-1"
   assert {event["agent"] for event in eventsOf(conductor, "reviewStarted")} == {"reviewer"}
   assert {event["data"]["cli"] for event in eventsOf(conductor, "reviewStarted")} == {"claude"}
+
+
+def test_claudeWriterAndCodexReviewerUseConfiguredEffort(startBoard):
+  conductor, scenarioDir = startBoard(oneTask, writer=fakeRole("claude", model="opus", reasoningEffort="high"),
+                                     reviewer=fakeRole("codex", reasoningEffort="low"))
+  runUntil(conductor, planDone)
+  write, review = readCalls(scenarioDir, "write")[0], readCalls(scenarioDir, "review")[0]
+  assert write["argv"][write["argv"].index("--effort") + 1] == "high"
+  assert 'model_reasoning_effort="low"' in review["argv"]
+  assert eventsOf(conductor, "taskStarted")[0]["data"]["reasoningEffort"] == "high"
+  assert eventsOf(conductor, "reviewStarted")[0]["data"]["reasoningEffort"] == "low"
 
 
 def test_switchingWriterCliStartsNewSession(startBoard):

@@ -174,7 +174,9 @@ def test_refusesToStartWithoutConsole(gitProject):
   assert "只能由使用者在終端機啟動" in completed.stdout
 
 
-def test_saveRoleWritesConfigAndRejectsBadInput(running):
+def test_saveRoleWritesConfigAndRejectsBadInput(running, monkeypatch):
+  import board_models
+  monkeypatch.setattr(board_models, "discoverModels", lambda *args: [{"id": "gpt-6.1-sol", "efforts": []}])
   projectDir, port = running
   configFile = projectDir / ".board" / "config.json"
   assert post(port, "/api/roles/writer", {"cli": "codex"}, withToken="wrong")[0] == 403
@@ -188,4 +190,44 @@ def test_saveRoleWritesConfigAndRejectsBadInput(running):
   assert payload["message"] == "已儲存：writer 改用 Codex（gpt-6.1-sol），從下一個新啟動的 agent 開始用"
   assert json.loads(configFile.read_text(encoding="utf-8")) == {"writer": {"cli": "codex", "model": "gpt-6.1-sol"}}
   _, state = call(port, "GET", "/api/state")
-  assert state["roles"]["writer"] == {"cli": "codex", "model": "gpt-6.1-sol", "customCommand": False}
+  assert state["roles"]["writer"] == {"cli": "codex", "model": "gpt-6.1-sol", "customCommand": False, "reasoningEffort": None}
+
+
+def test_modelCatalogAndEffortValidation(running, monkeypatch):
+  import board_models
+  projectDir, port = running
+  calls = []
+  def discover(project, cli, command, **kwargs):
+    calls.append((cli, command))
+    return [{"id": "new-model", "efforts": [{"value": "high"}], "displayName": "New Model"}]
+  monkeypatch.setattr(board_models, "discoverModels", discover)
+  assert post(port, "/api/models/writer", {"cli": "codex"}, withToken="wrong")[0] == 403
+  assert post(port, "/api/models/writer", {"cli": "bad"})[0] == 400
+  status, payload = post(port, "/api/models/writer", {"cli": "codex"})
+  assert status == 200 and payload["models"][0]["id"] == "new-model"
+  post(port, "/api/models/writer", {"cli": "codex", "refresh": True})
+  assert len(calls) == 2
+  for choice in [{"model": "typo"}, {"model": "new-model", "reasoningEffort": "ultra"},
+                 {"model": "new-model", "reasoningEffort": True}, {"reasoningEffort": "high"}]:
+    assert post(port, "/api/roles/writer", {"cli": "codex", **choice})[0] == 400
+  status, payload = post(port, "/api/roles/writer", {"cli": "codex", "model": "new-model", "reasoningEffort": "high"})
+  assert status == 200 and payload["ok"] is True
+  assert board_core.readUserConfig(projectDir)["writer"]["reasoningEffort"] == "high"
+  assert call(port, "GET", "/api/state")[1]["roles"]["writer"]["reasoningEffort"] == "high"
+
+
+def test_catalogUsesRoleCommandAndShowsCliErrors(running, monkeypatch):
+  import board_models
+  projectDir, port = running
+  board_core.writeUserConfig(projectDir, {"writer": {"cli": "claude", "command": ["custom-claude"]}})
+  calls = []
+  def fail(project, cli, command, **kwargs):
+    calls.append(command)
+    raise board_core.BoardError("請先登入")
+  monkeypatch.setattr(board_models, "discoverModels", fail)
+  _, payload = post(port, "/api/models/writer", {"cli": "claude"})
+  assert payload["ok"] is False and payload["message"] == "請先登入"
+  assert calls == [["custom-claude"]]
+  assert post(port, "/api/models/writer", {"cli": "codex"})[0] == 400
+  assert post(port, "/api/roles/writer", {"cli": "claude", "model": "opus"})[0] == 400
+  assert post(port, "/api/roles/writer", {"cli": "claude"})[0] == 200

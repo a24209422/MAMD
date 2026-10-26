@@ -91,7 +91,7 @@ def test_defaultConfigHasRolesInsteadOfLegacyKeys(tmp_path):
 def test_roleSpecDefaultsAndOverrides(tmp_path):
   config = board_core.loadConfig(tmp_path)
   assert board_core.roleSpec(config, "writer") == {"cli": "claude", "model": None, "command": None,
-                                                    "contextWindow": 200000, "allowedTools": []}
+                                                    "contextWindow": 200000, "allowedTools": [], "reasoningEffort": None}
   assert board_core.roleSpec(config, "reviewer")["cli"] == "codex"
   assert board_core.roleSpec(config, "reviewer")["contextWindow"] == 475000
   (tmp_path / ".board").mkdir()
@@ -101,7 +101,7 @@ def test_roleSpecDefaultsAndOverrides(tmp_path):
   }), encoding="utf-8")
   config = board_core.loadConfig(tmp_path)
   assert board_core.roleSpec(config, "writer") == {"cli": "codex", "model": "gpt-6.1-sol", "command": None,
-                                                    "contextWindow": 475000, "allowedTools": []}
+                                                    "contextWindow": 475000, "allowedTools": [], "reasoningEffort": None}
   assert board_core.roleSpec(config, "reviewer")["contextWindow"] == 1000000
   assert board_core.readUserConfig(tmp_path)["writer"]["cli"] == "codex"
   assert board_core.readUserConfig(tmp_path / "nowhere") == {}
@@ -161,6 +161,19 @@ def test_saveRoleChoiceOnlyChangesThatRole(tmp_path):
 def test_saveRoleChoiceCreatesConfigFile(tmp_path):
   board_core.saveRoleChoice(tmp_path, "reviewer", "claude", "claude-opus-5-5[1m]")
   assert board_core.readUserConfig(tmp_path) == {"reviewer": {"cli": "claude", "model": "claude-opus-5-5[1m]"}}
+
+
+def test_reasoningEffortIsSavedValidatedAndCleared(tmp_path):
+  board_core.saveRoleChoice(tmp_path, "writer", "codex", "test", "ultra")
+  config = board_core.readUserConfig(tmp_path)
+  assert config["writer"]["reasoningEffort"] == "ultra"
+  assert board_core.roleSpec(config, "writer")["reasoningEffort"] == "ultra"
+  for value in (True, ["high"], "high&calc", "-p"):
+    assert board_core.configProblems({"writer": {"reasoningEffort": value}})
+    with pytest.raises(board_core.BoardError):
+      board_core.saveRoleChoice(tmp_path, "writer", "codex", "test", value)
+  board_core.saveRoleChoice(tmp_path, "writer", "claude", "opus", "")
+  assert "reasoningEffort" not in board_core.readUserConfig(tmp_path)["writer"]
 
 
 def test_saveRoleChoiceRejectsBadChoices(tmp_path):

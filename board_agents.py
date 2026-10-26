@@ -122,8 +122,14 @@ def modelArgs(flag, model):
   return [flag, model] if model else []
 
 
-def buildClaudeArgv(command, sessionId, resume, systemRules, allowedTools=(), model=None):
-  argv = list(command) + modelArgs("--model", model) + [
+def reasoningArgs(cli, effort):
+  if not effort:
+    return []
+  return ["--effort", effort] if cli == "claude" else ["-c", f'model_reasoning_effort="{effort}"']
+
+
+def buildClaudeArgv(command, sessionId, resume, systemRules, allowedTools=(), model=None, reasoningEffort=None):
+  argv = list(command) + modelArgs("--model", model) + reasoningArgs("claude", reasoningEffort) + [
     "-p", "--output-format", "stream-json", "--verbose",
     "--json-schema", json.dumps(writeResultSchema, ensure_ascii=False),
     "--permission-mode", "acceptEdits", "--permission-prompts", "none",
@@ -137,9 +143,9 @@ def buildClaudeArgv(command, sessionId, resume, systemRules, allowedTools=(), mo
   return argv + (["--resume", sessionId] if resume else ["--session-id", sessionId])
 
 
-def buildClaudeReviewArgv(command, systemRules, model=None):
+def buildClaudeReviewArgv(command, systemRules, model=None, reasoningEffort=None):
   # 審查每次都是新的對話，不必指定 session
-  return list(command) + modelArgs("--model", model) + [
+  return list(command) + modelArgs("--model", model) + reasoningArgs("claude", reasoningEffort) + [
     "-p", "--output-format", "stream-json", "--verbose",
     "--json-schema", json.dumps(reviewResultSchema, ensure_ascii=False),
     "--permission-mode", "manual", "--permission-prompts", "none",
@@ -184,13 +190,15 @@ def claudeFinalResult(activity):
   return (parsed, "") if isinstance(parsed, dict) else (None, "result 不是 JSON 物件")
 
 
-def buildCodexArgv(command, worktree, schemaPath, outPath, model=None):
+def buildCodexArgv(command, worktree, schemaPath, outPath, model=None, reasoningEffort=None):
   return list(command) + ["exec", "-C", str(worktree), "-s", "read-only", "--json",
-                          "--output-schema", str(schemaPath), "-o", str(outPath), *modelArgs("-m", model), "-"]
+                          "--output-schema", str(schemaPath), "-o", str(outPath), *modelArgs("-m", model),
+                          *reasoningArgs("codex", reasoningEffort), "-"]
 
 
-def buildCodexWriteArgv(command, worktree, schemaPath, outPath, threadId=None, model=None):
-  options = ["--json", "--output-schema", str(schemaPath), "-o", str(outPath), *modelArgs("-m", model)]
+def buildCodexWriteArgv(command, worktree, schemaPath, outPath, threadId=None, model=None, reasoningEffort=None):
+  options = ["--json", "--output-schema", str(schemaPath), "-o", str(outPath), *modelArgs("-m", model),
+             *reasoningArgs("codex", reasoningEffort)]
   if threadId:
     # exec resume 沒有 -s、-C：沙箱改用 -c 設定，資料夾由 AgentJob 的 cwd 決定
     return list(command) + ["exec", "resume", "-c", "sandbox_mode=workspace-write", *options, threadId, "-"]

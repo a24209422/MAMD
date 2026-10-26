@@ -20,6 +20,7 @@ cliTitles = {"claude": "Claude", "codex": "Codex"}
 # 開頭限定英數字，免得被當成 CLI 的其他參數（例如 -p）
 modelNamePattern = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,99}")
 modelNameRule = "模型名稱要以英數字開頭，只能有英數字和 . _ - : / [ ]，最多 100 字"
+reasoningEffortPattern = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 configReplaceAttempts = 20
 # 舊版設定的 key 和新寫法；conductor 看到舊的就拒絕啟動，免得設定被默默忽略
 legacyConfigKeys = {
@@ -72,7 +73,8 @@ def roleSpec(config, role):
   raw = raw if isinstance(raw, dict) else {}
   cli = raw.get("cli") or defaultConfig[role]["cli"]
   allowedTools = raw.get("allowedTools")
-  return {"cli": cli, "model": raw.get("model") or None, "command": raw.get("command") or None,
+  return {"cli": cli, "model": raw.get("model") or None, "reasoningEffort": raw.get("reasoningEffort") or None,
+          "command": raw.get("command") or None,
           "contextWindow": raw.get("contextWindow") or (defaultContextWindows.get(cli) if isinstance(cli, str) else None),
           # 字串不能用 list() 拆成一個個字元，其他型別也只求不當掉；configProblems 會回報
           "allowedTools": list(allowedTools) if isinstance(allowedTools, list) else []}
@@ -82,30 +84,41 @@ def configProblems(userConfig):
   problems = [f"{key} 已經不用了，請改寫成 {replacement}（見 README 的「換模型」）"
               for key, replacement in legacyConfigKeys.items() if key in userConfig]
   for role in roleNames:
-    if role not in userConfig:
-      continue
-    raw = userConfig[role]
-    if not isinstance(raw, dict):
-      problems.append(f'{role} 要寫成物件，例如 {{"cli": "claude", "model": "opus"}}')
-      continue
-    cli = raw.get("cli", defaultConfig[role]["cli"])
-    if cli not in cliNames:
-      problems.append(f"{role}.cli 只能是 claude 或 codex，現在是 {cli}")
-    if raw.get("model") is not None and not isinstance(raw["model"], str):
-      problems.append(f'{role}.model 要是文字，例如 "opus"')
-    command = raw.get("command")
-    if command is not None and not (isinstance(command, list) and command
-                                    and all(isinstance(part, str) for part in command)):
-      problems.append(f'{role}.command 要是文字陣列，例如 ["C:/tools/claude.exe"]')
-    allowedTools = raw.get("allowedTools")
-    if allowedTools is not None and not (isinstance(allowedTools, list)
-                                         and all(isinstance(tool, str) for tool in allowedTools)):
-      problems.append(f'{role}.allowedTools 要是文字陣列，例如 ["Bash(npm install*)"]')
+    if role in userConfig:
+      problems.extend(roleConfigProblems(role, userConfig[role]))
   return problems
 
 
-def roleChoiceText(cli, model):
-  return f"{cliTitles.get(cli, cli)}（{model or '預設模型'}）"
+def roleConfigProblems(role, raw):
+  if not isinstance(raw, dict):
+    return [f'{role} 要寫成物件，例如 {{"cli": "claude", "model": "opus"}}']
+  problems = []
+  cli = raw.get("cli", defaultConfig[role]["cli"])
+  if cli not in cliNames:
+    problems.append(f"{role}.cli 只能是 claude 或 codex，現在是 {cli}")
+  if raw.get("model") is not None and not isinstance(raw["model"], str):
+    problems.append(f'{role}.model 要是文字，例如 "opus"')
+  if not validReasoningEffort(raw.get("reasoningEffort")):
+    problems.append(f'{role}.reasoningEffort 要是 CLI 支援的推理強度文字，例如 "high"')
+  return problems + roleToolProblems(role, raw)
+
+
+def roleToolProblems(role, raw):
+  problems = []
+  examples = {"command": '["C:/tools/claude.exe"]', "allowedTools": '["Bash(npm install*)"]'}
+  for key, example in examples.items():
+    value = raw.get(key)
+    if value is None:
+      continue
+    valid = isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if not valid or (key == "command" and not value):
+      problems.append(f'{role}.{key} 要是文字陣列，例如 {example}')
+  return problems
+
+
+def roleChoiceText(cli, model, reasoningEffort=None):
+  effortText = f"・推理強度 {reasoningEffort}" if reasoningEffort else ""
+  return f"{cliTitles.get(cli, cli)}（{model or '預設模型'}）{effortText}"
 
 
 def writeUserConfig(projectDir, userConfig):
@@ -125,14 +138,24 @@ def writeUserConfig(projectDir, userConfig):
   raise BoardError("設定檔正被其他程式使用，請稍後再試")
 
 
-def saveRoleChoice(projectDir, role, cli, model):
-  """只改 .board/config.json 裡這個角色的 cli、model，其他設定原樣保留；不能存時丟 BoardError。"""
+def validReasoningEffort(value):
+  return value is None or (isinstance(value, str) and (not value or bool(reasoningEffortPattern.fullmatch(value))))
+
+
+def validateRoleChoice(role, cli, model, reasoningEffort):
   if role not in roleNames:
     raise BoardError(f"角色只能是 writer 或 reviewer，現在是 {role}")
   if cli not in cliNames:
     raise BoardError(f"CLI 只能是 claude 或 codex，現在是 {cli}")
   if model and not modelNamePattern.fullmatch(model):
     raise BoardError(modelNameRule)
+  if not validReasoningEffort(reasoningEffort):
+    raise BoardError("推理強度要是 CLI 支援的名稱，例如 high")
+
+
+def saveRoleChoice(projectDir, role, cli, model, reasoningEffort=None):
+  """更新角色的 CLI、模型與推理強度，其他設定原樣保留。"""
+  validateRoleChoice(role, cli, model, reasoningEffort)
   try:
     userConfig = readUserConfig(projectDir)
   except (OSError, ValueError) as error:
@@ -145,10 +168,11 @@ def saveRoleChoice(projectDir, role, cli, model):
   if roleConfig.get("command") and cli != roleConfig.get("cli", defaultConfig[role]["cli"]):
     raise BoardError(f"{role} 有自訂 command，換 CLI 前要先到 .board/config.json 改 command")
   roleConfig["cli"] = cli
-  if model:
-    roleConfig["model"] = model
-  else:
-    roleConfig.pop("model", None)
+  for key, value in (("model", model), ("reasoningEffort", reasoningEffort)):
+    if value:
+      roleConfig[key] = value
+    else:
+      roleConfig.pop(key, None)
   userConfig[role] = roleConfig
   writeUserConfig(projectDir, userConfig)
 

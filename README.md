@@ -91,8 +91,8 @@ python <agent-board>\install_skill.py
 
 ```json
 {
-  "writer":   { "cli": "codex",  "model": "gpt-6.1-sol" },
-  "reviewer": { "cli": "claude", "model": "opus" }
+  "writer":   { "cli": "codex",  "model": "gpt-6.1-sol", "reasoningEffort": "high" },
+  "reviewer": { "cli": "claude", "model": "opus", "reasoningEffort": "high" }
 }
 ```
 
@@ -100,13 +100,17 @@ python <agent-board>\install_skill.py
 |---|---|---|
 | `cli` | `claude` 或 `codex` | 寫程式 `claude`、審查 `codex` |
 | `model` | 交給 CLI 的模型名稱（Claude 用 `--model`，Codex 用 `-m`） | 用 CLI 自己的預設模型 |
+| `reasoningEffort` | 模型支援的推理強度（Claude 用 `--effort`，Codex 用 `-c model_reasoning_effort=…`） | 沿用 CLI 設定 |
 | `contextWindow` | 這個模型的 Context 大小（tokens），只影響儀表板的使用率 | Claude 200000、Codex 475000 |
 | `allowedTools` | 寫程式的 Claude 可以多跑的指令，見「在專案裡啟用」 | 沒有 |
 | `command` | CLI 不在 PATH 上時寫完整路徑，例如 `["C:/tools/codex.cmd"]` | PATH 上的 `claude`、`codex` |
 
 - 兩個都不寫時：Claude 寫程式、Codex 審查，用各自的預設模型
 - 同時跑的 agent 身分（`writer`、`writer-sub1`…、`reviewer`…）都用所屬角色的設定
-- 也可以在儀表板的「模型」分頁改 `cli` 和 `model`，其他欄位還是要改設定檔。儀表板只接受英數字開頭、由英數字和 `. _ - : / [ ]` 組成的模型名稱；角色有自訂 `command` 時，要換 CLI 得先改設定檔
+- 儀表板的「模型」分頁可選 `cli`、模型與推理強度，選單直接讀本機 CLI：Codex 使用 app-server 的 `model/list`，Claude 使用 SDK 初始化回傳的模型資料。不傳送對話、不產生推理任務，也不需要額外的 API key
+- 模型名稱、版本與順序跟著 CLI；Claude 別名另顯示目前對應的完整模型 ID。只列出該模型支援的推理強度，儲存前也會檢查；切換 CLI 或模型時，推理強度會重設為沿用 CLI 設定
+- 清單快取五分鐘，可按「重新整理模型」立即重讀；CLI 未安裝、未登入、不支援查詢或查詢逾時時會顯示錯誤。清單反映 CLI 提供的選項，實際使用權限仍由 CLI／供應商決定
+- 角色有自訂 `command` 時，查詢會使用同一個指令；要換 CLI 得先改設定檔。其他欄位仍需改 `.board/config.json`
 - conductor 每一輪都會重讀 `writer`、`reviewer`：改了之後從下一個新啟動的 agent 開始用，正在跑的不受影響。其他設定（`maxParallel`、`testCommand` 等）改了要重開 conductor
 - 換了寫程式的 CLI 或模型之後，進行中的任務下一輪會開新對話，接不回上一輪
 - 權限：
