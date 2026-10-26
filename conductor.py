@@ -15,8 +15,8 @@ from pathlib import Path
 import board_agents
 import board_git
 from board_core import (BoardError, PlanStatus, TaskStatus, agentLanes, appendEvent, boardDir, configProblems,
-                        deriveState, isPlanFinished, loadConfig, loadPlans, readEvents, readUserConfig, readyTasks,
-                        roleSpec, taskKey, tasksWithStatus)
+                        defaultConfig, deriveState, isPlanFinished, loadConfig, loadPlans, readEvents,
+                        readUserConfig, readyTasks, roleChoiceText, roleNames, roleSpec, taskKey, tasksWithStatus)
 from board_prompts import buildResolvePrompt, buildReviewPrompt, buildWritePrompt, reviewerRules, writerRules
 from board_review import (renderReviewMarkdown, reviewFileName, reviewResultSchema, validateReview,
                           validateWriteResult, writeResultSchema)
@@ -73,6 +73,8 @@ def formatEvent(event):
 class Conductor:
   def __init__(self, projectDir, config=None, out=print):
     self.projectDir = Path(projectDir).resolve()
+    # 測試直接給設定；從設定檔讀的才每一輪重讀，你在儀表板換的模型才會生效
+    self.watchConfig = config is None
     self.config = config or loadConfig(self.projectDir)
     self.out = out
     self.jobs = {}
@@ -80,10 +82,32 @@ class Conductor:
     self.notified = set()
     # 啟動前的歷史事件不重印，終端機只顯示這次執行期間發生的事
     self.printedCount = len(readEvents(self.projectDir))
-    self.writer = roleSpec(self.config, "writer")
-    self.reviewer = roleSpec(self.config, "reviewer")
-    self.writerCommand = board_agents.resolveCommand(self.writer["command"], self.writer["cli"])
-    self.reviewerCommand = board_agents.resolveCommand(self.reviewer["command"], self.reviewer["cli"])
+    self.roles = {role: self.roleLaunch(roleSpec(self.config, role)) for role in roleNames}
+
+  def roleLaunch(self, spec):
+    return {"spec": spec, "command": board_agents.resolveCommand(spec["command"], spec["cli"])}
+
+  def refreshRoles(self):
+    if not self.watchConfig:
+      return
+    try:
+      userConfig = readUserConfig(self.projectDir)
+    except (OSError, ValueError) as error:
+      problems = [f"讀不懂：{error}"]
+    else:
+      problems = configProblems(userConfig) if isinstance(userConfig, dict) else ["最外層要是物件"]
+    if problems:
+      # 執行中把設定改壞時不停下來：繼續用上一份能用的設定，等你改好
+      self.notifyOnce("警告｜.board/config.json 有問題，繼續用原本的寫程式、審查設定：" + "；".join(problems))
+      return
+    config = dict(defaultConfig)
+    config.update(userConfig)
+    for role in roleNames:
+      spec = roleSpec(config, role)
+      if spec != self.roles[role]["spec"]:
+        # 換成新的物件、不改舊的：正在跑的 job 手上還拿著舊設定
+        self.roles[role] = self.roleLaunch(spec)
+        self.out(f"設定變更：{role} 改用 {roleChoiceText(spec['cli'], spec['model'])}，從下一個新啟動的 agent 開始用")
 
   def currentState(self):
     loadErrors = []
@@ -123,6 +147,7 @@ class Conductor:
     return next((lane for lane in lanes if lane not in busy), None)
 
   def tick(self):
+    self.refreshRoles()
     plans, state = self.currentState()
     if not self.recovered:
       self.recoverInterrupted(state)
@@ -238,8 +263,8 @@ class Conductor:
         return
       self.startWrite(plans[taskState["plan"]], taskState, lane)
 
-  def claudeAllowedTools(self):
-    allowedTools = list(self.writer["allowedTools"])
+  def claudeAllowedTools(self, spec):
+    allowedTools = list(spec["allowedTools"])
     testCommand = self.config.get("testCommand", "")
     if testCommand:
       # 只開放專案的測試指令，Claude 才能自我驗證，又不會拿到其他 shell 權限；Windows 上 shell 工具是 PowerShell
@@ -250,12 +275,14 @@ class Conductor:
     return allowedTools
 
   def startWrite(self, plan, taskState, lane):
-    cli = self.writer["cli"]
+    launch = self.roles["writer"]
+    cli, model = launch["spec"]["cli"], launch["spec"]["model"]
     info = {"kind": "write", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
             "agent": lane, "text": taskState["text"], "mode": "resolve" if taskState["resolving"] else "write",
-            "cli": cli}
-    # 換了寫程式的 CLI 之後，上一輪的對話屬於另一個 CLI，接不回來，只能開新對話
-    resume = bool(taskState["resumable"] and taskState["sessionId"] and taskState["sessionCli"] == cli)
+            "cli": cli, "model": model, "launch": launch}
+    # 換了 CLI，上一輪的對話接不回來；換了模型，不確定接續時能不能換，所以也開新對話
+    resume = bool(taskState["resumable"] and taskState["sessionId"] and taskState["sessionCli"] == cli
+                  and taskState["sessionModel"] == model)
     # Claude 可以先指定對話編號；Codex 的要等它跑起來，從輸出取得
     info["sessionId"] = taskState["sessionId"] if resume else (str(uuid.uuid4()) if cli == "claude" else None)
     cleanRemerge = False
@@ -294,21 +321,22 @@ class Conductor:
     self.jobs[key] = info
     try:
       self.event("taskStarted", info, worktree=str(worktree), sessionId=info["sessionId"], resume=resume,
-                 mode=info["mode"], cli=cli)
+                 mode=info["mode"], cli=cli, model=model)
     except Exception:
       self.jobs.pop(key, None)
       info["job"].kill()
       raise
 
   def writeLaunch(self, info, worktree, prompt, resume):
+    launch = info["launch"]
     if info["cli"] == "claude":
-      argv = board_agents.buildClaudeArgv(self.writerCommand, info["sessionId"], resume, writerRules("claude"),
-                                          self.claudeAllowedTools(), self.writer["model"])
+      argv = board_agents.buildClaudeArgv(launch["command"], info["sessionId"], resume, writerRules("claude"),
+                                          self.claudeAllowedTools(launch["spec"]), info["model"])
       return argv, prompt, board_agents.parseClaudeLine
     schemaPath = self.codexFiles(info, "write-schema.json", writeResultSchema,
                                  f"{info['plan']}-{info['task']}-r{info['round']}-write.json")
-    argv = board_agents.buildCodexWriteArgv(self.writerCommand, worktree, schemaPath, info["outPath"],
-                                            info["sessionId"] if resume else None, self.writer["model"])
+    argv = board_agents.buildCodexWriteArgv(launch["command"], worktree, schemaPath, info["outPath"],
+                                            info["sessionId"] if resume else None, info["model"])
     # Codex 沒有附加系統提示的參數，規則放在 prompt 最前面
     return argv, writerRules("codex") + "\n\n" + prompt, board_agents.parseCodexLine
 
@@ -346,7 +374,8 @@ class Conductor:
       self.event("agentFailed", info, stage="write", reason="回覆格式不符：" + "；".join(errors))
       return
     # 下一輪要接續這次的對話；Codex 的對話編號到這時才知道
-    session = {"sessionId": info["sessionId"] or job.activity.get("threadId"), "cli": info["cli"]}
+    session = {"sessionId": info["sessionId"] or job.activity.get("threadId"), "cli": info["cli"],
+               "model": info["model"]}
     if result["status"] == "blocked":
       self.event("taskBlocked", info, reason=result["blockedReason"], **session)
       return
@@ -407,9 +436,12 @@ class Conductor:
         return
       self.startReview(plans[taskState["plan"]], taskState, lane)
 
-  def startReview(self, plan, taskState, lane, previousErrors=None, attempt=1):
+  def startReview(self, plan, taskState, lane, previousErrors=None, attempt=1, launch=None):
+    # 格式不符的重審沿用第一次的設定：儀表板照 reviewStarted 記的 CLI 解析 log，中途換了設定也一致
+    launch = launch or self.roles["reviewer"]
     info = {"kind": "review", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
-            "agent": lane, "attempt": attempt, "cli": self.reviewer["cli"]}
+            "agent": lane, "attempt": attempt, "cli": launch["spec"]["cli"], "model": launch["spec"]["model"],
+            "launch": launch}
     try:
       worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
       diff = board_git.taskDiff(self.projectDir, info["plan"], info["task"])
@@ -427,20 +459,20 @@ class Conductor:
     self.jobs[key] = info
     try:
       if attempt == 1:
-        self.event("reviewStarted", info, cli=info["cli"])
+        self.event("reviewStarted", info, cli=info["cli"], model=info["model"])
     except Exception:
       self.jobs.pop(key, None)
       info["job"].kill()
       raise
 
   def reviewLaunch(self, info, worktree, prompt):
+    command = info["launch"]["command"]
     if info["cli"] == "claude":
-      argv = board_agents.buildClaudeReviewArgv(self.reviewerCommand, reviewerRules, self.reviewer["model"])
+      argv = board_agents.buildClaudeReviewArgv(command, reviewerRules, info["model"])
       return argv, prompt, board_agents.parseClaudeLine
     schemaPath = self.codexFiles(info, "review-schema.json", reviewResultSchema,
                                  f"{info['plan']}-{info['task']}-r{info['round']}-review{info['attempt']}.json")
-    argv = board_agents.buildCodexArgv(self.reviewerCommand, worktree, schemaPath, info["outPath"],
-                                       self.reviewer["model"])
+    argv = board_agents.buildCodexArgv(command, worktree, schemaPath, info["outPath"], info["model"])
     return argv, reviewerRules + "\n\n" + prompt, board_agents.parseCodexLine
 
   def finishReview(self, plan, taskState, info):
@@ -460,7 +492,7 @@ class Conductor:
     if errors:
       if info["attempt"] == 1:
         # 格式不符先附上錯誤請它重審一次，第二次還不行才交給你
-        self.startReview(plan, taskState, info["agent"], previousErrors=errors, attempt=2)
+        self.startReview(plan, taskState, info["agent"], previousErrors=errors, attempt=2, launch=info["launch"])
         return
       self.event("needsYou", info, kind="invalidReview", reason="審查結果不符規則：" + "；".join(errors))
       return

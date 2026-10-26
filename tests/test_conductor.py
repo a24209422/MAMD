@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 import time
@@ -499,3 +500,59 @@ def test_writerAllowedToolsReachClaude(startBoard):
   argv = readCalls(scenarioDir, "write")[0]["argv"]
   allowedIndex = argv.index("--allowedTools")
   assert argv[allowedIndex + 1:allowedIndex + 3] == ["Bash(npm install*)", "PowerShell(npm install*)"]
+
+
+def writeConfigFile(projectDir, config):
+  (projectDir / ".board" / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+
+def watchingConductor(projectDir, lines, **configOverrides):
+  # 沒有直接給設定、從 .board/config.json 讀的 conductor 才會每一輪重讀
+  writeConfigFile(projectDir, fakeConfig(**configOverrides))
+  return Conductor(projectDir, out=lines.append)
+
+
+def test_roleChangeAppliesToNextAgentWithNewSession(startBoard):
+  firstConductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["fail", "pass"]}})
+  lines = []
+  conductor = watchingConductor(firstConductor.projectDir, lines, writer=fakeRole("claude", model="opus"))
+  runUntil(conductor, taskIs(TaskStatus.reviewing))
+  writeConfigFile(conductor.projectDir, fakeConfig(writer=fakeRole("claude", model="sonnet")))
+  runUntil(conductor, planDone)
+  first, second = readCalls(scenarioDir, "write")
+  assert first["argv"][:2] == ["--model", "opus"] and second["argv"][:2] == ["--model", "sonnet"]
+  # 換了模型就開新對話：不確定接續舊對話時能不能換模型
+  assert "--resume" not in second["argv"]
+  starts = eventsOf(conductor, "taskStarted")
+  assert [(event["data"]["model"], event["data"]["resume"]) for event in starts] == [("opus", False), ("sonnet", False)]
+  assert lines.count("設定變更：writer 改用 Claude（sonnet），從下一個新啟動的 agent 開始用") == 1
+
+
+def test_brokenConfigKeepsPreviousRolesAndWarnsOnce(startBoard):
+  firstConductor, scenarioDir = startBoard(oneTask)
+  lines = []
+  conductor = watchingConductor(firstConductor.projectDir, lines)
+  # cli 寫錯，但 command 仍指向假 agent：就算沒擋下也不會啟動真的 CLI
+  writeConfigFile(conductor.projectDir, fakeConfig(writer={**fakeRole("claude"), "cli": "gemini"}))
+  runUntil(conductor, planDone)
+  warning = "警告｜.board/config.json 有問題，繼續用原本的寫程式、審查設定：writer.cli 只能是 claude 或 codex，現在是 gemini"
+  assert lines.count(warning) == 1
+  assert [event["data"]["cli"] for event in eventsOf(conductor, "taskStarted")] == ["claude"]
+  (conductor.projectDir / ".board" / "config.json").write_text("{壞掉", encoding="utf-8")
+  conductor.refreshRoles()
+  assert conductor.roles["writer"]["spec"]["cli"] == "claude"
+  assert lines[-1].startswith("警告｜.board/config.json 有問題，繼續用原本的寫程式、審查設定：讀不懂：")
+
+
+def test_reviewRetryKeepsSettingsOfFirstAttempt(startBoard):
+  firstConductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["invalid", "pass"]}})
+  lines = []
+  conductor = watchingConductor(firstConductor.projectDir, lines, reviewer=fakeRole("codex", model="m1"))
+  runUntil(conductor, taskIs(TaskStatus.reviewing))
+  writeConfigFile(conductor.projectDir, fakeConfig(reviewer=fakeRole("claude", model="opus")))
+  runUntil(conductor, planDone)
+  first, second = readCalls(scenarioDir, "review")
+  # 格式不符的重審和第一次是同一個審查，沿用同一組設定
+  assert second["argv"][:2] == ["exec", "-C"] and second["argv"][second["argv"].index("-m") + 1] == "m1"
+  reviews = eventsOf(conductor, "reviewStarted")
+  assert [(event["data"]["cli"], event["data"]["model"]) for event in reviews] == [("codex", "m1")]
