@@ -293,7 +293,7 @@ def onTaskWritten(taskState, event):
 
 def onTaskBlocked(taskState, event):
   taskState["status"] = TaskStatus.needsYou
-  taskState["needs"] = {"kind": "blocked", "reason": "Claude 回報卡住：" + event["data"].get("reason", "")}
+  taskState["needs"] = {"kind": "blocked", "reason": "寫程式的 agent 回報卡住：" + event["data"].get("reason", "")}
   taskState["resumable"] = True
   rememberSession(taskState, event["data"])
 

@@ -166,8 +166,8 @@ def test_isPlanFinished():
 
 
 def test_agentLanes():
-  assert agentLanes("claude", {"maxParallel": 3}) == ["claude", "claude-sub1", "claude-sub2"]
-  assert agentLanes("codex", {"maxParallel": 1}) == ["codex"]
+  assert agentLanes("writer", {"maxParallel": 3}) == ["writer", "writer-sub1", "writer-sub2"]
+  assert agentLanes("reviewer", {"maxParallel": 1}) == ["reviewer"]
 
 
 def conflicted(taskId="T1", conflicts=("a.py",)):

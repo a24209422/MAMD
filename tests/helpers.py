@@ -28,10 +28,12 @@ from pathlib import Path
 fakesDir = Path(__file__).resolve().parent / "fakes"
 
 
+def fakeRole(cli, **extra):
+  return {"cli": cli, "command": [sys.executable, str(fakesDir / f"fake_{cli}.py")], **extra}
+
+
 def fakeConfig(**overrides):
-  config = {"claudeCommand": [sys.executable, str(fakesDir / "fake_claude.py")],
-            "codexCommand": [sys.executable, str(fakesDir / "fake_codex.py")],
-            "claudeAllowedTools": [],
+  config = {"writer": fakeRole("claude"), "reviewer": fakeRole("codex"),
             "pollSeconds": 0.05, "timeoutMinutes": 1, "maxParallel": 3, "maxRounds": 3, "testCommand": ""}
   config.update(overrides)
   return config

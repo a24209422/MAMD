@@ -1,4 +1,4 @@
-"""指揮程式：讀事件決定下一步，啟動 Claude 寫程式、Codex 審查，合併通過的任務。
+"""指揮程式：讀事件決定下一步，啟動寫程式、審查的 agent（Claude 或 Codex），合併通過的任務。
 
 用法：python conductor.py <專案資料夾>
 """
@@ -16,7 +16,7 @@ import board_agents
 import board_git
 from board_core import (BoardError, PlanStatus, TaskStatus, agentLanes, appendEvent, boardDir, configProblems,
                         deriveState, isPlanFinished, loadConfig, loadPlans, readEvents, readUserConfig, readyTasks,
-                        taskKey, tasksWithStatus)
+                        roleSpec, taskKey, tasksWithStatus)
 from board_prompts import buildResolvePrompt, buildReviewPrompt, buildWritePrompt, reviewerRules, writerRules
 from board_review import (renderReviewMarkdown, reviewFileName, reviewResultSchema, validateReview,
                           validateWriteResult, writeResultSchema)
@@ -40,7 +40,7 @@ eventLabels = {
   "reviewPassed": "審查通過",
   "reviewFailed": "審查不通過",
   "taskMerged": "已合併進 plan 分支",
-  "taskConflicted": "合併衝突，交給 Claude 解",
+  "taskConflicted": "合併衝突，交給寫程式的 agent 解",
   "agentFailed": "agent 失敗",
   "taskInterrupted": "中斷，回到排隊",
   "needsYou": "等你處理",
@@ -80,8 +80,10 @@ class Conductor:
     self.notified = set()
     # 啟動前的歷史事件不重印，終端機只顯示這次執行期間發生的事
     self.printedCount = len(readEvents(self.projectDir))
-    self.claudeCommand = board_agents.resolveCommand(self.config["claudeCommand"], "claude")
-    self.codexCommand = board_agents.resolveCommand(self.config["codexCommand"], "codex")
+    self.writer = roleSpec(self.config, "writer")
+    self.reviewer = roleSpec(self.config, "reviewer")
+    self.writerCommand = board_agents.resolveCommand(self.writer["command"], self.writer["cli"])
+    self.reviewerCommand = board_agents.resolveCommand(self.reviewer["command"], self.reviewer["cli"])
 
   def currentState(self):
     loadErrors = []
@@ -190,7 +192,8 @@ class Conductor:
     return job.tailText(5)[-maxReasonTailChars:]
 
   def pauseForQuota(self, info, stage):
-    appendEvent(self.projectDir, "paused", data={"reason": f"額度用完（{info['agent']}），用 board.py resume 繼續"})
+    appendEvent(self.projectDir, "paused",
+                data={"reason": f"額度用完（{info['agent']}，{info['cli']}），用 board.py resume 繼續"})
     self.event("taskInterrupted", info, stage=stage)
 
   def printNewEvents(self):
@@ -230,13 +233,13 @@ class Conductor:
     for taskState in readyTasks(state):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
         continue
-      lane = self.freeLane("claude", "write", taskState["agent"])
+      lane = self.freeLane("writer", "write", taskState["agent"])
       if lane is None:
         return
       self.startWrite(plans[taskState["plan"]], taskState, lane)
 
   def claudeAllowedTools(self):
-    allowedTools = list(self.config.get("claudeAllowedTools", []))
+    allowedTools = list(self.writer["allowedTools"])
     testCommand = self.config.get("testCommand", "")
     if testCommand:
       # 只開放專案的測試指令，Claude 才能自我驗證，又不會拿到其他 shell 權限；Windows 上 shell 工具是 PowerShell
@@ -247,10 +250,14 @@ class Conductor:
     return allowedTools
 
   def startWrite(self, plan, taskState, lane):
+    cli = self.writer["cli"]
     info = {"kind": "write", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
-            "agent": lane, "text": taskState["text"], "mode": "resolve" if taskState["resolving"] else "write"}
-    resume = bool(taskState["resumable"] and taskState["sessionId"])
-    sessionId = taskState["sessionId"] if resume else str(uuid.uuid4())
+            "agent": lane, "text": taskState["text"], "mode": "resolve" if taskState["resolving"] else "write",
+            "cli": cli}
+    # 換了寫程式的 CLI 之後，上一輪的對話屬於另一個 CLI，接不回來，只能開新對話
+    resume = bool(taskState["resumable"] and taskState["sessionId"] and taskState["sessionCli"] == cli)
+    # Claude 可以先指定對話編號；Codex 的要等它跑起來，從輸出取得
+    info["sessionId"] = taskState["sessionId"] if resume else (str(uuid.uuid4()) if cli == "claude" else None)
     cleanRemerge = False
     try:
       worktree = board_git.ensureTaskWorktree(self.projectDir, info["plan"], info["task"])
@@ -266,18 +273,17 @@ class Conductor:
         else:
           prompt = buildWritePrompt(plan, info["task"], info["round"], self.readReview(taskState["lastReviewNotes"]),
                                     taskState["userNote"],
-                                    self.config["testCommand"] if self.config.get("tddCrap") else "")
-        argv = board_agents.buildClaudeArgv(self.claudeCommand, sessionId, resume, writerRules("claude"),
-                                            self.claudeAllowedTools())
-        info["job"] = board_agents.AgentJob(argv, worktree, prompt, self.logPath(info, "write"),
-                                            board_agents.parseClaudeLine, self.timeoutSeconds()).start()
+                                    self.config["testCommand"] if self.config.get("tddCrap") else "", cli)
+        argv, stdinText, lineParser = self.writeLaunch(info, worktree, prompt, resume)
+        info["job"] = board_agents.AgentJob(argv, worktree, stdinText, self.logPath(info, "write"), lineParser,
+                                            self.timeoutSeconds()).start()
     except Exception as error:
       # 例如核准後 plan 檔被改掉這個任務；接住所有例外，否則同一個任務每一輪都會擋住其他任務
       self.event("agentFailed", info, stage="write", reason=f"無法啟動：{type(error).__name__}: {error}")
       return
     info["worktree"] = worktree
     if cleanRemerge:
-      # 最新的 plan 分支合併進來沒有衝突（例如你已經在任務的 worktree 處理過），不必叫 Claude，直接測試、審查
+      # 最新的 plan 分支合併進來沒有衝突（例如你已經在任務的 worktree 處理過），不必叫寫程式的 agent，直接測試、審查
       info["agent"] = None
       self.event("taskWritten", info, commit=board_git.headCommit(worktree), summary="合併最新的 plan 分支，沒有衝突",
                  mode="resolve", conflicts=[])
@@ -287,18 +293,46 @@ class Conductor:
     key = taskKey(info["plan"], info["task"])
     self.jobs[key] = info
     try:
-      self.event("taskStarted", info, worktree=str(worktree), sessionId=sessionId, resume=resume, mode=info["mode"])
+      self.event("taskStarted", info, worktree=str(worktree), sessionId=info["sessionId"], resume=resume,
+                 mode=info["mode"], cli=cli)
     except Exception:
       self.jobs.pop(key, None)
       info["job"].kill()
       raise
+
+  def writeLaunch(self, info, worktree, prompt, resume):
+    if info["cli"] == "claude":
+      argv = board_agents.buildClaudeArgv(self.writerCommand, info["sessionId"], resume, writerRules("claude"),
+                                          self.claudeAllowedTools(), self.writer["model"])
+      return argv, prompt, board_agents.parseClaudeLine
+    schemaPath = self.codexFiles(info, "write-schema.json", writeResultSchema,
+                                 f"{info['plan']}-{info['task']}-r{info['round']}-write.json")
+    argv = board_agents.buildCodexWriteArgv(self.writerCommand, worktree, schemaPath, info["outPath"],
+                                            info["sessionId"] if resume else None, self.writer["model"])
+    # Codex 沒有附加系統提示的參數，規則放在 prompt 最前面
+    return argv, writerRules("codex") + "\n\n" + prompt, board_agents.parseCodexLine
+
+  def codexFiles(self, info, schemaName, schema, outName):
+    runDir = boardDir(self.projectDir) / "runs"
+    runDir.mkdir(parents=True, exist_ok=True)
+    schemaPath = runDir / schemaName
+    schemaPath.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+    info["outPath"] = runDir / outName
+    # 舊的輸出檔留著的話，這次 Codex 沒寫出結果也會被誤讀成成功
+    info["outPath"].unlink(missing_ok=True)
+    return schemaPath
+
+  def finalResult(self, info):
+    if info["cli"] == "claude":
+      return board_agents.claudeFinalResult(info["job"].activity)
+    return board_agents.codexFinalResult(info["outPath"])
 
   def finishWrite(self, info):
     job = info["job"]
     if job.killed and not job.timedOut:
       self.event("taskInterrupted", info, stage="write")
       return
-    result, error = board_agents.claudeFinalResult(job.activity)
+    result, error = self.finalResult(info)
     if result is None:
       # 額度用完不是任務的問題，不能消耗重試次數；整個暫停，等你恢復額度後 resume
       if self.quotaSuspect(job, error):
@@ -311,8 +345,10 @@ class Conductor:
     if errors:
       self.event("agentFailed", info, stage="write", reason="回覆格式不符：" + "；".join(errors))
       return
+    # 下一輪要接續這次的對話；Codex 的對話編號到這時才知道
+    session = {"sessionId": info["sessionId"] or job.activity.get("threadId"), "cli": info["cli"]}
     if result["status"] == "blocked":
-      self.event("taskBlocked", info, reason=result["blockedReason"])
+      self.event("taskBlocked", info, reason=result["blockedReason"], **session)
       return
     try:
       if info["mode"] == "resolve":
@@ -323,7 +359,7 @@ class Conductor:
           return
         subject = "解合併衝突（" + "、".join(info["conflicts"]) + "）"
       elif not board_git.hasChanges(info["worktree"]):
-        self.event("needsYou", info, kind="noChanges", reason="Claude 回報完成，但沒有任何改動")
+        self.event("needsYou", info, kind="noChanges", reason="寫程式的 agent 回報完成，但沒有任何改動")
         return
       else:
         subject = info["text"]
@@ -333,7 +369,7 @@ class Conductor:
       self.event("needsYou", info, kind="commitFailed", reason=f"commit 失敗：{error}")
       return
     self.event("taskWritten", info, commit=commit, summary=result["summary"], mode=info["mode"],
-               conflicts=info.get("conflicts", []))
+               conflicts=info.get("conflicts", []), **session)
     self.runTests(info)
 
   def runTests(self, info):
@@ -366,31 +402,23 @@ class Conductor:
     for taskState in tasksWithStatus(state, TaskStatus.toReview):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
         continue
-      lane = self.freeLane("codex", "review", taskState["reviewAgent"])
+      lane = self.freeLane("reviewer", "review", taskState["reviewAgent"])
       if lane is None:
         return
       self.startReview(plans[taskState["plan"]], taskState, lane)
 
   def startReview(self, plan, taskState, lane, previousErrors=None, attempt=1):
     info = {"kind": "review", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
-            "agent": lane, "attempt": attempt}
-    runDir = boardDir(self.projectDir) / "runs"
-    runDir.mkdir(parents=True, exist_ok=True)
-    schemaPath = runDir / "codex-review-schema.json"
-    schemaPath.write_text(json.dumps(reviewResultSchema, ensure_ascii=False), encoding="utf-8")
-    info["outPath"] = runDir / f"{info['plan']}-{info['task']}-r{info['round']}-review{attempt}.json"
-    # 舊的輸出檔留著的話，這次 Codex 沒寫出結果也會被誤讀成成功
-    info["outPath"].unlink(missing_ok=True)
+            "agent": lane, "attempt": attempt, "cli": self.reviewer["cli"]}
     try:
       worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
       diff = board_git.taskDiff(self.projectDir, info["plan"], info["task"])
       resolvedConflicts = taskState["conflictFiles"] if taskState["lastWriteMode"] == "resolve" else None
-      prompt = reviewerRules + "\n\n" + buildReviewPrompt(plan, info["task"], info["round"], diff,
-                                                          taskState["lastTest"], previousErrors, resolvedConflicts,
-                                                          bool(self.config.get("tddCrap")))
-      argv = board_agents.buildCodexArgv(self.codexCommand, worktree, schemaPath, info["outPath"])
-      info["job"] = board_agents.AgentJob(argv, worktree, prompt, self.logPath(info, f"review{attempt}"),
-                                          board_agents.parseCodexLine, self.timeoutSeconds()).start()
+      prompt = buildReviewPrompt(plan, info["task"], info["round"], diff, taskState["lastTest"], previousErrors,
+                                 resolvedConflicts, bool(self.config.get("tddCrap")))
+      argv, stdinText, lineParser = self.reviewLaunch(info, worktree, prompt)
+      info["job"] = board_agents.AgentJob(argv, worktree, stdinText, self.logPath(info, f"review{attempt}"),
+                                          lineParser, self.timeoutSeconds()).start()
     except Exception as error:
       self.event("agentFailed", info, stage="review", reason=f"無法啟動：{type(error).__name__}: {error}")
       return
@@ -399,18 +427,28 @@ class Conductor:
     self.jobs[key] = info
     try:
       if attempt == 1:
-        self.event("reviewStarted", info)
+        self.event("reviewStarted", info, cli=info["cli"])
     except Exception:
       self.jobs.pop(key, None)
       info["job"].kill()
       raise
+
+  def reviewLaunch(self, info, worktree, prompt):
+    if info["cli"] == "claude":
+      argv = board_agents.buildClaudeReviewArgv(self.reviewerCommand, reviewerRules, self.reviewer["model"])
+      return argv, prompt, board_agents.parseClaudeLine
+    schemaPath = self.codexFiles(info, "review-schema.json", reviewResultSchema,
+                                 f"{info['plan']}-{info['task']}-r{info['round']}-review{info['attempt']}.json")
+    argv = board_agents.buildCodexArgv(self.reviewerCommand, worktree, schemaPath, info["outPath"],
+                                       self.reviewer["model"])
+    return argv, reviewerRules + "\n\n" + prompt, board_agents.parseCodexLine
 
   def finishReview(self, plan, taskState, info):
     job = info["job"]
     if job.killed and not job.timedOut:
       self.event("taskInterrupted", info, stage="review")
       return
-    result, error = board_agents.codexFinalResult(info["outPath"])
+    result, error = self.finalResult(info)
     if result is None:
       if self.quotaSuspect(job, error):
         self.pauseForQuota(info, "review")

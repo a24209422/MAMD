@@ -8,7 +8,7 @@ import board_git
 import conductor as conductorModule
 from board_core import PlanStatus, TaskStatus
 from conductor import Conductor
-from helpers import fakeConfig, readCalls, runUntil
+from helpers import fakeConfig, fakeRole, readCalls, runUntil
 
 oneTask = ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |"]
 twoIndependent = oneTask + ["| R1 | | D1 | | T2 任務二 | | 驗證二 |"]
@@ -68,6 +68,13 @@ def test_quotaPausesEverything(startBoard):
   assert state["tasks"]["P0001/T1"]["status"] == TaskStatus.queued
 
 
+def test_codexWriterQuotaPausesEverything(startBoard):
+  conductor, _ = startBoard(oneTask, {"write": {"T1": ["quota"]}}, writer=fakeRole("codex"))
+  state = runUntil(conductor, lambda state: state["paused"])
+  assert "額度用完（writer，codex）" in state["pauseReason"]
+  assert state["tasks"]["P0001/T1"]["status"] == TaskStatus.queued
+
+
 def test_reviewQuotaPausesEverything(startBoard):
   conductor, _ = startBoard(oneTask, {"review": {"T1": ["quota"]}})
   state = runUntil(conductor, lambda state: state["paused"])
@@ -117,7 +124,7 @@ def test_retryAfterRoundsExhaustedPassesNote(startBoard):
 
 
 def test_startFailureBecomesNeedsYou(startBoard, tmp_path):
-  conductor, _ = startBoard(oneTask, claudeCommand=[str(tmp_path / "missing-claude.exe")])
+  conductor, _ = startBoard(oneTask, writer=fakeRole("claude", command=[str(tmp_path / "missing-claude.exe")]))
   state = runUntil(conductor, taskIs(TaskStatus.needsYou))
   assert state["tasks"]["P0001/T1"]["needs"]["kind"] == "agentFailed"
   assert "無法啟動" in state["tasks"]["P0001/T1"]["needs"]["reason"]

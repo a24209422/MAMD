@@ -7,8 +7,8 @@ import board_core
 import board_git
 from board_core import PlanStatus, TaskStatus
 import conductor as conductorModule
-from conductor import formatEvent
-from helpers import makeEvent, readCalls, runUntil
+from conductor import Conductor, formatEvent
+from helpers import fakeConfig, fakeRole, makeEvent, readCalls, runUntil
 
 oneTask = ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |"]
 chainedTasks = oneTask + ["| R1 | | D1 | | T2 任務二 | T1 | 驗證二 |"]
@@ -46,7 +46,7 @@ def test_parallelTasksUseSeparateLanes(startBoard):
   events = board_core.readEvents(conductor.projectDir)
   starts = [index for index, event in enumerate(events) if event["type"] == "taskStarted"]
   firstWritten = next(index for index, event in enumerate(events) if event["type"] == "taskWritten")
-  assert {events[index]["agent"] for index in starts} == {"claude", "claude-sub1", "claude-sub2"}
+  assert {events[index]["agent"] for index in starts} == {"writer", "writer-sub1", "writer-sub2"}
   assert max(starts) < firstWritten
 
 
@@ -74,7 +74,7 @@ def test_threeFailuresNeedYou(startBoard):
 def test_blockedNeedsYou(startBoard):
   conductor, _ = startBoard(oneTask, {"write": {"T1": ["blocked"]}})
   state = runUntil(conductor, taskIs(TaskStatus.needsYou))
-  assert state["tasks"]["P0001/T1"]["needs"]["reason"] == "Claude 回報卡住：缺少 API 位址"
+  assert state["tasks"]["P0001/T1"]["needs"]["reason"] == "寫程式的 agent 回報卡住：缺少 API 位址"
 
 
 def test_noChangesNeedsYou(startBoard):
@@ -258,9 +258,9 @@ def test_taskRemovedFromPlanAfterApprovalDoesNotBlockOthers(startBoard, writePla
 
 
 def test_formatEvent():
-  event = makeEvent("reviewFailed", plan="P0001", task="T2", roundNumber=1, agent="codex-sub1", mustFix=2)
+  event = makeEvent("reviewFailed", plan="P0001", task="T2", roundNumber=1, agent="reviewer-sub1", mustFix=2)
   event["time"] = "2026-10-25T21:40:12+08:00"
-  assert formatEvent(event) == "21:40:12 P0001 T2 codex-sub1 審查不通過（第 1 輪，必改 2 條）"
+  assert formatEvent(event) == "21:40:12 P0001 T2 reviewer-sub1 審查不通過（第 1 輪，必改 2 條）"
   paused = makeEvent("paused", reason="你執行了 stop")
   paused["time"] = "2026-10-25T21:41:00+08:00"
   assert formatEvent(paused) == "21:41:00 全部暫停（你執行了 stop）"
@@ -448,3 +448,45 @@ def test_stagedMarkersThenRetryStillAsksClaude(startBoard):
   runUntil(conductor, planDone)
   assert len(readCalls(scenarioDir, "write", taskId=stuck["task"])) == 3
   assert "<<<<<<<" not in board_git.runGit(conductor.projectDir, "show", "plan/P0001:shared.txt")
+
+
+def test_codexWriterResumesAndClaudeReviews(startBoard):
+  conductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["fail", "pass"]}},
+                                      writer=fakeRole("codex", model="gpt-6.1-sol"),
+                                      reviewer=fakeRole("claude", model="opus"))
+  runUntil(conductor, planDone)
+  first, second = readCalls(scenarioDir, "write")
+  assert first["argv"][first["argv"].index("-s") + 1] == "workspace-write"
+  assert first["argv"][first["argv"].index("-m") + 1] == "gpt-6.1-sol"
+  assert first["prompt"].startswith("你是自動流程裡負責寫程式的 agent。")
+  assert second["argv"][:2] == ["exec", "resume"] and second["argv"][-2] == "thread-T1-1"
+  assert "還沒達成需求" in second["prompt"]
+  review = readCalls(scenarioDir, "review")[0]
+  assert review["argv"][:2] == ["--model", "opus"]
+  assert review["argv"][review["argv"].index("--permission-mode") + 1] == "manual"
+  assert review["prompt"].startswith("審查 plan P0001")
+  assert board_git.runGit(conductor.projectDir, "show", "plan/P0001:T1.txt") == "T1 第 2 次"
+  starts = eventsOf(conductor, "taskStarted")
+  assert [event["data"]["cli"] for event in starts] == ["codex", "codex"]
+  assert starts[0]["data"]["sessionId"] is None and starts[1]["data"]["sessionId"] == "thread-T1-1"
+  assert {event["agent"] for event in eventsOf(conductor, "reviewStarted")} == {"reviewer"}
+  assert {event["data"]["cli"] for event in eventsOf(conductor, "reviewStarted")} == {"claude"}
+
+
+def test_switchingWriterCliStartsNewSession(startBoard):
+  conductor, scenarioDir = startBoard(oneTask, {"write": {"T1": ["blocked", "done"]}})
+  runUntil(conductor, taskIs(TaskStatus.needsYou))
+  switched = Conductor(conductor.projectDir, config=fakeConfig(writer=fakeRole("codex")), out=lambda line: None)
+  board_core.appendEvent(conductor.projectDir, "userDecision", plan="P0001", task="T1", data={"action": "retry"})
+  runUntil(switched, planDone)
+  second = readCalls(scenarioDir, "write")[1]
+  assert second["argv"][:2] == ["exec", "-C"]
+  assert eventsOf(switched, "taskStarted")[-1]["data"]["resume"] is False
+
+
+def test_codexWriterReadsTddSkillAndHasNoAllowedTools(startBoard):
+  conductor, scenarioDir = startBoard(oneTask, writer=fakeRole("codex"), testCommand="git --version", tddCrap=True)
+  runUntil(conductor, planDone)
+  write = readCalls(scenarioDir, "write")[0]
+  assert "SKILL.md" in write["prompt"] and "Skill 工具" not in write["prompt"]
+  assert "--allowedTools" not in write["argv"]

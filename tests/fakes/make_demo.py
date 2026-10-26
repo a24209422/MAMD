@@ -24,7 +24,7 @@ area: [後端/展示, 前端/展示]
 | R1 | | D1 | | T3 第一次卡住，重試後完成 | T1 | 在網頁按重試後 T3 完成 |
 """
 # T1、T2 都改 shared.txt，誰後合併誰就衝突，所以兩個都準備好第二次呼叫時解衝突。
-# T3 先卡住，審查第一次不通過；三個任務都掛在 R1 下，假 Codex 退件時寫的 ref R1 才合規則
+# T3 先卡住，審查第一次不通過；三個任務都掛在 R1 下，假的審查退件時寫的 ref R1 才合規則
 scenario = {
   "write": {"T1": ["conflict", "resolve"], "T2": ["conflict", "resolve"], "T3": ["blocked", "done"]},
   "review": {"T3": ["fail", "pass"]},
@@ -59,8 +59,8 @@ def main():
   scenarioPath = projectDir / ".board" / "scenario.json"
   scenarioPath.write_text(json.dumps(scenario, ensure_ascii=False), encoding="utf-8")
   config = {"maxParallel": 2, "maxRounds": 3, "timeoutMinutes": 5, "testCommand": "",
-            "claudeCommand": [sys.executable, str(fakesDir / "fake_claude.py")],
-            "codexCommand": [sys.executable, str(fakesDir / "fake_codex.py")]}
+            "writer": {"cli": "claude", "command": [sys.executable, str(fakesDir / "fake_claude.py")]},
+            "reviewer": {"cli": "codex", "command": [sys.executable, str(fakesDir / "fake_codex.py")]}}
   (projectDir / ".board" / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
   submitted = subprocess.run([sys.executable, str(toolDir / "board.py"), "--project", str(projectDir), "submit", "P0001"],
                              capture_output=True, text=True, encoding="utf-8", errors="replace")
