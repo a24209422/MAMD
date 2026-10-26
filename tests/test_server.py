@@ -1,0 +1,174 @@
+import http.client
+import json
+import socket
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+import board
+import board_core
+import server
+from board_core import appendEvent
+
+toolDir = Path(__file__).resolve().parent.parent
+token = "test-token"
+cleanRows = ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |",
+             "| R1 | | D1 | | T2 任務二 | T1 | 驗證二 |"]
+warningRows = cleanRows + ["| | | D2 額外做法 | | T3 額外任務 | | 驗證三 |"]
+
+
+@pytest.fixture
+def running(gitProject):
+  httpServer = server.makeServer(gitProject, 0, token)
+  thread = threading.Thread(target=httpServer.serve_forever, daemon=True)
+  thread.start()
+  yield gitProject, httpServer.server_address[1]
+  httpServer.shutdown()
+  httpServer.server_close()
+
+
+def call(port, method, path, body=None, headers=None, rawBody=None):
+  connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+  payload = rawBody if rawBody is not None else (json.dumps(body).encode("utf-8") if body is not None else None)
+  allHeaders = {"Content-Type": "application/json"}
+  allHeaders.update(headers or {})
+  connection.request(method, path, body=payload, headers=allHeaders)
+  response = connection.getresponse()
+  data = response.read()
+  connection.close()
+  if response.getheader("Content-Type", "").startswith("application/json"):
+    return response.status, json.loads(data.decode("utf-8"))
+  return response.status, data
+
+
+def post(port, path, body=None, withToken=token):
+  return call(port, "POST", path, body if body is not None else {}, headers={"X-Board-Token": withToken})
+
+
+def eventTypes(projectDir):
+  return [event["type"] for event in board_core.readEvents(projectDir)]
+
+
+def test_servesPageAndState(running):
+  projectDir, port = running
+  status, page = call(port, "GET", "/")
+  assert status == 200 and b"<html" in page.lower()
+  status, state = call(port, "GET", "/api/state")
+  assert status == 200 and state["project"] == str(projectDir.resolve())
+  assert [agent["id"] for agent in state["agents"]][:1] == ["claude"]
+
+
+def test_unknownRoutesAndNamesAre404(running):
+  _, port = running
+  assert call(port, "GET", "/api/plans/P9999")[0] == 404
+  assert call(port, "GET", "/api/reviews/..%2Fconfig.json")[0] == 404
+  assert call(port, "GET", "/api/agents/nobody/log")[0] == 404
+  assert call(port, "GET", "/web/index.html")[0] == 404
+  assert call(port, "GET", "/js/secret.js")[0] == 404
+
+
+def test_foreignHostIsRejected(running):
+  _, port = running
+  assert call(port, "GET", "/api/state", headers={"Host": "evil.example"})[0] == 403
+
+
+def test_postNeedsCorrectToken(running):
+  projectDir, port = running
+  assert call(port, "POST", "/api/stop", {})[0] == 403
+  assert post(port, "/api/stop", withToken="wrong")[0] == 403
+  assert eventTypes(projectDir) == []
+
+
+def test_wrongTokenReadsBodyBeforeReplying(running):
+  # 內容晚一點才到時，server 要先讀完再回 403；沒讀完就關連線，Windows 會送 RST，用戶端收不到 403
+  _, port = running
+  with socket.create_connection(("127.0.0.1", port), timeout=10) as client:
+    client.sendall(f"POST /api/stop HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+                   "Content-Length: 2\r\nX-Board-Token: wrong\r\n\r\n".encode("ascii"))
+    time.sleep(0.3)
+    client.sendall(b"{}")
+    time.sleep(0.3)
+    response = client.makefile("rb").read()
+  assert response.startswith(b"HTTP/1.0 403")
+
+
+def test_rejectsLargeAndInvalidBody(running):
+  _, port = running
+  headers = {"X-Board-Token": token}
+  assert call(port, "POST", "/api/stop", headers=headers, rawBody=b"x" * (65 * 1024))[0] == 413
+  assert call(port, "POST", "/api/stop", headers=headers, rawBody=b"not json")[0] == 400
+  assert call(port, "POST", "/api/stop", headers=headers, rawBody=b"[1, 2]")[0] == 400
+
+
+def test_approveAsksForConfirmationWhenWarnings(running, writePlan):
+  projectDir, port = running
+  writePlan("0001-ok.md", warningRows, planId="P0001", projectDir=projectDir)
+  assert board.cmdSubmit(projectDir, "P0001") == 0
+  status, first = post(port, "/api/plans/P0001/approve")
+  assert status == 200 and first["ok"] is False and first["needsConfirm"] is True
+  assert first["warnings"][0].startswith("橘｜")
+  assert "planApproved" not in eventTypes(projectDir)
+  _, changed = post(port, "/api/plans/P0001/approve", {"confirm": True, "warnings": ["別的警告"]})
+  assert changed["needsConfirm"] is True and "planApproved" not in eventTypes(projectDir)
+  _, confirmed = post(port, "/api/plans/P0001/approve", {"confirm": True, "warnings": first["warnings"]})
+  assert confirmed["ok"] is True and "已核准" in confirmed["message"]
+  assert eventTypes(projectDir)[-1] == "planApproved"
+
+
+def test_approveWithoutWarningsAndBusinessError(running, writePlan):
+  projectDir, port = running
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=projectDir)
+  assert board.cmdSubmit(projectDir, "P0001") == 0
+  _, approved = post(port, "/api/plans/P0001/approve")
+  assert approved["ok"] is True
+  status, again = post(port, "/api/plans/P0001/approve")
+  assert status == 200 and again["ok"] is False and "不是「待核准」" in again["message"]
+
+
+def test_rejectNeedsReason(running, writePlan):
+  projectDir, port = running
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=projectDir)
+  assert board.cmdSubmit(projectDir, "P0001") == 0
+  assert post(port, "/api/plans/P0001/reject", {"reason": "  "})[0] == 400
+  _, rejected = post(port, "/api/plans/P0001/reject", {"reason": "缺驗證"})
+  assert rejected["ok"] is True
+  assert board_core.readEvents(projectDir)[-1]["data"] == {"reason": "缺驗證"}
+
+
+def test_decideAbandonStopAndResume(running, writePlan):
+  projectDir, port = running
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=projectDir)
+  assert board.cmdSubmit(projectDir, "P0001") == 0
+  assert board.cmdApprove(projectDir, "P0001", confirm=lambda prompt: "y") == 0
+  appendEvent(projectDir, "needsYou", plan="P0001", task="T1", roundNumber=1, data={"kind": "blocked", "reason": "卡住"})
+  assert post(port, "/api/tasks/P0001/T1/decide", {"action": "maybe"})[0] == 400
+  assert post(port, "/api/tasks/P0001/T1/decide", {"action": "retry", "note": 3})[0] == 400
+  _, decided = post(port, "/api/tasks/P0001/T1/decide", {"action": "retry", "note": " 改 a.py "})
+  assert decided["ok"] is True
+  assert board_core.readEvents(projectDir)[-1]["data"] == {"action": "retry", "note": "改 a.py"}
+  assert post(port, "/api/stop")[1]["ok"] is True
+  assert post(port, "/api/stop")[1]["ok"] is False
+  assert post(port, "/api/resume")[1]["ok"] is True
+  assert post(port, "/api/plans/P0001/abandon")[1]["ok"] is True
+  assert eventTypes(projectDir)[-4:] == ["userDecision", "paused", "resumed", "planAbandoned"]
+
+
+def test_portInUseRaises(gitProject):
+  first = server.makeServer(gitProject, 0, token)
+  try:
+    with pytest.raises(OSError):
+      server.makeServer(gitProject, first.server_address[1], token)
+  finally:
+    first.server_close()
+
+
+def test_refusesToStartWithoutConsole(gitProject):
+  completed = subprocess.run([sys.executable, str(toolDir / "server.py"), str(gitProject), "--port", "0"],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             stdin=subprocess.PIPE, timeout=60)
+  assert completed.returncode == 2
+  assert "只能由使用者在終端機啟動" in completed.stdout
