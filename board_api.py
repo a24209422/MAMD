@@ -68,7 +68,8 @@ def busyTaskOf(state, agentId):
 
 
 def runningLaunch(taskState, kind, spec):
-  # 忙碌中的 agent 照它啟動時記下的 CLI、模型；中途換了設定也不會用錯格式解析 log。舊事件沒記的照設定
+  # 忙碌中的 agent 照它啟動時記下的 CLI、模型；中途換了設定也不會用錯格式解析 log。
+  # 寫程式的舊事件沒記 CLI 時 board_core 當成 Claude；審查的舊事件沒記才照設定
   if kind == "review":
     cli, model = taskState["reviewCli"], taskState["reviewModel"]
   else:
@@ -218,7 +219,9 @@ def lastJobOf(events, agentId):
   for event in reversed(events):
     if event.get("agent") == agentId and event.get("type") in ("taskStarted", "reviewStarted"):
       kind = "write" if event["type"] == "taskStarted" else "review"
-      return event.get("plan"), event.get("task"), event.get("round"), kind, (event.get("data") or {}).get("cli")
+      # 和 board_core 一樣：寫程式的舊事件沒記 CLI 就是 Claude；審查的沒記才由呼叫端照設定
+      cli = (event.get("data") or {}).get("cli", "claude" if kind == "write" else None)
+      return event.get("plan"), event.get("task"), event.get("round"), kind, cli
   return None
 
 

@@ -295,3 +295,17 @@ def test_busyAgentsShowSettingsTheyStartedWith(approvedProject):
   # 閒置的身分照目前的設定
   assert (agents["writer-sub1"]["cli"], agents["writer-sub1"]["model"]) == ("claude", "opus")
   assert board_api.agentLogView(approvedProject, "writer")["context"] == {"tokens": 18094, "window": 475000}
+
+
+def test_busyWriterWithoutCliIsClaudeInCardAndLog(approvedProject):
+  # 換版前的事件沒記 CLI：寫程式的一律是 Claude，卡片和詳細資料要一致，不能照現在的設定猜
+  writeConfig(approvedProject, writer={"cli": "codex"})
+  appendEvent(approvedProject, "taskStarted", plan="P0001", task="T1", agent="writer", roundNumber=1,
+              data={"mode": "write"})
+  writeLog(approvedProject, "P0001-T1-r1-write-20261026-100000.log", claudeLog)
+  writer = agentsById(board_api.stateView(approvedProject))["writer"]
+  assert (writer["cli"], writer["action"]) == ("claude", "Write calc.py")
+  assert writer["context"] == {"tokens": 34168, "window": 200000}
+  logView = board_api.agentLogView(approvedProject, "writer")
+  assert logView["context"] == {"tokens": 34168, "window": 200000}
+  assert logView["tools"][0]["target"] == "calc.py"
