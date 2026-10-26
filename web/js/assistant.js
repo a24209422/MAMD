@@ -60,7 +60,7 @@ function botReply(text) {
   }
   if (/進度|狀況|狀態|整體|總覽/.test(asked)) {
     const active = state.plans.filter(item => item.status === '進行中');
-    const lines = [state.conductor.running ? 'conductor 運行中' : 'conductor 沒有啟動'];
+    const lines = [state.conductor.running ? 'Alfred 運行中' : 'Alfred 沒有啟動'];
     if (state.paused) lines.push(`已暫停：${state.pauseReason}`);
     if (!active.length) lines.push('沒有進行中的 plan');
     active.forEach(item => lines.push(`${item.id} ${item.title}：完成 ${item.tasks.done}/${item.tasks.total}`));

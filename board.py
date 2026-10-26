@@ -166,7 +166,7 @@ def cmdApprove(projectDir, planIdValue, confirm=input):
   appendEvent(projectDir, "planApproved", plan=planIdValue,
               data={"baseCommit": board_git.headCommit(projectDir), "branch": board_git.planBranch(planIdValue),
                     "tasks": tasks})
-  print(f"{planIdValue} 已核准，conductor 會開始執行。")
+  print(f"{planIdValue} 已核准，Alfred 會開始執行。")
   return 0
 
 
@@ -209,7 +209,7 @@ def cmdStop(projectDir):
     print(f"已經是暫停狀態：{state['pauseReason']}")
     return 1
   appendEvent(projectDir, "paused", data={"reason": stopReason})
-  print("已暫停，conductor 會結束所有 agent。用 resume 繼續。")
+  print("已暫停，Alfred 會結束所有 agent。用 resume 繼續。")
   return 0
 
 
@@ -378,7 +378,7 @@ def cmdInit(projectDir, tdd=False, sources=None, testsDir=None):
   if board_git.runGit(projectDir, "rev-parse", "--is-inside-work-tree", check=False) != "true":
     problems.append("不是 git repo：先執行 git init，並 commit 一次")
   elif not board_git.runGit(projectDir, "rev-parse", "--verify", "-q", "HEAD", check=False):
-    problems.append("還沒有任何 commit：先 commit 一次，conductor 要從目前的 commit 開 plan 分支")
+    problems.append("還沒有任何 commit：先 commit 一次，Alfred 要從目前的 commit 開 plan 分支")
   agentsPath, ignorePath = projectDir / "AGENTS.md", projectDir / ".gitignore"
   skillPath = projectDir / planSkillPath
   agentsText, skillText = readKeepingNewlines(agentsPath), readKeepingNewlines(skillPath)

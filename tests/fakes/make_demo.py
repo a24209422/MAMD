@@ -72,7 +72,7 @@ def main():
 
 1. 開第一個 PowerShell，啟動儀表板，用它印出的網址開瀏覽器：
    python {toolDir / 'server.py'} {projectDir}
-2. 開第二個 PowerShell，用假 agent 啟動 conductor（每一步慢 4 秒）：
+2. 開第二個 PowerShell，用假 agent 啟動 Alfred（每一步慢 4 秒）：
    $env:FAKE_SCENARIO = "{scenarioPath}"
    $env:FAKE_DELAY = "4"
    python {toolDir / 'conductor.py'} {projectDir}

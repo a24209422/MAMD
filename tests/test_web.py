@@ -101,7 +101,7 @@ def test_pageScriptsAreServedAndExist():
 @needsBrowser
 def test_overviewShowsConductorGroupsAndAgents(dashboard, tmp_path):
   dom = renderDom(tmp_path, dashboard + "#token=" + token)
-  assert "conductor" in dom and "沒有啟動" in dom
+  assert "Alfred<span>（指揮程式）</span>" in dom and "沒有啟動" in dom
   assert "進行中 1 份 plan" in dom and "P0001 批次上傳" in dom
   assert 'data-agent="writer-sub1"' in dom and 'data-agent="reviewer-sub1"' in dom
   assert 'data-agent="reviewer-sub2"' not in dom

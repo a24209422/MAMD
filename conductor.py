@@ -565,13 +565,13 @@ class Conductor:
         appendEvent(self.projectDir, "planCompleted", plan=planState["id"])
 
   def runForever(self):
-    self.out(f"conductor 啟動：{self.projectDir}（Ctrl+C 結束）")
+    self.out(f"Alfred 啟動：{self.projectDir}（Ctrl+C 結束）")
     try:
       while True:
         self.safeTick()
         time.sleep(self.config["pollSeconds"])
     except KeyboardInterrupt:
-      self.out("conductor 結束中，正在停止所有 agent…")
+      self.out("Alfred 結束中，正在停止所有 agent…")
       self.stopJobs(list(self.jobs), recordInterruption=True)
       self.printNewEvents()
 
@@ -641,7 +641,7 @@ def main(argv=None):
     return 1
   # 不是 git repo 時 worktree、commit、合併全都做不了，與其每一輪都報錯，不如一開始就停
   if board_git.runGit(projectDir, "rev-parse", "--is-inside-work-tree", check=False) != "true":
-    print(f"{projectDir} 不是 git repo，conductor 需要用 git 建立 worktree")
+    print(f"{projectDir} 不是 git repo，Alfred 需要用 git 建立 worktree")
     return 1
   problems = configProblems(readUserConfig(projectDir))
   if problems:
@@ -651,7 +651,7 @@ def main(argv=None):
     return 1
   # 兩個 conductor 同時跑時，後開的會把前一個正在跑的任務當成中斷並清掉 worktree
   if not acquireConductorLock(projectDir):
-    print(f"這個專案已經有 conductor 在跑（PID {readLockPid(projectDir)}），不能同時跑兩個")
+    print(f"這個專案已經有 Alfred 在跑（PID {readLockPid(projectDir)}），不能同時跑兩個")
     return 1
   try:
     Conductor(projectDir).runForever()

@@ -305,7 +305,7 @@ def test_mainRefusesSecondConductor(gitProject, monkeypatch, capsys):
   started = []
   monkeypatch.setattr(conductorModule, "Conductor", lambda projectDir: started.append(projectDir))
   assert conductorModule.main([str(gitProject)]) == 1
-  assert f"這個專案已經有 conductor 在跑（PID {os.getpid()}），不能同時跑兩個" in capsys.readouterr().out
+  assert f"這個專案已經有 Alfred 在跑（PID {os.getpid()}），不能同時跑兩個" in capsys.readouterr().out
   assert started == []
   assert lockPath.exists()
 

@@ -31,7 +31,7 @@ function renderLead(state) {
   $('#leadCard').dataset.paused = String(stateKey !== 'run');
   $('#leadCard').innerHTML = `
     <div class="agent-head">
-      <h3 class="agent-name"><span class="agent-icon">${icon('crown')}</span>conductor<span>（指揮程式）</span></h3>
+      <h3 class="agent-name"><span class="agent-icon">${icon('crown')}</span>Alfred<span>（指揮程式）</span></h3>
       <span class="tag">${escapeHtml(projectName)}</span>
       <span class="state" data-state="${stateKey}">${stateLabel}</span>
     </div>

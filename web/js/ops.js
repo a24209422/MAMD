@@ -79,8 +79,8 @@ function currentAlerts(state) {
   }
   const hasWork = state.plans.some(plan => plan.status === '待核准' || plan.status === '進行中');
   if (!state.conductor.running && hasWork) {
-    alerts.push({ id: 'conductor-off', kind: 'conductor 沒在跑', level: 'warn', agent: 'conductor', at: null,
-      text: '有待核准或進行中的 plan，但 conductor 沒有啟動，核准後也不會開始。' });
+    alerts.push({ id: 'conductor-off', kind: 'Alfred 沒在跑', level: 'warn', agent: 'Alfred', at: null,
+      text: '有待核准或進行中的 plan，但 Alfred 沒有啟動，核准後也不會開始。' });
   }
   state.recentEvents.filter(event => event.type === 'agentFailed').forEach(event => alerts.push({
     id: `failed-${event.time}-${event.plan}-${event.task}`, kind: 'agent 失敗', level: 'warn',
@@ -170,7 +170,7 @@ function needsItem(item) {
     if (mode === 'done') {
       text = item.kind === 'mergeConflict'
         ? `到 ${item.planWorktree} 執行 git merge task/${item.plan}-${item.task} 解完並 commit，或在 ${item.taskWorktree} 清掉衝突標記後再按。`
-        : `確定已經在 ${item.taskWorktree} 改好？conductor 會直接合併。`;
+        : `確定已經在 ${item.taskWorktree} 改好？Alfred 會直接合併。`;
     }
     actions = `<div class="op-form">
         <p class="op-hint">${escapeHtml(text)}</p>

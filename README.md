@@ -81,8 +81,8 @@ python <agent-board>\install_skill.py
    ```
 
    - `maxParallel` 是寫程式、審查各自同時跑的上限：設 1 代表同時最多 1 個寫程式加 1 個審查
-   - `writer`、`reviewer` 兩段（例如任務卡住後才加 `allowedTools`）改了之後，conductor 從下一個新啟動的 agent 開始用；其他設定改了要重開 conductor 才生效
-   - `testCommand` 在 conductor 裡同步執行，跑測試時 conductor 不會排新工作，測試要夠快
+   - `writer`、`reviewer` 兩段（例如任務卡住後才加 `allowedTools`）改了之後，Alfred（指揮程式，檔名是 `conductor.py`）從下一個新啟動的 agent 開始用；其他設定改了要重開 Alfred 才生效
+   - `testCommand` 在 Alfred 裡同步執行，跑測試時 Alfred 不會排新工作，測試要夠快
    - 寫程式、審查要用哪個 CLI 和模型，見「換模型」
 
 ## 換模型
@@ -111,7 +111,7 @@ python <agent-board>\install_skill.py
 - 模型名稱、版本與順序跟著 CLI；Claude 別名另顯示目前對應的完整模型 ID。只列出該模型支援的推理強度，儲存前也會檢查；切換 CLI 或模型時，推理強度會重設為沿用 CLI 設定
 - 清單快取五分鐘，可按「重新整理模型」立即重讀；CLI 未安裝、未登入、不支援查詢或查詢逾時時會顯示錯誤。清單反映 CLI 提供的選項，實際使用權限仍由 CLI／供應商決定
 - 角色有自訂 `command` 時，查詢會使用同一個指令；要換 CLI 得先改設定檔。其他欄位仍需改 `.board/config.json`
-- conductor 每一輪都會重讀 `writer`、`reviewer`：改了之後從下一個新啟動的 agent 開始用，正在跑的不受影響。其他設定（`maxParallel`、`testCommand` 等）改了要重開 conductor
+- Alfred 每一輪都會重讀 `writer`、`reviewer`：改了之後從下一個新啟動的 agent 開始用，正在跑的不受影響。其他設定（`maxParallel`、`testCommand` 等）改了要重開 Alfred
 - 換了寫程式的 CLI 或模型之後，進行中的任務下一輪會開新對話，接不回上一輪
 - 權限：
   - Claude 寫程式：只能執行 `testCommand` 和 `allowedTools` 列的指令
@@ -119,22 +119,22 @@ python <agent-board>\install_skill.py
   - Claude 審查：會改檔案、執行指令的內建工具（Edit、Write、NotebookEdit、Bash、PowerShell）都被拿掉；你在 Claude Code 設定裡另外放行的工具（例如 MCP 工具）仍可能可用
   - Codex 審查：`read-only` 沙箱
 - 寫 plan 的 agent 是你自己開的，模型在開的時候選：`codex -m <模型>`，或 `claude --model <模型>` 再打 `/agent-board-plan`
-- 舊版的 `claudeCommand`、`codexCommand`、`claudeAllowedTools`、`claudeContextWindow`、`codexContextWindow` 已經不用了，conductor 看到會拒絕啟動並說明要改成什麼
+- 舊版的 `claudeCommand`、`codexCommand`、`claudeAllowedTools`、`claudeContextWindow`、`codexContextWindow` 已經不用了，Alfred 看到會拒絕啟動並說明要改成什麼
 
 ## 使用
 
-1. 開一個終端機跑 conductor，它會即時印出每個事件：
+1. 開一個終端機跑 Alfred（`conductor.py`），它會即時印出每個事件：
 
    ```
    python <agent-board>\conductor.py <專案資料夾>
    ```
 
-   一個專案同時只能跑一個 conductor，第二個會拒絕啟動。
+   一個專案同時只能跑一個 Alfred，第二個會拒絕啟動。
 
 2. 在專案資料夾開 `codex` 說你的需求；或開 `claude`，打 `/agent-board-plan 你的需求`。寫完 plan 會自己送出。
 3. 看線路圖：`python <agent-board>\board.py --project <專案資料夾> index`，打開 `plans/_review/index.html`
 4. 核准：`python <agent-board>\board.py --project <專案資料夾> approve P0007`，或在儀表板上按「核准」
-5. 之後看 conductor 的終端機，或跑 `status`。完成後 `plan/P0007` 分支裡就是所有任務的成果，要不要合併到你的分支由你決定。
+5. 之後看 Alfred 的終端機，或跑 `status`。完成後 `plan/P0007` 分支裡就是所有任務的成果，要不要合併到你的分支由你決定。
 
 ## 儀表板
 
@@ -148,7 +148,7 @@ python <agent-board>\install_skill.py
 
 2. 用它印出的網址開瀏覽器（`http://127.0.0.1:8765/#token=...`）。沒帶 token 的網址只能看，不能操作
 3. server 重開後 token 會換，要用新印出的網址重開
-4. 可以和 conductor 同時開；同時看兩個專案就用不同的 `--port`
+4. 可以和 Alfred 同時開；同時看兩個專案就用不同的 `--port`
 
 不花用量的展示：`python <agent-board>\tests\fakes\make_demo.py <新的資料夾>`，照它印出的步驟做。
 
@@ -183,7 +183,7 @@ python <agent-board>\install_skill.py
 
 ### 合併衝突
 
-兩個同時進行的任務改到同一個檔案時，後合併的那個會衝突。conductor 會自動處理：
+兩個同時進行的任務改到同一個檔案時，後合併的那個會衝突。Alfred 會自動處理：
 
 1. 把最新的 `plan/P0007` 合併進那個任務的 worktree，衝突標記留在檔案裡
 2. 叫回原本寫這個任務的 agent 解掉衝突、跑測試（算新的一輪，但輪數上限也跟著加 1，不吃掉審查退回的次數）
