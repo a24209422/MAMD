@@ -2,7 +2,7 @@
 
 verifyRef = "驗證"
 
-claudeResultSchema = {
+writeResultSchema = {
   "type": "object",
   "additionalProperties": False,
   "required": ["status", "summary", "blockedReason"],
@@ -13,7 +13,7 @@ claudeResultSchema = {
   },
 }
 
-codexReviewSchema = {
+reviewResultSchema = {
   "type": "object",
   "additionalProperties": False,
   "required": ["verdict", "mustFix", "suggest"],
@@ -33,7 +33,7 @@ codexReviewSchema = {
 }
 
 
-def validateClaudeResult(result):
+def validateWriteResult(result):
   if not isinstance(result, dict):
     return ["回覆不是 JSON 物件"]
   if result.get("status") not in ("done", "blocked"):
@@ -57,7 +57,7 @@ def validateReview(result, allowedRefs):
     errors.append("不通過時至少要有一條必改")
   if verdict == "pass" and mustFix:
     errors.append("通過時不能有必改")
-  # 必改一定要對到這個任務的需求或驗證，審查才不會變成照 Codex 自己的喜好退回
+  # 必改一定要對到這個任務的需求或驗證，審查才不會變成照審查者自己的喜好退回
   allowed = {ref.upper() for ref in allowedRefs} | {verifyRef}
   for item in mustFix:
     item = item if isinstance(item, dict) else {}

@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from board_review import claudeResultSchema
+from board_review import writeResultSchema
 
 # 不用 "limit reached"：Claude 的 "Context limit reached" 是對話太長，不是額度用完
 quotaPatterns = ["usage limit", "rate limit", "rate_limit", "quota", "hit your limit", "out of extra usage", "額度"]
@@ -119,7 +119,7 @@ def resolveCommand(configured, name):
 def buildClaudeArgv(command, sessionId, resume, systemRules, allowedTools=()):
   argv = list(command) + [
     "-p", "--output-format", "stream-json", "--verbose",
-    "--json-schema", json.dumps(claudeResultSchema, ensure_ascii=False),
+    "--json-schema", json.dumps(writeResultSchema, ensure_ascii=False),
     "--permission-mode", "acceptEdits", "--permission-prompts", "none",
     "--append-system-prompt", systemRules,
     "--disallowedTools", *deniedClaudeTools,

@@ -1,5 +1,5 @@
-from board_review import (claudeResultSchema, codexReviewSchema, renderReviewMarkdown, reviewFileName,
-                          validateClaudeResult, validateReview)
+from board_review import (renderReviewMarkdown, reviewFileName, reviewResultSchema, validateReview,
+                          validateWriteResult, writeResultSchema)
 
 
 def failResult(*mustFix, suggest=()):
@@ -7,17 +7,17 @@ def failResult(*mustFix, suggest=()):
 
 
 def test_schemasRequireEveryField():
-  assert claudeResultSchema["required"] == ["status", "summary", "blockedReason"]
-  assert claudeResultSchema["additionalProperties"] is False
-  assert codexReviewSchema["required"] == ["verdict", "mustFix", "suggest"]
-  assert codexReviewSchema["properties"]["mustFix"]["items"]["additionalProperties"] is False
+  assert writeResultSchema["required"] == ["status", "summary", "blockedReason"]
+  assert writeResultSchema["additionalProperties"] is False
+  assert reviewResultSchema["required"] == ["verdict", "mustFix", "suggest"]
+  assert reviewResultSchema["properties"]["mustFix"]["items"]["additionalProperties"] is False
 
 
-def test_validateClaudeResult():
-  assert validateClaudeResult({"status": "done", "summary": "好了", "blockedReason": ""}) == []
-  assert validateClaudeResult({"status": "blocked", "summary": "", "blockedReason": ""}) == ["blocked 時一定要寫 blockedReason"]
-  assert validateClaudeResult({"status": "maybe"}) == ["status 只能是 done 或 blocked"]
-  assert validateClaudeResult("done") == ["回覆不是 JSON 物件"]
+def test_validateWriteResult():
+  assert validateWriteResult({"status": "done", "summary": "好了", "blockedReason": ""}) == []
+  assert validateWriteResult({"status": "blocked", "summary": "", "blockedReason": ""}) == ["blocked 時一定要寫 blockedReason"]
+  assert validateWriteResult({"status": "maybe"}) == ["status 只能是 done 或 blocked"]
+  assert validateWriteResult("done") == ["回覆不是 JSON 物件"]
 
 
 def test_validFailAndPass():

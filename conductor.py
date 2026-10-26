@@ -17,9 +17,9 @@ import board_git
 from board_core import (BoardError, PlanStatus, TaskStatus, agentLanes, appendEvent, boardDir, configProblems,
                         deriveState, isPlanFinished, loadConfig, loadPlans, readEvents, readUserConfig, readyTasks,
                         taskKey, tasksWithStatus)
-from board_prompts import buildResolvePrompt, buildReviewPrompt, buildWritePrompt, claudeRules, codexRules
-from board_review import (codexReviewSchema, renderReviewMarkdown, reviewFileName, validateClaudeResult,
-                          validateReview)
+from board_prompts import buildResolvePrompt, buildReviewPrompt, buildWritePrompt, reviewerRules, writerRules
+from board_review import (renderReviewMarkdown, reviewFileName, reviewResultSchema, validateReview,
+                          validateWriteResult, writeResultSchema)
 
 outputWaitAfterKillSeconds = 10
 maxReasonTailChars = 500
@@ -267,7 +267,7 @@ class Conductor:
           prompt = buildWritePrompt(plan, info["task"], info["round"], self.readReview(taskState["lastReviewNotes"]),
                                     taskState["userNote"],
                                     self.config["testCommand"] if self.config.get("tddCrap") else "")
-        argv = board_agents.buildClaudeArgv(self.claudeCommand, sessionId, resume, claudeRules,
+        argv = board_agents.buildClaudeArgv(self.claudeCommand, sessionId, resume, writerRules("claude"),
                                             self.claudeAllowedTools())
         info["job"] = board_agents.AgentJob(argv, worktree, prompt, self.logPath(info, "write"),
                                             board_agents.parseClaudeLine, self.timeoutSeconds()).start()
@@ -307,7 +307,7 @@ class Conductor:
       reason = "超時" if job.timedOut else (error or f"結束代碼 {job.exitCode}")
       self.event("agentFailed", info, stage="write", reason=f"{reason}｜{self.failureTail(job)}")
       return
-    errors = validateClaudeResult(result)
+    errors = validateWriteResult(result)
     if errors:
       self.event("agentFailed", info, stage="write", reason="回覆格式不符：" + "；".join(errors))
       return
@@ -377,7 +377,7 @@ class Conductor:
     runDir = boardDir(self.projectDir) / "runs"
     runDir.mkdir(parents=True, exist_ok=True)
     schemaPath = runDir / "codex-review-schema.json"
-    schemaPath.write_text(json.dumps(codexReviewSchema, ensure_ascii=False), encoding="utf-8")
+    schemaPath.write_text(json.dumps(reviewResultSchema, ensure_ascii=False), encoding="utf-8")
     info["outPath"] = runDir / f"{info['plan']}-{info['task']}-r{info['round']}-review{attempt}.json"
     # 舊的輸出檔留著的話，這次 Codex 沒寫出結果也會被誤讀成成功
     info["outPath"].unlink(missing_ok=True)
@@ -385,9 +385,9 @@ class Conductor:
       worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
       diff = board_git.taskDiff(self.projectDir, info["plan"], info["task"])
       resolvedConflicts = taskState["conflictFiles"] if taskState["lastWriteMode"] == "resolve" else None
-      prompt = codexRules + "\n\n" + buildReviewPrompt(plan, info["task"], info["round"], diff,
-                                                       taskState["lastTest"], previousErrors, resolvedConflicts,
-                                                       bool(self.config.get("tddCrap")))
+      prompt = reviewerRules + "\n\n" + buildReviewPrompt(plan, info["task"], info["round"], diff,
+                                                          taskState["lastTest"], previousErrors, resolvedConflicts,
+                                                          bool(self.config.get("tddCrap")))
       argv = board_agents.buildCodexArgv(self.codexCommand, worktree, schemaPath, info["outPath"])
       info["job"] = board_agents.AgentJob(argv, worktree, prompt, self.logPath(info, f"review{attempt}"),
                                           board_agents.parseCodexLine, self.timeoutSeconds()).start()

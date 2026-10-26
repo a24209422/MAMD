@@ -1,5 +1,5 @@
-from board_prompts import (buildResolvePrompt, buildReviewPrompt, buildWritePrompt, claudeRules, codexRules,
-                           formatRows, maxDiffChars)
+from board_prompts import (buildResolvePrompt, buildReviewPrompt, buildWritePrompt, formatRows, maxDiffChars,
+                           reviewerRules, tddCrapDir, writerRules)
 from rtm_graph import analyzePlan
 
 
@@ -41,8 +41,16 @@ def test_longDiffIsTruncated(writePlan):
 
 
 def test_rulesMentionKeyConstraints():
-  assert "git commit" in claudeRules and "blocked" in claudeRules
-  assert "ref" in codexRules and "建議" in codexRules
+  assert "git commit" in writerRules("claude") and "blocked" in writerRules("claude")
+  assert "git commit" in writerRules("codex") and "blocked" in writerRules("codex")
+  assert "ref" in reviewerRules and "建議" in reviewerRules
+  # Codex 會自己讀 AGENTS.md，那段寫著「不要自己寫程式」
+  assert "AGENTS.md" in writerRules("codex") and "AGENTS.md" in reviewerRules
+
+
+def test_onlyClaudeWriterIsToldCommandsAreRestricted():
+  assert "串接" in writerRules("claude")
+  assert "串接" not in writerRules("codex")
 
 
 def test_formatRowsEscapesPipes():
@@ -73,7 +81,6 @@ def test_writePromptAddsTddCrapStepsOnlyWhenEnabled(writePlan):
   prompt = buildWritePrompt(samplePlan(writePlan), "T1", 1, qualityCommand=command)
   assert "Skill 工具載入 tdd-crap" in prompt
   assert command in prompt and "python -m pytest" in prompt
-  assert "AGENTS.md" in prompt
   # 最後一行固定是交回結果的提醒，tdd 的段落要放在它前面
   assert prompt.splitlines()[-1] == "改完後要能照表格的「驗證」欄驗證。完成後依格式回覆。"
   assert "tdd-crap" not in buildWritePrompt(samplePlan(writePlan), "T1", 1)
@@ -86,3 +93,11 @@ def test_reviewPromptAddsTestQualityRuleOnlyWhenEnabled(writePlan):
   assert "# pragma: no cover" in prompt and "「驗證」" in prompt
   assert prompt.index("tdd-crap") < prompt.index("這個任務的 diff：")
   assert "tdd-crap" not in buildReviewPrompt(samplePlan(writePlan), "T1", 1, "+x")
+
+
+def test_codexWriterReadsTddSkillFile(writePlan):
+  command = "python C:/skills/tdd-crap/scripts/quality.py --source src -- tests"
+  prompt = buildWritePrompt(samplePlan(writePlan), "T1", 1, qualityCommand=command, cli="codex")
+  assert str(tddCrapDir / "SKILL.md") in prompt and command in prompt
+  assert "Skill 工具" not in prompt
+  assert prompt.splitlines()[-1] == "改完後要能照表格的「驗證」欄驗證。完成後依格式回覆。"

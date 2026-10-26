@@ -13,6 +13,7 @@ import board_git
 from board_core import (PlanStatus, TaskStatus, appendEvent, boardDir, deriveState, loadConfig, loadPlans,
                         planTasks, readEvents, taskKey)
 from board_index import buildIndex
+from board_prompts import tddCrapDir
 
 humanOnlyCommands = {"approve", "reject", "abandon", "decide", "stop", "resume", "cleanup"}
 # board_api 要從暫停事件的原因分辨是不是你按的 stop，兩邊共用同一個字串
@@ -20,8 +21,6 @@ stopReason = "你執行了 stop"
 boardPyPath = Path(__file__).resolve()
 snippetPath = boardPyPath.parent / "docs" / "AGENTS-snippet.md"
 installSkillPath = boardPyPath.parent / "install_skill.py"
-# tdd-crap 是使用者自己的 Claude skill，跟著使用者的家目錄走，不在這個 repo 裡
-tddCrapDir = Path.home() / ".claude" / "skills" / "tdd-crap"
 tddPackages = ["pytest", "coverage", "radon"]
 agentsStartMarker = "<!-- agent-board:start（board.py init 產生，重跑 init 會整段換成最新版） -->"
 agentsEndMarker = "<!-- agent-board:end -->"
