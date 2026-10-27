@@ -1,4 +1,4 @@
-// 控制台：agent 身分的詳細資料。Astra 對話窗和系統資源這一期還沒接資料，版面上直接寫明
+// 控制台：agent 身分的詳細資料和系統資源摘要。Astra 對話窗這一期還沒接資料，版面上直接寫明
 const consoleTabs = [
   { key: 'detail', label: '任務詳情' },
   { key: 'chat', label: '對話內容' },
@@ -255,4 +255,11 @@ onPageChange(page => {
   if (page !== 'console') return;
   refresh(renderConsole);
   loadConsoleData();
+});
+
+// 系統資源區塊用系統監控模組的摘要，和完整頁共用同一份資料；整塊是連到完整頁的連結
+let resourceSummary = null;
+onPageChange(page => {
+  if (!resourceSummary) resourceSummary = SystemMonitor.shared().mountSummary($('#systemMonitorSummary'), { href: '#system-monitor' });
+  resourceSummary.setVisible(page === 'console');
 });
