@@ -1,0 +1,2375 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>多 Agent 指揮台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Noto+Sans+TC:wght@400;500;700&family=Silkscreen:wght@400;700&display=swap">
+<style>
+/* =====================================================================
+   多 Agent 指揮台（獨立檔案，不連後端，數字都是示意）
+   風格沿用 art-rag/demo/flow-command-center：終端機視窗、方角細框、發光邊框、虛線連接
+   版面照參考圖，只留三層 Agent 和左側跳轉列；主控對話窗、小任務、系統資源監控放到「控制台」頁
+   右側固定一個「儀表板助手」聊天窗，每一頁都在；中間區域會隨兩側展開收合變寬變窄，版面用 container query 依它自己的寬度切換
+   只做深色：跟 flow-command-center 一樣是展示用畫面，固定一種樣子
+   ===================================================================== */
+:root {
+  color-scheme: dark;
+  --ground: #05060b;
+  --win: #0a0c13;
+  --win-bar: #0f121b;
+  --panel: #0d1018;
+  --line: #1b2030;
+  --line-2: #283044;
+  --fg: #d9dfee;
+  --fg-2: #929bb3;
+  --fg-3: #5d6680;
+  --violet: #a985ff;
+  --violet-soft: rgb(169 133 255 / 0.28);
+  --violet-dim: rgb(169 133 255 / 0.55);
+  --blue: #4d8eff;
+  --blue-soft: rgb(77 142 255 / 0.26);
+  --blue-dim: rgb(77 142 255 / 0.6);
+  --green: #39d98a;
+  --green-soft: rgb(57 217 138 / 0.22);
+  --green-dim: rgb(57 217 138 / 0.55);
+  --red: #ff5c66;
+  --red-soft: rgb(255 92 102 / 0.3);
+  --amber: #ffc53d;
+  --amber-soft: rgb(255 197 61 / 0.28);
+  --orange: #ff8a3d;
+  --orange-soft: rgb(255 138 61 / 0.28);
+  --font-pixel: "Silkscreen", "JetBrains Mono", ui-monospace, monospace;
+  --font-mono: "JetBrains Mono", "Noto Sans TC", "Microsoft JhengHei", ui-monospace, monospace;
+  --font-cjk: "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", sans-serif;
+  --gap: 14px;
+  --gap-sm: 10px;
+  --rail-w: 64px;
+  --tag-w: 188px;
+  --focus-w: 240px;
+  --ops-w: 280px;
+  --link-h: 36px;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body {
+  background: var(--ground);
+  color: var(--fg);
+  font: 13px/1.5 var(--font-mono);
+  -webkit-font-smoothing: antialiased;
+}
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+.ico {
+  display: block;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: square;
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-content: start;
+  min-height: 100vh;
+}
+
+/* ---------- 左側跳轉列 ---------- */
+.rail {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  height: 100vh;
+  width: var(--rail-w);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 10px;
+  background: var(--win-bar);
+  border-right: 1px solid var(--line);
+  transition: width 0.2s;
+}
+.rail.is-wide { width: 168px; }
+.rail-links { display: flex; flex-direction: column; gap: 6px; }
+.rail-btn {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  height: 42px;
+  padding: 0 11px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-3);
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+.rail-btn:hover { color: var(--fg); border-color: var(--line-2); }
+.rail-btn[aria-current="page"] {
+  color: var(--fg);
+  border-color: var(--violet);
+  background: rgb(169 133 255 / 0.08);
+  box-shadow: 0 0 0 1px var(--violet-soft), 0 0 16px var(--violet-soft);
+}
+.rail-btn[aria-current="page"] .ico { color: var(--violet); }
+.rail-lbl { display: none; font-family: var(--font-cjk); font-size: 13px; }
+.rail.is-wide .rail-lbl { display: inline; }
+.rail-toggle { margin-bottom: 10px; border-color: var(--line); }
+.rail-toggle .ico { transition: transform 0.2s; }
+.rail.is-wide .rail-toggle .ico { transform: rotate(180deg); }
+
+.stage {
+  container: stage / inline-size;
+  width: 100%;
+  max-width: 1480px;
+  min-width: 0;
+  margin: 0 auto;
+  padding-block: 24px 36px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+
+/* ---------- 終端機視窗 ---------- */
+.term {
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--win);
+  box-shadow: 0 30px 80px rgb(0 0 0 / 0.6), 0 0 0 1px rgb(0 0 0 / 0.4);
+  /* 用 clip 不用 hidden：hidden 會讓總覽左邊的切換格 sticky 失效 */
+  overflow: clip;
+}
+.term-bar {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--win-bar);
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--fg-3);
+}
+.term-title {
+  grid-column: 2;
+  margin: 0;
+  text-align: center;
+  white-space: nowrap;
+  font: 700 16px/1.4 var(--font-cjk);
+  letter-spacing: 0.06em;
+  color: var(--fg);
+}
+.term-title span { margin-left: 6px; font-weight: 500; color: var(--fg-2); }
+.pill {
+  grid-column: 3;
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border: 1px solid currentColor;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--blue);
+  white-space: nowrap;
+}
+.pill::before { content: ""; width: 7px; height: 7px; background: currentColor; }
+.pill[data-state="paused"] { color: var(--amber); }
+.term-body { padding: 22px 22px 18px; }
+.page { display: grid; min-width: 0; }
+
+/* ---------- 總覽：左邊切換格（即時活動、異常警告、人工介入），右邊三層 ---------- */
+.overview { grid-template-columns: var(--ops-w) minmax(0, 1fr); gap: 18px; align-items: start; }
+.tiers { container: tiers / inline-size; min-width: 0; }
+.ops {
+  position: sticky;
+  top: 16px;
+  height: min(640px, calc(100vh - 32px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 12px 12px;
+}
+.ops .tabs { flex-wrap: nowrap; }
+.ops .tab { display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 4px 6px; }
+.badge {
+  min-width: 16px;
+  padding: 0 4px;
+  background: var(--amber);
+  color: var(--ground);
+  font: 700 10px/16px var(--font-mono);
+  text-align: center;
+}
+.badge[data-tone="red"] { background: var(--red); }
+/* 框的高度固定，內容多了就在框裡捲動 */
+.ops-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+.feed-filter { display: flex; align-items: center; gap: 8px; color: var(--fg-3); font: 12px/1.5 var(--font-cjk); }
+.feed-filter select {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 4px;
+  background: var(--win);
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font: 12px/1.4 var(--font-cjk);
+}
+.feed { list-style: none; margin: 0; padding: 0; display: grid; }
+.feed li {
+  display: grid;
+  grid-template-columns: 5ch minmax(0, 1fr);
+  gap: 2px 8px;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: 12px;
+}
+.feed time { color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.feed .who { color: var(--who); }
+.feed .what { grid-column: 2; color: var(--fg-2); font: 12px/1.5 var(--font-cjk); overflow-wrap: anywhere; }
+.alert-item {
+  --al: var(--amber);
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--al);
+  background: color-mix(in srgb, var(--al) 7%, transparent);
+}
+.alert-item[data-level="high"] { --al: var(--red); }
+.alert-item[data-read="true"] { --al: var(--line-2); background: transparent; }
+.alert-item[data-read="true"] .ai-head b { color: var(--fg-2); }
+.ai-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+.ai-head b { color: var(--al); font-family: var(--font-cjk); }
+.ai-head time { color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.alert-item p, .approvals p { margin: 0; color: var(--fg-2); font: 12px/1.55 var(--font-cjk); overflow-wrap: anywhere; }
+.alert-item .link, .ai-done { justify-self: end; }
+.ai-done { color: var(--fg-3); font: 11.5px/1.5 var(--font-cjk); }
+.ops-sub { display: flex; gap: 8px; margin: 6px 0 0; font: 700 12px/1.5 var(--font-cjk); color: var(--fg); }
+.ops-sub span { color: var(--amber); }
+.ctl-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.ctl-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.ctl-name { overflow: hidden; font-size: 12.5px; font-weight: 700; white-space: nowrap; text-overflow: ellipsis; }
+.mini-btn {
+  padding: 1px 8px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font: 11.5px/1.6 var(--font-cjk);
+  cursor: pointer;
+}
+.mini-btn:hover { color: var(--fg); border-color: var(--fg-3); }
+.mini-ok { border-color: var(--green-dim); color: var(--green); }
+.approvals { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.approvals li { --al: var(--fg); display: grid; gap: 4px; padding: 8px 10px; border: 1px solid var(--line-2); }
+.ap-actions { display: flex; justify-content: flex-end; gap: 6px; }
+
+/* ---------- 三層：左邊層級標籤、右邊 Agent 卡 ---------- */
+.tier {
+  display: grid;
+  grid-template-columns: var(--tag-w) minmax(0, 1fr);
+  column-gap: var(--gap);
+}
+/* 層與層之間留空間畫虛線，上一層卡片的底邊就是這段空間的頂邊 */
+.tier + .tier { padding-top: var(--link-h); }
+.tier-1 { --t: var(--violet); --t-soft: var(--violet-soft); --t-dim: var(--violet-dim); }
+.tier-2, .tier-3 { --t: var(--blue); --t-soft: var(--blue-soft); --t-dim: var(--blue-dim); }
+.tier-tag {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px 14px 14px;
+  border: 1px dashed var(--t-dim);
+  background: rgb(13 16 24 / 0.6);
+}
+.tier-top { display: flex; align-items: baseline; gap: 10px; }
+.tier-no {
+  font: 700 22px/1 var(--font-pixel);
+  color: var(--t);
+  text-shadow: 0 0 12px var(--t-soft);
+}
+.tier-top small { font: 500 11px/1 var(--font-cjk); letter-spacing: 0.16em; color: var(--t); }
+.tier-tag h2 { margin: 0; font: 700 16px/1.3 var(--font-cjk); color: var(--fg); }
+.tier-tag p { margin: 0; font: 12px/1.65 var(--font-cjk); color: var(--fg-2); }
+
+.tier-body { position: relative; display: grid; min-width: 0; }
+.tier-1 .tier-body { grid-template-columns: minmax(0, 1fr) var(--focus-w); gap: var(--gap); }
+.pair, .squads { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--gap); }
+.squad {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--gap-sm);
+}
+
+/* 第一層 → 第二層：從 Astra 卡片中間往下，再分給兩張專業 Agent 卡；Astra 右邊還有任務重點，所以中點要扣掉那一欄 */
+.tier-2 .tier-body::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--link-h) * -1 + 14px);
+  left: calc((100% - var(--gap)) / 4);
+  right: calc((100% - var(--gap)) / 4);
+  border-top: 1px dashed var(--violet-dim);
+}
+.tier-2 .tier-body::after {
+  content: "";
+  position: absolute;
+  top: calc(var(--link-h) * -1);
+  left: calc((100% - var(--focus-w) - var(--gap)) / 2);
+  height: 14px;
+  border-left: 1px dashed var(--violet-dim);
+}
+/* 第二層 → 第三層：每張專業 Agent 卡往下分給自己的兩個小任務 */
+.squad::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--link-h) * -1 + 14px);
+  left: calc((100% - var(--gap-sm)) / 4);
+  right: calc((100% - var(--gap-sm)) / 4);
+  border-top: 1px dashed var(--blue-dim);
+}
+.squad::after {
+  content: "";
+  position: absolute;
+  top: calc(var(--link-h) * -1);
+  left: 50%;
+  height: 14px;
+  border-left: 1px dashed var(--blue-dim);
+}
+.pair > .agent { --lk: var(--violet-dim); }
+.squad > .agent { --lk: var(--blue-dim); }
+.pair > .agent::before, .squad > .agent::before {
+  content: "";
+  position: absolute;
+  top: calc(var(--link-h) * -1 + 14px);
+  left: 50%;
+  height: calc(var(--link-h) - 22px);
+  border-left: 1px dashed var(--lk);
+}
+.pair > .agent::after, .squad > .agent::after {
+  content: "";
+  position: absolute;
+  top: -7px;
+  left: calc(50% - 3px);
+  border: 3px solid transparent;
+  border-top: 4px solid var(--lk);
+}
+
+/* ---------- Agent 卡片 ---------- */
+.agent {
+  --c: var(--line-2);
+  position: relative;
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  padding: 12px 14px 13px;
+  border: 1px solid var(--c);
+  background: var(--panel);
+  transition: border-color 0.25s, box-shadow 0.25s, background-color 0.25s;
+}
+.agent[data-state="run"] { --c: var(--blue-dim); box-shadow: 0 0 14px rgb(77 142 255 / 0.14); }
+.agent[data-state="warn"] {
+  --c: var(--amber);
+  background: rgb(255 197 61 / 0.05);
+  box-shadow: 0 0 0 1px var(--amber-soft), 0 0 20px var(--amber-soft);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+.agent[data-state="busy"] { --c: var(--amber); background: rgb(255 197 61 / 0.05); box-shadow: 0 0 20px var(--amber-soft); }
+.agent[data-state="done"] { --c: var(--green); box-shadow: 0 0 12px var(--green-soft); }
+/* 被人工暫停：灰框、不發光，Astra 的紫框也一樣變灰 */
+.agent[data-state="paused"], .agent-lead[data-paused="true"] {
+  --c: var(--line-2);
+  background: var(--panel);
+  box-shadow: none;
+  animation: none;
+}
+.agent[data-state="paused"] .agent-name, .agent-lead[data-paused="true"] .agent-name { color: var(--fg-2); }
+@keyframes pulse { 50% { box-shadow: 0 0 0 1px transparent, 0 0 6px transparent; } }
+
+.agent-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+.agent-icon { flex: none; display: grid; place-items: center; color: var(--a, var(--fg-2)); }
+.agent-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font: 700 14px/1.3 var(--font-mono);
+  color: var(--fg);
+}
+.agent-name span { font: 500 12.5px/1.3 var(--font-cjk); color: var(--fg-2); }
+/* 第一、二層的圖示放在名字裡：卡片窄時圖示跟著名字走，不會單獨留在一行 */
+.agent-name .agent-icon { display: inline-flex; margin-right: 8px; vertical-align: -4px; color: var(--a, var(--fg-2)); }
+.tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 6px;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+.tag[data-accent="violet"]::before { content: ""; width: 6px; height: 6px; background: var(--violet); }
+.state {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border: 1px solid currentColor;
+  color: var(--blue);
+  font: 500 11px/1.5 var(--font-cjk);
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+.state::before { content: ""; width: 7px; height: 7px; background: currentColor; }
+.state[data-state="warn"] { color: var(--amber); background: rgb(255 197 61 / 0.08); }
+.state[data-state="busy"] { color: var(--amber); }
+.state[data-state="busy"]::before { animation: blink 0.8s steps(1) infinite; }
+.state[data-state="done"] { color: var(--green); }
+.state[data-state="paused"] { color: var(--fg-2); }
+@keyframes blink { 50% { opacity: 0; } }
+
+.task-block small {
+  display: block;
+  font: 500 10.5px/1.4 var(--font-cjk);
+  letter-spacing: 0.12em;
+  color: var(--fg-3);
+}
+.task-block p { margin: 2px 0 0; font: 500 14px/1.45 var(--font-cjk); color: var(--fg); }
+
+/* 進度條：沿用 flow-command-center 的分格條 */
+.meter {
+  --m: var(--blue);
+  display: grid;
+  grid-template-columns: var(--ml, 7.5em) minmax(0, 1fr) 4ch;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+.meter[data-level="ok"] { --m: var(--green); }
+.meter[data-level="mid"] { --m: var(--amber); }
+.meter[data-level="high"] { --m: var(--red); }
+.meter-label {
+  overflow: hidden;
+  color: var(--fg-2);
+  font-family: var(--font-cjk);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.meter-track {
+  position: relative;
+  height: 8px;
+  background: repeating-linear-gradient(90deg, var(--line-2) 0 6px, transparent 6px 8px);
+}
+.meter-track i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: repeating-linear-gradient(90deg, var(--m) 0 6px, transparent 6px 8px);
+  transition: width 0.5s;
+}
+.meter-pct { color: var(--m); text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+
+/* 第一層：Astra */
+.agent-lead {
+  --c: var(--violet);
+  --a: var(--violet);
+  gap: 14px;
+  padding: 14px 18px 16px;
+  background: rgb(169 133 255 / 0.05);
+  box-shadow: 0 0 0 1px var(--violet-soft), 0 0 26px var(--violet-soft);
+}
+.agent-lead .agent-name { font-size: 16px; }
+.lead-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 18px;
+  align-items: end;
+}
+.lead-body .meters { display: grid; gap: 8px; padding-left: 18px; border-left: 1px dashed var(--line-2); }
+
+.focus { --c: var(--line-2); padding-top: 20px; }
+.focus ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.focus li { display: flex; align-items: baseline; gap: 10px; font: 13px/1.5 var(--font-cjk); color: var(--fg-2); }
+.focus li::before { content: ""; flex: none; width: 6px; height: 6px; background: var(--violet); transform: translateY(-2px); }
+
+/* 第二層：專業 Agent */
+.agent-mid[data-accent="blue"] { --a: var(--blue); }
+.agent-mid[data-accent="violet"] { --a: var(--violet); }
+.mid-body { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; }
+.mid-main { display: grid; align-content: start; gap: 8px; }
+.duties {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 16px;
+  border-left: 1px dashed var(--line-2);
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  font: 12px/1.5 var(--font-cjk);
+  color: var(--fg-2);
+}
+.duties li { display: flex; align-items: baseline; gap: 8px; }
+.duties li::before { content: ""; flex: none; width: 6px; height: 6px; background: var(--a); transform: translateY(-2px); }
+
+/* 第三層：小任務 Agent（整張卡是按鈕，點了到控制台看細節） */
+.agent-sm {
+  gap: 8px;
+  padding: 10px 12px 11px;
+  overflow: visible;
+  text-align: left;
+  cursor: pointer;
+}
+.agent-sm:hover { background: #121726; }
+.agent-sm .agent-head { flex-wrap: nowrap; }
+.agent-sm .agent-name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13.5px; }
+.agent-sm .meter { --ml: 54px; gap: 8px; font-size: 11.5px; }
+/* 小卡太窄，標籤跟狀態放同一列，名字才不會被擠掉 */
+.sm-state { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+.kv { display: grid; grid-template-columns: 54px minmax(0, 1fr); gap: 8px; font-size: 12px; }
+.kv span { color: var(--fg-2); font-family: var(--font-cjk); }
+.kv b { font: 500 12.5px/1.4 var(--font-cjk); color: var(--fg); overflow-wrap: anywhere; }
+
+/* ---------- 邊框上掛標籤的框 ---------- */
+.boxed {
+  --c: var(--line-2);
+  position: relative;
+  min-width: 0;
+  padding: 18px 14px 14px;
+  border: 1px solid var(--c);
+}
+.box-label {
+  position: absolute;
+  top: -0.75em;
+  left: 12px;
+  padding: 0 6px;
+  background: var(--win);
+  font-size: 11px;
+  color: var(--fg-2);
+  font-family: var(--font-cjk);
+}
+
+/* ---------- 控制台 ---------- */
+.console {
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr) minmax(0, 0.82fr);
+  gap: 26px var(--gap);
+  padding-top: 10px;
+}
+.panel { display: grid; align-content: start; gap: 12px; }
+.panel > .box-label { font-size: 12px; font-weight: 700; color: var(--fg); }
+.panel-chat { --c: var(--violet-dim); }
+.panel-task { --c: var(--blue-dim); }
+.panel-task[data-state="warn"], .panel-task[data-state="busy"] { --c: var(--amber); box-shadow: 0 0 18px rgb(255 197 61 / 0.1); }
+.panel-task[data-state="done"] { --c: var(--green-dim); }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; }
+.tab {
+  flex: 1 1 auto;
+  padding: 5px 10px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font: 12px/1.5 var(--font-cjk);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tab:hover { border-color: var(--fg-3); color: var(--fg); }
+.tab[aria-selected="true"] {
+  border-color: var(--violet);
+  color: var(--fg);
+  box-shadow: 0 0 0 1px var(--violet-soft), 0 0 16px var(--violet-soft);
+}
+.tabs-sm .tab { padding: 4px 8px; font-size: 11.5px; }
+
+/* 對話窗 */
+.thread {
+  list-style: none;
+  margin: 0;
+  padding: 0 4px 0 0;
+  height: 360px;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+.msg time { font-size: 10.5px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.msg-user { justify-self: end; max-width: 88%; display: grid; justify-items: end; gap: 3px; }
+.msg-user p {
+  margin: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--blue);
+  background: rgb(77 142 255 / 0.12);
+  box-shadow: 0 0 14px var(--blue-soft);
+  font: 13px/1.6 var(--font-cjk);
+  overflow-wrap: anywhere;
+}
+.msg-agent { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; --a: var(--violet); }
+.msg-agent .agent-icon { align-self: start; padding-top: 2px; }
+.msg-meta { display: flex; gap: 10px; align-items: baseline; margin-bottom: 4px; }
+.msg-meta b { color: var(--a); }
+.bubble {
+  padding: 8px 12px;
+  border: 1px solid var(--line-2);
+  background: var(--panel);
+  font: 12.5px/1.7 var(--font-cjk);
+  color: var(--fg);
+  overflow-wrap: anywhere;
+}
+.bubble ul { margin: 2px 0 0; padding-left: 1.2em; }
+.bubble .hl { color: var(--amber); }
+.composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.composer input {
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--ground);
+  border: 1px solid var(--line-2);
+  color: var(--fg);
+  font: 13px/1.5 var(--font-cjk);
+}
+.composer input::placeholder { color: var(--fg-3); }
+.composer input:focus { outline: none; border-color: var(--violet); box-shadow: 0 0 0 1px var(--violet-soft); }
+.send {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  border: 1px solid var(--violet);
+  background: rgb(169 133 255 / 0.1);
+  color: var(--fg);
+  cursor: pointer;
+}
+.send:hover { box-shadow: 0 0 14px var(--violet-soft); }
+
+/* 小任務 */
+.task-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.picker { display: flex; flex-wrap: wrap; gap: 6px; }
+.mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-3);
+  font-size: 11px;
+  cursor: pointer;
+}
+.mini::before { content: ""; width: 6px; height: 6px; background: var(--blue); }
+.mini[data-state="warn"]::before, .mini[data-state="busy"]::before { background: var(--amber); }
+.mini[data-state="done"]::before { background: var(--green); }
+.mini[data-state="paused"]::before { background: var(--fg-3); }
+.mini:hover { color: var(--fg); border-color: var(--fg-3); }
+.mini[aria-pressed="true"] { color: var(--fg); border-color: var(--blue); box-shadow: 0 0 10px var(--blue-soft); }
+.task-body { display: grid; gap: 12px; }
+
+.ctx-head { --m: var(--blue); display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.ctx-head[data-level="ok"] { --m: var(--green); }
+.ctx-head[data-level="mid"] { --m: var(--amber); }
+.ctx-head[data-level="high"] { --m: var(--red); }
+.ctx-head span { font: 700 13px/1.4 var(--font-cjk); }
+.ctx-head strong { margin-left: auto; font-size: 22px; line-height: 1; color: var(--m); font-variant-numeric: tabular-nums; }
+.ctx-head small { color: var(--fg-2); font-size: 11.5px; }
+.meter-lg { grid-template-columns: minmax(0, 1fr); }
+.meter-lg .meter-track { height: 14px; }
+.scale { display: grid; gap: 3px; }
+.scale-bar {
+  position: relative;
+  height: 8px;
+  background:
+    repeating-linear-gradient(90deg, transparent 0 6px, var(--win) 6px 8px),
+    linear-gradient(90deg, var(--green) 0%, var(--green) 30%, var(--amber) 44%, var(--amber) 62%, var(--red) 74%, var(--red) 100%);
+}
+.scale-bar i {
+  position: absolute;
+  top: -5px;
+  width: 2px;
+  height: 18px;
+  background: var(--fg);
+  box-shadow: 0 0 6px var(--fg);
+  transform: translateX(-1px);
+  transition: left 0.5s;
+}
+.scale-ticks { position: relative; height: 1.5em; font-size: 10.5px; color: var(--fg-3); }
+.scale-ticks span { position: absolute; top: 0; transform: translateX(-50%); }
+.scale-ticks span:first-child { transform: none; }
+.scale-ticks span:last-child { transform: translateX(-100%); }
+.alert {
+  --al: var(--red);
+  margin: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 9px 12px;
+  border: 1px solid var(--al);
+  background: color-mix(in srgb, var(--al) 8%, transparent);
+  color: var(--al);
+  font: 12.5px/1.6 var(--font-cjk);
+}
+.alert[data-level="mid"] { --al: var(--amber); }
+.alert[data-level="ok"] { --al: var(--green); }
+.alert b {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  border: 1.5px solid currentColor;
+  font-size: 12px;
+}
+.records { display: grid; gap: 6px; }
+.records-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.records-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--fg);
+  font: 700 12.5px/1.5 var(--font-cjk);
+  cursor: pointer;
+}
+.records-toggle::before { content: "▾"; color: var(--fg-3); transition: transform 0.2s; }
+.records-toggle[aria-expanded="false"]::before { transform: rotate(-90deg); }
+.link { padding: 0; background: none; border: 0; color: var(--blue); font: 12px/1.5 var(--font-cjk); cursor: pointer; }
+.link:hover { text-decoration: underline; }
+.records ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; font-size: 12px; }
+.records li { display: grid; grid-template-columns: 6ch minmax(0, 1fr); gap: 10px; }
+.records time { color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.records li span { color: var(--fg-2); font-family: var(--font-cjk); }
+.muted { margin: 0; color: var(--fg-3); font: 12px/1.6 var(--font-cjk); }
+.actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.act {
+  padding: 8px 10px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font: 500 12.5px/1.5 var(--font-cjk);
+  cursor: pointer;
+}
+.act:hover:not(:disabled) { border-color: var(--fg-3); color: var(--fg); }
+.act-primary {
+  border-color: var(--blue);
+  background: rgb(77 142 255 / 0.1);
+  color: var(--fg);
+  box-shadow: 0 0 0 1px var(--blue-soft), 0 0 16px var(--blue-soft);
+}
+.act-primary:hover:not(:disabled) { border-color: var(--blue); }
+.act-danger {
+  border-color: var(--red);
+  background: rgb(255 92 102 / 0.08);
+  color: var(--fg);
+  box-shadow: 0 0 14px var(--red-soft);
+}
+.act-danger:hover:not(:disabled) { border-color: var(--red); }
+.act:disabled { opacity: 0.45; cursor: not-allowed; }
+.detail { margin: 0; display: grid; }
+.detail div {
+  display: grid;
+  grid-template-columns: 7em minmax(0, 1fr);
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.detail dt { color: var(--fg-3); font-family: var(--font-cjk); }
+.detail dd { margin: 0; color: var(--fg); font-family: var(--font-cjk); font-variant-numeric: tabular-nums; }
+.empty-note {
+  margin: 0;
+  padding: 28px 12px;
+  border: 1px dashed var(--line-2);
+  text-align: center;
+  color: var(--fg-3);
+  font: 12.5px/1.7 var(--font-cjk);
+}
+
+/* 系統資源監控：內容比旁邊兩欄短，不跟著拉高 */
+.panel-res { align-self: start; }
+.res-select { position: absolute; top: -0.95em; right: 12px; padding: 0 4px; background: var(--win); }
+.res-select select {
+  padding: 1px 4px;
+  background: var(--win);
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font: 11px/1.4 var(--font-cjk);
+  cursor: pointer;
+}
+.gauges { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding-top: 4px; }
+.gauge { margin: 0; min-width: 0; display: grid; justify-items: center; gap: 8px; }
+.gauge figcaption { font: 700 12.5px/1.4 var(--font-cjk); color: var(--fg); }
+.ring { position: relative; width: min(116px, 100%); aspect-ratio: 1; }
+.ring svg { display: block; width: 100%; height: 100%; transform: rotate(-90deg); }
+.ring-track { fill: none; stroke: var(--line-2); stroke-width: 9; stroke-dasharray: 3 2; }
+.ring-fill { fill: none; stroke: var(--g); stroke-width: 9; filter: drop-shadow(0 0 4px var(--g)); transition: stroke-dashoffset 0.8s ease; }
+.ring-val { position: absolute; inset: 0; display: grid; place-content: center; text-align: center; line-height: 1.15; }
+.ring-val strong { font-size: 18px; font-variant-numeric: tabular-nums; }
+.ring-val small { font-size: 10.5px; color: var(--fg-2); }
+.res-note { margin: 0; text-align: center; color: var(--fg-3); font: 11px/1.5 var(--font-cjk); }
+
+/* ---------- 任務頁：plan 追溯樹（需求 → 做法 → 任務 → 驗證） ---------- */
+.plan-page { gap: 22px; padding-top: 6px; }
+.plan-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+/* 前端／後端和功能模組自成一列，放在四個狀態選單上面 */
+.plan-scope { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.scope-tabs { display: flex; }
+.scope-tabs button {
+  position: relative;
+  padding: 4px 16px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font: 500 13px/1.4 var(--font-cjk);
+  cursor: pointer;
+}
+.scope-tabs button + button { margin-left: -1px; }
+.scope-tabs button:hover { color: var(--fg); }
+.scope-tabs button[aria-pressed="true"] {
+  z-index: 1;
+  border-color: var(--blue);
+  background: rgb(77 142 255 / 0.12);
+  color: var(--fg);
+  box-shadow: 0 0 12px var(--blue-soft);
+}
+.plan-picks { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.plan-pick { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--fg-3); font: 12px/1.5 var(--font-cjk); }
+.plan-pick b { margin-left: 4px; color: var(--fg-2); font: 500 11px/1 var(--font-mono); }
+.plan-pick select {
+  min-width: 0;
+  max-width: 100%;
+  padding: 4px 8px;
+  background: var(--win);
+  border: 1px solid var(--line-2);
+  color: var(--fg);
+  font: 500 13px/1.4 var(--font-cjk);
+  cursor: pointer;
+}
+/* 正在看的 plan 屬於哪個狀態，那個選單用紫框標出來 */
+.plan-pick[data-active="true"] { color: var(--fg); }
+.plan-pick[data-active="true"] select { border-color: var(--violet); box-shadow: 0 0 0 1px var(--violet-soft), 0 0 12px var(--violet-soft); }
+.plan-pick select:disabled { opacity: 0.45; cursor: not-allowed; }
+.plan-status {
+  --s: var(--fg-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 8px;
+  border: 1px solid var(--s);
+  color: var(--s);
+  font: 500 11px/1.5 var(--font-cjk);
+  white-space: nowrap;
+}
+.plan-status::before { content: ""; width: 7px; height: 7px; background: currentColor; }
+.plan-status[data-status="進行中"] { --s: var(--blue); }
+.plan-status[data-status="審查中"] { --s: var(--amber); }
+.plan-status[data-status="完成"] { --s: var(--green); }
+.plan-status[data-status="被取代"], .plan-status[data-status="放棄"] { --s: var(--fg-3); }
+.plan-meta { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 12px; }
+.plan-meta div { display: flex; gap: 6px; }
+.plan-meta dt { color: var(--fg-3); font-family: var(--font-cjk); }
+.plan-meta dd { margin: 0; color: var(--fg-2); }
+.plan-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--fg-2); font: 11.5px/1.5 var(--font-cjk); }
+.plan-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.plan-legend i { width: 10px; height: 10px; border: 1px solid var(--k); background: color-mix(in srgb, var(--k) 22%, transparent); }
+.plan-legend i.dashed { border-style: dashed; background: transparent; }
+.plan-check { --c: var(--line-2); }
+.plan-problems { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.plan-problems li {
+  padding: 5px 10px;
+  border-left: 3px solid var(--k);
+  background: color-mix(in srgb, var(--k) 8%, transparent);
+  color: var(--fg);
+  font: 12.5px/1.5 var(--font-cjk);
+}
+.plan-ok { margin: 0; color: var(--green); font: 12.5px/1.5 var(--font-cjk); }
+.plan-box { --c: var(--line-2); container: plantree / inline-size; }
+.plan-scroll { overflow-x: auto; padding: 6px 2px 8px; scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
+
+/* 由上往下的樹：每個 li 是「節點＋下面那一排子節點」
+   ul::before 是父節點往下的短線；li 的 ::before、::after 各畫兄弟橫線的左右半段；節點的 ::before、::after 是接到節點的直線和箭頭 */
+.tree { --pn-w: 168px; --pn-drop: 18px; --pl: var(--fg-3); width: max-content; margin: 0 auto; }
+.tree, .tree ul { list-style: none; padding: 0; }
+.tree ul { position: relative; display: flex; justify-content: center; margin: 0; padding-top: var(--pn-drop); }
+.tree li { position: relative; display: flex; flex-direction: column; align-items: center; padding: var(--pn-drop) 6px 0; }
+.tree > li { padding-top: 0; }
+/* 左右留白只給有兄弟的節點；只有一個子節點的鏈每層都加的話，越往下越寬 */
+.tree li:only-child { padding-left: 0; padding-right: 0; }
+.tree ul::before { content: ""; position: absolute; top: 0; left: 50%; height: var(--pn-drop); border-left: 1px dashed var(--pl); }
+.tree li::before, .tree li::after { content: ""; position: absolute; top: 0; width: 50%; border-top: 1px dashed var(--pl); }
+.tree li::before { right: 50%; }
+.tree li::after { left: 50%; }
+.tree li:first-child::before, .tree li:last-child::after { border-top: 0; }
+.tree > li::before, .tree > li::after { display: none; }
+.tree li > .pnode { position: relative; }
+.tree li > .pnode::before { content: ""; position: absolute; bottom: 100%; left: 50%; height: var(--pn-drop); border-left: 1px dashed var(--pl); }
+.tree li > .pnode::after {
+  content: "";
+  position: absolute;
+  top: -7px;
+  left: calc(50% - 3px);
+  border: 3px solid transparent;
+  border-top: 4px solid var(--pl);
+}
+.tree > li > .pnode::before, .tree > li > .pnode::after { display: none; }
+/* 沒有對應需求的那條線：像沒開分支直接 commit，用橘色粗虛線 */
+.tree li[data-edge="extra"] > .pnode::before { border-left: 2px dashed var(--orange); }
+.tree li[data-edge="extra"] > .pnode::after { border-top-color: var(--orange); }
+
+.pnode {
+  --k: var(--line-2);
+  flex: none;
+  width: var(--pn-w);
+  display: grid;
+  gap: 2px;
+  padding: 7px 10px;
+  border: 1px solid var(--k);
+  background: var(--panel);
+}
+.pnode small { color: var(--k); font: 500 10px/1.4 var(--font-cjk); letter-spacing: 0.12em; }
+.pnode b { color: var(--fg); font: 500 12.5px/1.45 var(--font-cjk); overflow-wrap: anywhere; }
+.pnode .pid { margin-right: 4px; color: var(--k); font: 700 12px/1.45 var(--font-mono); }
+.pnode p { margin: 0; color: var(--fg-2); font: 11.5px/1.5 var(--font-cjk); overflow-wrap: anywhere; }
+.pnode[data-class="plan"] { --k: var(--fg); width: 160px; background: #161b28; box-shadow: 0 0 16px rgb(217 223 238 / 0.08); }
+.pnode[data-class="plan"] b { font-weight: 700; }
+.pnode[data-class="requirement"] { --k: var(--blue); }
+.pnode[data-class="decision"] { --k: var(--violet); }
+.pnode[data-class="task"] { --k: var(--fg-2); }
+.pnode[data-class="verify"] { --k: var(--fg-3); border-style: dashed; background: transparent; }
+.pnode[data-class="missing"] { --k: var(--red); background: rgb(255 92 102 / 0.1); box-shadow: 0 0 14px var(--red-soft); }
+.pnode[data-class="extra"] { --k: var(--orange); background: rgb(255 138 61 / 0.1); }
+.pnode[data-class="incomplete"] { --k: var(--amber); background: rgb(255 197 61 / 0.08); }
+
+/* ---------- 右側聊天窗（每一頁都在） ---------- */
+.chatbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  height: 100vh;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  background: var(--win-bar);
+  border-left: 1px solid var(--line);
+  transition: width 0.2s;
+}
+.chatbar:not(.is-open) { width: var(--rail-w); }
+.chatbar.is-open .chatbar-strip, .chatbar:not(.is-open) .chatbar-panel { display: none; }
+.chatbar-strip { display: flex; flex-direction: column; gap: 6px; padding: 14px 10px; }
+.chatbar-strip .rail-btn { color: var(--green); border-color: var(--line); }
+.chatbar-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.chatbar-head {
+  --a: var(--green);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.chatbar-head h2 { flex: 1; margin: 0; font: 700 14px/1.4 var(--font-cjk); }
+.icon-btn {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.icon-btn:hover { color: var(--fg); border-color: var(--fg-3); }
+.icon-btn .ico { width: 16px; height: 16px; }
+.bot-thread { flex: 1; height: auto; min-height: 0; padding: 14px; }
+.quick { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 14px 0; border-top: 1px solid var(--line); }
+.quick button {
+  padding: 2px 8px;
+  background: transparent;
+  border: 1px solid var(--line-2);
+  color: var(--fg-2);
+  font: 11.5px/1.5 var(--font-cjk);
+  cursor: pointer;
+}
+.quick button:hover { border-color: var(--green-dim); color: var(--fg); }
+.chatbar .composer { padding: 10px 14px 14px; }
+.chatbar .composer input:focus { border-color: var(--green-dim); box-shadow: 0 0 0 1px var(--green-soft); }
+.send-bot { border-color: var(--green-dim); background: rgb(57 217 138 / 0.08); }
+.send-bot:hover { box-shadow: 0 0 14px var(--green-soft); }
+/* 手機寬度才出現：跳轉列上的聊天按鈕、聊天窗的關閉圖示 */
+.rail-chat { display: none; }
+.rail-chat[aria-expanded="true"] { color: var(--fg); border-color: var(--green-dim); box-shadow: 0 0 14px var(--green-soft); }
+.ico.ico-mobile { display: none; }
+
+/* 還沒做的頁面 */
+.empty { padding: 40px 20px 34px; text-align: center; }
+.empty strong { display: block; margin-bottom: 6px; font: 700 15px/1.5 var(--font-cjk); }
+
+/* ---------- 窄螢幕 ----------
+   stage：中間區域的寬度，兩側欄展開收合都會變
+   tiers：總覽裡三層卡片那一塊的寬度，左邊多了切換格，所以跟 stage 分開算 */
+@container stage (max-width: 1184px) {
+  .console { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .panel-res { grid-column: 1 / -1; }
+  .gauges { max-width: 560px; justify-self: center; width: 100%; }
+}
+@container stage (max-width: 900px) {
+  .overview { grid-template-columns: minmax(0, 1fr); }
+  .ops { position: relative; top: 0; height: 420px; }
+}
+@container stage (max-width: 804px) {
+  .console { grid-template-columns: minmax(0, 1fr); }
+}
+@container stage (max-width: 728px) {
+  .term-body { padding: 18px 14px 14px; }
+  .term-bar { grid-template-columns: minmax(0, 1fr) auto; }
+  .term-title { grid-column: 1; text-align: left; white-space: normal; font-size: 14px; }
+  .pill { grid-column: 2; }
+}
+@container stage (max-width: 408px) {
+  .actions { grid-template-columns: minmax(0, 1fr); }
+}
+/* 先把層級標籤縮窄、藏說明，虛線連接線還能留著；再窄才把標籤移到上方 */
+@container tiers (max-width: 980px) {
+  .tier { --tag-w: 124px; }
+  .tier-tag { padding: 10px; }
+  .tier-tag h2 { font-size: 14px; }
+  .tier-tag p { display: none; }
+  .mid-body { grid-template-columns: minmax(0, 1fr); }
+  .duties { padding: 10px 0 0; border-left: 0; border-top: 1px dashed var(--line-2); }
+}
+@container tiers (max-width: 860px) {
+  .tier { grid-template-columns: minmax(0, 1fr); row-gap: 10px; }
+  .tier + .tier { padding-top: 22px; }
+  .tier-tag { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; padding: 8px 12px; }
+  .tier-tag p { display: block; }
+  .tier-2 .tier-body::before, .tier-2 .tier-body::after,
+  .squad::before, .squad::after,
+  .pair > .agent::before, .pair > .agent::after,
+  .squad > .agent::before, .squad > .agent::after { display: none; }
+}
+@container tiers (max-width: 700px) {
+  .lead-body { grid-template-columns: minmax(0, 1fr); }
+  .lead-body .meters { padding: 10px 0 0; border-left: 0; border-top: 1px dashed var(--line-2); }
+}
+@container tiers (max-width: 640px) {
+  .tier-1 .tier-body, .squads { grid-template-columns: minmax(0, 1fr); }
+}
+@container tiers (max-width: 560px) {
+  .pair { grid-template-columns: minmax(0, 1fr); }
+}
+@container tiers (max-width: 362px) {
+  .squad { grid-template-columns: minmax(0, 1fr); }
+}
+/* 比手機還窄時並排會太擠，改成往下縮排的樹；其他寬度放不下就在框裡左右捲動 */
+@container plantree (max-width: 600px) {
+  .tree { width: auto; }
+  .tree ul { display: block; margin-left: 12px; padding-top: 0; }
+  .tree ul::before { display: none; }
+  .tree li { display: block; padding: 8px 0 0 20px; }
+  .tree li::before { top: 24px; left: 0; right: auto; width: 20px; border-top: 1px dashed var(--pl); }
+  .tree li::after { top: 0; bottom: 0; left: 0; width: 0; border-top: 0; border-left: 1px dashed var(--pl); }
+  .tree li:first-child::before, .tree li:only-child::before { border-top: 1px dashed var(--pl); }
+  .tree li:last-child::after { bottom: auto; height: 24px; }
+  .tree li[data-edge="extra"]::before { border-top: 2px dashed var(--orange); }
+  .tree li > .pnode::before, .tree li > .pnode::after { display: none; }
+  .tree > li { padding-left: 0; }
+  .tree > li::before, .tree > li::after { display: none; }
+  .pnode, .pnode[data-class="plan"] { width: 100%; }
+}
+/* 手機：左側列變成頂端橫列，聊天窗改成全螢幕蓋在上面 */
+@media (max-width: 760px) {
+  .app { grid-template-columns: minmax(0, 1fr); }
+  .rail, .rail.is-wide {
+    height: auto;
+    width: auto;
+    flex-direction: row;
+    padding: 8px max(16px, env(safe-area-inset-left, 0px));
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .rail-toggle { display: none; }
+  .rail-links { flex: 1; flex-direction: row; justify-content: space-between; }
+  .rail-btn { flex: 0 1 44px; justify-content: center; padding: 0; }
+  .rail.is-wide .rail-lbl { display: none; }
+  .rail-chat { display: flex; }
+  .chatbar {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    width: auto;
+    height: auto;
+    border-left: 0;
+  }
+  .chatbar:not(.is-open) { display: none; }
+  .ico.ico-mobile { display: block; }
+  .ico.ico-desktop { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="rail" id="rail" aria-label="跳轉">
+    <button class="rail-btn rail-toggle" id="railToggle" type="button" aria-expanded="false" title="展開選單">
+      <span data-icon="expand"></span><span class="rail-lbl">收合</span>
+    </button>
+    <div class="rail-links" id="railLinks"></div>
+    <button class="rail-btn rail-chat" type="button" data-chat-toggle aria-expanded="false" title="儀表板助手">
+      <span data-icon="chat"></span><span class="rail-lbl">聊天</span>
+    </button>
+  </nav>
+
+  <div class="stage">
+    <main class="term">
+      <div class="term-bar">
+        <h1 class="term-title">多 Agent 監控儀表板<span id="termPage">— 總覽</span></h1>
+        <div class="pill" id="pill" data-state="live">LIVE</div>
+      </div>
+
+      <div class="term-body">
+        <!-- 總覽：左邊切換格（即時活動、異常警告、人工介入），右邊三層 Agent -->
+        <section class="page overview" data-page="overview" aria-label="三層 Agent 總覽">
+          <aside class="boxed ops" aria-label="即時活動、異常警告、人工介入">
+            <span class="box-label" id="opsLabel">即時活動紀錄</span>
+            <div class="tabs tabs-sm" role="tablist" aria-label="切換" id="opsTabs"></div>
+            <div class="ops-body" id="opsBody"></div>
+          </aside>
+
+          <div class="tiers">
+            <div class="tier tier-1">
+              <header class="tier-tag">
+                <div class="tier-top"><span class="tier-no">01</span><small>第一層</small></div>
+                <h2>主控 Agent</h2>
+                <p>任務規劃・資源調度・進度監控・最終整合</p>
+              </header>
+              <div class="tier-body">
+                <article class="agent agent-lead" id="leadCard"></article>
+                <aside class="boxed focus" aria-label="任務重點">
+                  <span class="box-label">任務重點</span>
+                  <ul id="focusList"></ul>
+                </aside>
+              </div>
+            </div>
+
+            <div class="tier tier-2">
+              <header class="tier-tag">
+                <div class="tier-top"><span class="tier-no">02</span><small>第二層</small></div>
+                <h2>專業 Agent</h2>
+                <p>核心開發・程式審查・技術方案・品質把關</p>
+              </header>
+              <div class="tier-body"><div class="pair" id="pair"></div></div>
+            </div>
+
+            <div class="tier tier-3">
+              <header class="tier-tag">
+                <div class="tier-top"><span class="tier-no">03</span><small>第三層</small></div>
+                <h2>小任務 Agent</h2>
+                <p>具體任務執行・文件處理・測試・部署</p>
+              </header>
+              <div class="tier-body"><div class="squads" id="squads"></div></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 任務：plan 追溯樹 -->
+        <section class="page plan-page" data-page="tasks" aria-label="Plan 追溯樹" hidden>
+          <div class="plan-head">
+            <div class="plan-scope" id="planScope"></div>
+            <div class="plan-picks" id="planPicks" aria-label="依狀態選 plan"></div>
+            <span class="plan-status" id="planStatus"></span>
+            <dl class="plan-meta" id="planMeta"></dl>
+          </div>
+          <div class="plan-legend" aria-label="顏色說明">
+            <span><i style="--k: var(--blue)"></i>需求</span>
+            <span><i style="--k: var(--violet)"></i>做法</span>
+            <span><i style="--k: var(--fg-2)"></i>任務</span>
+            <span><i class="dashed" style="--k: var(--fg-3)"></i>驗證</span>
+            <span><i style="--k: var(--red)"></i>紅：需求缺做法或任務（漏做）</span>
+            <span><i style="--k: var(--orange)"></i>橘：沒有對應需求（多做）</span>
+            <span><i style="--k: var(--amber)"></i>黃：缺驗證或 AI 理解（資訊不完整）</span>
+          </div>
+          <section class="boxed plan-check" aria-label="斷線檢查">
+            <span class="box-label">斷線檢查</span>
+            <div id="planProblems"></div>
+          </section>
+          <section class="boxed plan-box" aria-label="追溯樹">
+            <span class="box-label">追溯樹：需求 → 做法 → 任務 → 驗證</span>
+            <div class="plan-scroll" id="planTree"></div>
+          </section>
+        </section>
+
+        <!-- 控制台：主控對話窗、小任務、系統資源監控 -->
+        <section class="page console" data-page="console" aria-label="控制台" hidden>
+          <section class="boxed panel panel-chat" aria-label="Astra 對話窗">
+            <span class="box-label">Astra（主控 Agent）對話窗</span>
+            <div class="tabs" role="tablist" aria-label="對話類型" id="chatTabs"></div>
+            <ol class="thread" id="thread" aria-live="polite"></ol>
+            <form class="composer" id="composer">
+              <input id="chatInput" type="text" autocomplete="off" aria-label="輸入訊息給 Astra">
+              <button class="send" type="submit" aria-label="送出"><span data-icon="send"></span></button>
+            </form>
+          </section>
+
+          <section class="boxed panel panel-task" id="taskPanel" aria-label="小任務">
+            <span class="box-label">小任務 Agent</span>
+            <div class="task-head" id="taskHead"></div>
+            <div class="picker" id="workerPicker" aria-label="切換小任務 Agent"></div>
+            <div class="tabs tabs-sm" role="tablist" aria-label="小任務分頁" id="taskTabs"></div>
+            <div class="task-body" id="taskBody"></div>
+          </section>
+
+          <section class="boxed panel panel-res" aria-label="系統資源監控">
+            <span class="box-label">系統資源監控</span>
+            <label class="res-select">
+              <span class="visually-hidden">更新方式</span>
+              <select id="resMode">
+                <option value="live">即時</option>
+                <option value="paused">暫停</option>
+              </select>
+            </label>
+            <div class="gauges" id="gauges"></div>
+            <p class="res-note" id="resNote">每 2 秒更新一次</p>
+          </section>
+        </section>
+
+        <!-- 其他跳轉頁：還沒有內容 -->
+        <section class="page" data-page="placeholder" hidden>
+          <div class="boxed empty">
+            <span class="box-label" id="emptyLabel">任務</span>
+            <strong>這一頁還沒有內容</strong>
+            <p class="muted">目前有畫面的是「總覽」（三層 Agent）、「任務」（plan 追溯樹）和「控制台」（主控對話窗、小任務、系統資源監控）。</p>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <aside class="chatbar" id="chatbar" aria-label="儀表板助手">
+    <div class="chatbar-strip">
+      <button class="rail-btn" type="button" data-chat-toggle aria-expanded="false" title="展開儀表板助手"><span data-icon="chat"></span></button>
+    </div>
+    <section class="chatbar-panel">
+      <header class="chatbar-head">
+        <span class="agent-icon"><span data-icon="chat"></span></span>
+        <h2>儀表板助手</h2>
+        <span class="state" data-state="done">線上</span>
+        <button class="icon-btn" type="button" data-chat-toggle aria-expanded="true" title="收合儀表板助手">
+          <span class="ico-desktop" data-icon="expand"></span><span class="ico-mobile" data-icon="close"></span>
+        </button>
+      </header>
+      <ol class="thread bot-thread" id="botThread" aria-live="polite"></ol>
+      <div class="quick" id="botQuick" aria-label="常用問題"></div>
+      <form class="composer" id="botComposer">
+        <input id="botInput" type="text" autocomplete="off" placeholder="問儀表板助手…" aria-label="輸入訊息給儀表板助手">
+        <button class="send send-bot" type="submit" aria-label="送出"><span data-icon="send"></span></button>
+      </form>
+    </section>
+  </aside>
+</div>
+
+<script>
+  // 示意資料：數字照參考圖
+  const lead = { name: 'Astra', role: '主控 Agent', tag: 'Astra', task: 'Agentic RAG 產品開發總規劃', progress: 68, context: 32 };
+  const focusItems = ['任務拆解與分派', '資源監控與模型調度', '進度追蹤與風險處理', '最終整合與發布'];
+  const specialists = [
+    {
+      id: 'claude', name: 'Claude: Opus 5.5', short: 'Claude（Opus 5.5）', nick: 'Claude', role: '程式開發 Agent', tag: 'Claude Opus 5.5',
+      icon: 'code', accent: 'blue', task: 'RAG 核心架構設計與實作', progress: 62, context: 55,
+      duties: ['程式開發・功能實作', '技術方案設計', '疑難問題處理', '程式碼撰寫'],
+    },
+    {
+      id: 'sol', name: 'Sol', short: 'Sol', nick: 'Sol', role: '審查 Agent', tag: 'Sol',
+      icon: 'shield', accent: 'violet', task: '程式碼審查與品質檢查', progress: 80, context: 28,
+      duties: ['程式碼審查', '架構評估', '品質檢查', '測試驗證', '改進建議'],
+    },
+  ];
+  // compactions 新的在前；kind 是 compact（摘要壓縮）或 session（開新 Session）
+  const workers = [
+    { id: 'luna-1', name: 'Luna-1', tag: 'Luna', parent: 'claude', task: '文件解析模組', progress: 40, context: 22, compactions: [] },
+    { id: 'luna-2', name: 'Luna-2', tag: 'Luna', parent: 'claude', task: '向量資料處理', progress: 62, context: 58, compactions: [] },
+    { id: 'sonnet-2', name: 'Sonnet-2', tag: 'Sonnet', parent: 'sol', task: '前端介面開發', progress: 28, context: 66, compactions: [] },
+    {
+      id: 'luna-3', name: 'Luna-3', tag: 'Luna', parent: 'sol', task: '測試腳本撰寫', progress: 78, context: 76,
+      compactions: [
+        { at: '14:18', kind: 'compact', keep: 20 },
+        { at: '11:32', kind: 'compact', keep: 15 },
+        { at: '10:05', kind: 'compact', keep: 12 },
+      ],
+    },
+  ];
+  const contextWindowK = 200;
+  const compactKeep = 20;
+
+  // 總覽左邊切換格的示意資料：活動和參考圖的即時活動記錄一樣，新的在前
+  const activity = [
+    { at: '14:35', who: 'Luna-3', what: 'Context 達 76%，準備自動摘要' },
+    { at: '14:34', who: 'Sol', what: '完成審查：RAG 架構設計（5 項建議）' },
+    { at: '14:33', who: 'Claude', what: '生成 API 實作程式碼（3 個檔案）' },
+    { at: '14:32', who: 'Luna-2', what: '向量化處理完成 120 個文件' },
+    { at: '14:31', who: 'Luna-1', what: '開始處理 PDF 文件' },
+    { at: '14:30', who: 'Astra', what: '指派新任務給 Sonnet-2' },
+    { at: '14:29', who: 'Sonnet-2', what: '前端介面開發進度 28%' },
+    { at: '14:28', who: '系統', what: '記憶體使用率正常（9.4GB / 16GB）' },
+  ];
+  // Context 超過 70% 的告警由資料即時算出，這裡只放其他類型
+  const fixedAlerts = [
+    { id: 'loop-luna-2', kind: '鬼打牆', level: 'high', agent: 'Luna-2', at: '14:34', text: '同一個工具（vector_upsert）用相同參數連續呼叫 4 次。' },
+    { id: 'stuck-sonnet-2', kind: '卡住', level: 'warn', agent: 'Sonnet-2', at: '14:35', text: '已 6 分鐘沒有新進度（門檻 5 分鐘），停在「前端介面開發」28%。' },
+    { id: 'reject-claude', kind: '審查退件', level: 'warn', agent: 'Claude', at: '14:34', text: 'Sol 第 2 次退回「RAG 核心架構設計與實作」，達到 2 次門檻。' },
+  ];
+  const approvals = [
+    { id: 'ap-1', agent: 'Luna-1', at: '14:33', action: '刪除 data/tmp/ 底下 37 個暫存檔' },
+    { id: 'ap-2', agent: 'Claude', at: '14:33', action: 'git push 到 origin/dev（3 個 commit）' },
+    { id: 'ap-3', agent: 'Luna-2', at: '14:32', action: '重建向量索引（會覆蓋現有索引）' },
+  ];
+  const opsTabs = [
+    { key: 'feed', label: '即時活動', title: '即時活動紀錄' },
+    { key: 'alerts', label: '異常警告', title: '異常警告' },
+    { key: 'manual', label: '人工介入', title: '人工介入' },
+  ];
+  const whoColors = { Astra: 'var(--violet)', Claude: 'var(--blue)', Sol: 'var(--violet)', 系統: 'var(--green)', 你: 'var(--amber)' };
+
+  // 任務頁的 plan：照 plans/*.md 的檔頭和追溯矩陣抄進來（2026-10-25 的快照），改了 .md 要回來更新
+  // rows 每列依序是：需求、AI 理解、做法（ADR）、不採用、任務、驗證
+  // modules 是 .md 沒有的欄位：依 plan 內容分前端、後端各屬哪個功能模組，只寫在這頁
+  const plans = [
+    {
+      id: 'P0001', title: '批次上傳照片', status: '進行中', area: ['後端', '前端'], branch: 'feature/batch-upload', created: '2026-10-18',
+      source: 'plans/0001-batch-upload.md', modules: { 前端: '照片上傳', 後端: '照片上傳' },
+      rows: [
+        ['R1 一次最多上傳 50 張照片', '單次請求上限 50 張，超過時前端先擋下', 'D1 新增批次上傳 API', '前端逐張呼叫：50 張要發 50 個請求', 'T1 後端加批次上傳 API', '選 50 張上傳，50 張都出現在清單'],
+        ['R1', '', 'D1', '', 'T2 前端選檔超過 50 張時提示', '選 51 張，出現「最多 50 張」提示，沒有送出'],
+        ['R2 單張失敗不影響其他張', '每張各自處理，回應列出每張成功或失敗', 'D2 回應改成逐張狀態', '整批成功或整批失敗：不符合 R2', 'T3 回傳每張的個別結果', ''],
+        ['R3 上傳時顯示進度', '顯示已完成張數 / 總張數', '', '', '', ''],
+        ['R4 上傳完自動產生縮圖', '', 'D3 上傳後在背景產生縮圖', '上傳當下同步產生：拖慢回應', '', ''],
+        ['', '', 'D4 上傳前先壓縮圖片', '', 'T4 前端壓縮圖片', '上傳 10MB 照片，伺服器收到的檔案小於 2MB'],
+      ],
+    },
+    {
+      id: 'P0002', title: '上傳時同步產生縮圖', status: '被取代', area: ['後端'], branch: 'feature/thumbnail', created: '2026-10-20',
+      source: 'plans/0002-thumbnail-sync.md', modules: { 後端: '縮圖' },
+      rows: [
+        ['R1 上傳完要看得到縮圖', '上傳成功後，清單立刻顯示縮圖', 'D1 上傳 API 內同步產生縮圖', '背景產生：要多一套排程', 'T1 上傳 API 產生 200px 縮圖', '上傳 1 張照片，清單立刻出現縮圖'],
+      ],
+    },
+    {
+      id: 'P0003', title: '背景產生縮圖', status: '審查中', area: ['後端', '前端'], branch: 'feature/thumbnail', created: '2026-10-23', supersedes: 'P0002',
+      source: 'plans/0003-thumbnail-background.md', modules: { 前端: '縮圖顯示', 後端: '縮圖' },
+      rows: [
+        ['R1 上傳不能因為產生縮圖變慢', '上傳 API 不等縮圖做完就回應', 'D1 上傳後丟進背景佇列產生縮圖', '上傳 API 內同步產生：50 張要等很久', 'T1 新增縮圖背景工作', '上傳 50 張，回應時間和沒有縮圖時差不多'],
+        ['R2 縮圖還沒好時要有提示', '清單先顯示「處理中」，好了再換成縮圖', 'D2 前端定時查詢縮圖狀態', 'WebSocket 推播：目前沒有 WebSocket 基礎設施', 'T2 清單顯示處理中狀態', ''],
+        ['', '', 'D3 縮圖改存 WebP', '', 'T3 縮圖輸出格式改成 WebP', '縮圖檔案副檔名是 .webp'],
+      ],
+    },
+    {
+      id: 'P0004', title: '搜尋結果依相似度排序', status: '完成', area: ['後端'], branch: 'feature/search-ranking', created: '2026-10-24',
+      source: 'plans/0004-search-ranking.md', modules: { 後端: '搜尋' },
+      rows: [
+        ['R1 搜尋結果最像的排最前面', '依向量相似度由高到低排序', 'D1 排序交給向量資料庫', '撈出來再在程式裡排序：資料多時很慢', 'T1 查詢加上相似度排序', '搜尋「夕陽」，第一筆是夕陽的照片'],
+        ['R2 分數太低的不要顯示', '相似度低於門檻的結果過濾掉', 'D2 門檻值放設定檔', '寫死在程式裡：之後調整要改程式', 'T2 加上相似度門檻設定', '門檻設 0.9 時，不相關的照片不會出現'],
+      ],
+    },
+  ];
+  const planStatusGroups = ['審查中', '完成', '被取代', '進行中'];
+  const planAreas = ['前端', '後端'];
+  const emptyCellMarkers = new Set(['', '-', '—', '無', '（無）']);
+  const severityOrder = [['red', '紅', 'var(--red)'], ['orange', '橘', 'var(--orange)'], ['yellow', '黃', 'var(--amber)']];
+  const planKindLabels = { plan: 'PLAN', requirement: '需求', decision: '做法', task: '任務', verify: '驗證' };
+  const gapLabels = { missing: '漏做', extra: '多做', incomplete: '資訊不完整' };
+
+  const pages = [
+    { key: 'overview', label: '總覽', icon: 'grid' },
+    { key: 'tasks', label: '任務', icon: 'clipboard' },
+    { key: 'models', label: '模型', icon: 'cube' },
+    { key: 'console', label: '控制台', icon: 'monitor' },
+    { key: 'topology', label: '拓撲', icon: 'nodes' },
+    { key: 'settings', label: '設定', icon: 'gear' },
+  ];
+  const chatModes = [
+    { key: 'assign', label: '任務指派', hint: '例如：請 Luna-2 接手向量資料處理' },
+    { key: 'progress', label: '進度追蹤', hint: '例如：Sol 的審查還要多久？' },
+    { key: 'resource', label: '資源調度', hint: '例如：把 Luna-3 的工作分一半給 Luna-4' },
+    { key: 'plan', label: '整合規劃', hint: '例如：列出下一個整合里程碑' },
+  ];
+  const taskTabs = [
+    { key: 'detail', label: '任務詳情' },
+    { key: 'chat', label: '對話內容' },
+    { key: 'files', label: '檔案變更' },
+    { key: 'tools', label: '工具輸出' },
+    { key: 'context', label: 'Context 分析' },
+  ];
+  const gauges = [
+    { key: 'cpu', label: 'CPU', color: 'var(--green)' },
+    { key: 'memory', label: '記憶體', color: 'var(--blue)' },
+    { key: 'network', label: '網路', color: 'var(--violet)' },
+  ];
+  const stateText = { run: '運行中', warn: '即將壓縮', busy: '壓縮中', done: '完成', paused: '已暫停' };
+
+  const iconPaths = {
+    expand: '<path d="M5 6l6 6-6 6M12 6l6 6-6 6"/>',
+    grid: '<rect x="4" y="4" width="7" height="7"/><rect x="13" y="4" width="7" height="7"/><rect x="4" y="13" width="7" height="7"/><rect x="13" y="13" width="7" height="7"/>',
+    clipboard: '<rect x="5" y="5" width="14" height="16"/><path d="M9 3h6v4H9zM8.5 11.5h7M8.5 15.5h5"/>',
+    cube: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>',
+    monitor: '<rect x="3" y="4" width="18" height="12"/><path d="M8 20h8M12 16v4M7 8h6M7 11.5h9"/>',
+    nodes: '<circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M6.5 6.5l3.7 3.7M17.5 6.5l-3.7 3.7M6.5 17.5l3.7-3.7M17.5 17.5l-3.7-3.7"/>',
+    gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
+    crown: '<path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5z"/>',
+    code: '<path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/>',
+    shield: '<path d="M12 3l8 3v6c0 4.5-3.4 8.2-8 9-4.6-.8-8-4.5-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-4.5"/>',
+    robot: '<rect x="5" y="8" width="14" height="11"/><path d="M12 4.5V8M9 12.5v1.5M15 12.5v1.5M9.5 16.5h5M3 12v4M21 12v4"/><circle cx="12" cy="3.5" r="1"/>',
+    send: '<path d="M4 12L20 4l-6 16-3-7z"/><path d="M11 13l9-9"/>',
+    chat: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/>',
+    close: '<path d="M6 6l12 12M18 6L6 18"/>',
+  };
+  const astraSender = { name: 'Astra', icon: 'crown', color: 'var(--violet)' };
+  const botSender = { name: '儀表板助手', icon: 'chat', color: 'var(--green)' };
+  const botQuickAsks = ['Luna-3 現在怎樣？', 'Context 偏高的有誰？', '系統資源用量', '整體進度'];
+
+  const builtPages = ['overview', 'tasks', 'console'];
+  let selectedPlanId = 'P0001';
+  let planArea = '前端';
+  let planModule = 'all';
+  let selectedWorkerId = 'luna-3';
+  let taskTab = 'context';
+  let chatMode = 'assign';
+  let recordsOpen = true;
+  let showAllRecords = false;
+  let resourcesLive = true;
+  let chatOpen = false;
+  let opsTab = 'feed';
+  let feedFilter = 'all';
+  const readAlerts = new Set();
+  const contextAlertAt = { 'ctx-luna-3': '14:35' };
+  const resources = { cpu: 28, memory: 9.4, network: 12 };
+  const ringLength = 2 * Math.PI * 46;
+
+  const $ = selector => document.querySelector(selector);
+
+  function icon(name, extraClass = '') {
+    return `<svg class="ico ${extraClass}" viewBox="0 0 24 24" aria-hidden="true">${iconPaths[name]}</svg>`;
+  }
+
+  function escapeHtml(text) {
+    return text.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  }
+
+  function nowClock() {
+    return new Date().toTimeString().slice(0, 5);
+  }
+
+  // 門檻對齊 Context 分析的刻度：40% 以下綠、70% 以上紅
+  function contextLevel(pct) {
+    if (pct >= 70) return 'high';
+    if (pct >= 40) return 'mid';
+    return 'ok';
+  }
+
+  function workerState(worker) {
+    if (worker.busy) return 'busy';
+    if (worker.paused) return 'paused';
+    if (worker.progress >= 100) return 'done';
+    return worker.context >= 70 ? 'warn' : 'run';
+  }
+
+  // Astra 和專業 Agent 沒有 Context 壓縮流程，只分運行中和已暫停
+  function agentState(agent) {
+    return agent.paused ? 'paused' : 'run';
+  }
+
+  function findWorker(id) {
+    return workers.find(worker => worker.id === id);
+  }
+
+  // 小任務卡片是 button，裡面只能放 span，所以這裡全部用 span
+  function meter(label, pct, kind) {
+    const level = kind === 'context' ? contextLevel(pct) : 'progress';
+    return `<span class="meter" data-level="${level}">
+      <span class="meter-label">${label}</span>
+      <span class="meter-track"><i style="width:${pct}%"></i></span>
+      <b class="meter-pct">${pct}%</b>
+    </span>`;
+  }
+
+  function statePill(state) {
+    return `<span class="state" data-state="${state}">${stateText[state]}</span>`;
+  }
+
+  // ---------- 總覽 ----------
+  function renderLead() {
+    $('#leadCard').dataset.paused = String(Boolean(lead.paused));
+    $('#leadCard').innerHTML = `
+      <div class="agent-head">
+        <h3 class="agent-name"><span class="agent-icon">${icon('crown')}</span>${lead.name}<span>（${lead.role}）</span></h3>
+        <span class="tag">${lead.tag}</span>
+        ${statePill(agentState(lead))}
+      </div>
+      <div class="lead-body">
+        <div class="task-block"><small>目前任務</small><p>${lead.task}</p></div>
+        <div class="meters">
+          ${meter('任務進度', lead.progress, 'progress')}
+          ${meter('Context 使用率', lead.context, 'context')}
+        </div>
+      </div>`;
+    $('#focusList').innerHTML = focusItems.map(item => `<li>${item}</li>`).join('');
+  }
+
+  function renderSpecialists() {
+    $('#pair').innerHTML = specialists.map(agent => `
+      <article class="agent agent-mid" data-state="${agentState(agent)}" data-accent="${agent.accent}">
+        <div class="agent-head">
+          <h3 class="agent-name"><span class="agent-icon">${icon(agent.icon)}</span>${agent.name}<span>（${agent.role}）</span></h3>
+          <span class="tag" data-accent="${agent.accent}">${agent.tag}</span>
+          ${statePill(agentState(agent))}
+        </div>
+        <div class="mid-body">
+          <div class="mid-main">
+            <div class="task-block"><small>目前任務</small><p>${agent.task}</p></div>
+            ${meter('任務進度', agent.progress, 'progress')}
+            ${meter('Context 使用率', agent.context, 'context')}
+          </div>
+          <ul class="duties">${agent.duties.map(duty => `<li>${duty}</li>`).join('')}</ul>
+        </div>
+      </article>`).join('');
+  }
+
+  function workerCard(worker) {
+    const state = workerState(worker);
+    return `
+      <button class="agent agent-sm" type="button" data-state="${state}" data-worker="${worker.id}" title="在控制台查看 ${worker.name}">
+        <span class="agent-head">
+          <span class="agent-icon">${icon('robot')}</span>
+          <span class="agent-name">${worker.name}</span>
+        </span>
+        <span class="sm-state">${statePill(state)}<span class="tag">${worker.tag}</span></span>
+        <span class="kv"><span>任務</span><b>${worker.task}</b></span>
+        ${meter('進度', worker.progress, 'progress')}
+        ${meter('Context', worker.context, 'context')}
+      </button>`;
+  }
+
+  // 依上層 Agent 分組，兩組剛好對齊上面兩張專業 Agent 卡
+  function renderWorkers() {
+    $('#squads').innerHTML = specialists.map(parent => `
+      <div class="squad" aria-label="${parent.short} 底下的小任務">
+        ${workers.filter(worker => worker.parent === parent.id).map(workerCard).join('')}
+      </div>`).join('');
+  }
+
+  function renderOverview() {
+    renderLead();
+    renderSpecialists();
+    renderWorkers();
+  }
+
+  // ---------- 控制台：對話窗 ----------
+  function statusLines() {
+    const lines = specialists.map(agent => `${agent.short}：進度 ${agent.progress}%，${agent.paused ? '已暫停' : '運行正常'}`);
+    workers.forEach(worker => {
+      const state = workerState(worker);
+      if (state === 'paused') {
+        lines.push(`${worker.name}：進度 ${worker.progress}%，已暫停`);
+      } else if (state === 'warn') {
+        lines.push(`${worker.name}：進度 ${worker.progress}%，<span class="hl">Context ${worker.context}%</span>，已安排於本段落完成後自動摘要壓縮`);
+      } else if (state === 'busy') {
+        lines.push(`${worker.name}：進度 ${worker.progress}%，<span class="hl">摘要壓縮中</span>`);
+      } else if (state === 'done') {
+        lines.push(`${worker.name}：已完成`);
+      } else {
+        lines.push(`${worker.name}：進度 ${worker.progress}%，運行正常`);
+      }
+    });
+    return lines;
+  }
+
+  function statusReply(prefix) {
+    return `${prefix}<ul>${statusLines().map(line => `<li>${line}</li>`).join('')}</ul>`;
+  }
+
+  function appendMessage(thread, sender, kind, html, time) {
+    const item = document.createElement('li');
+    item.className = `msg msg-${kind}`;
+    if (kind === 'user') {
+      item.innerHTML = `<p>${html}</p><time>${time}</time>`;
+    } else {
+      item.style.setProperty('--a', sender.color);
+      item.innerHTML = `
+        <span class="agent-icon">${icon(sender.icon)}</span>
+        <div>
+          <div class="msg-meta"><b>${sender.name}</b><time>${time}</time></div>
+          <div class="bubble">${html}</div>
+        </div>`;
+    }
+    thread.append(item);
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  // 控制台的 Astra 對話窗
+  function addMessage(kind, html, time) {
+    appendMessage($('#thread'), astraSender, kind, html, time);
+  }
+
+  function renderChatTabs() {
+    $('#chatTabs').innerHTML = chatModes.map(mode =>
+      `<button class="tab" type="button" role="tab" data-mode="${mode.key}" aria-selected="${mode.key === chatMode}">${mode.label}</button>`
+    ).join('');
+    const current = chatModes.find(mode => mode.key === chatMode);
+    $('#chatInput').placeholder = `輸入訊息給 Astra…　${current.hint}`;
+  }
+
+  // ---------- 控制台：小任務 ----------
+  function compactionText(worker, index) {
+    const record = worker.compactions[index];
+    if (record.kind === 'session') return '建立新 Session，舊對話已封存';
+    // 第幾次 = 這一筆和比它舊的摘要壓縮一共幾筆
+    const order = worker.compactions.slice(index).filter(item => item.kind === 'compact').length;
+    return `已完成第 ${order} 次摘要壓縮（保留 ${record.keep}% 重要內容）`;
+  }
+
+  function tokensK(worker) {
+    return Math.round(worker.context / 100 * contextWindowK);
+  }
+
+  function contextAnalysis(worker) {
+    const level = contextLevel(worker.context);
+    const alertText = worker.busy
+      ? `${worker.name} 正在執行摘要壓縮，完成後 Context 會降下來。`
+      : {
+        high: `Context 使用率已達 ${worker.context}%，將在下一個任務段落自動執行摘要壓縮上下文，以確保任務持續進行。`,
+        mid: `Context 使用率 ${worker.context}%，還沒到 70% 的壓縮門檻。`,
+        ok: `Context 使用率 ${worker.context}%，空間充足。`,
+      }[level];
+    const total = worker.compactions.length;
+    const shown = showAllRecords ? worker.compactions : worker.compactions.slice(0, 3);
+    const recordList = shown.length
+      ? `<ol>${shown.map((record, index) => `<li><time>${record.at}</time><span>${compactionText(worker, index)}</span></li>`).join('')}</ol>`
+      : '<p class="muted">還沒有壓縮紀錄</p>';
+    const moreLink = total > 3
+      ? `<button class="link" type="button" data-action="all">${showAllRecords ? '只看最近 3 筆' : `查看完整記錄（${total}）`}</button>`
+      : '';
+    return `
+      <div class="ctx-head" data-level="${level}">
+        <span>Context 使用率</span>
+        <strong>${worker.context}%</strong>
+        <small>(${tokensK(worker)}K / ${contextWindowK}K tokens)</small>
+      </div>
+      <span class="meter meter-lg" data-level="${level}"><span class="meter-track"><i style="width:${worker.context}%"></i></span></span>
+      <div class="scale" aria-hidden="true">
+        <span class="scale-bar"><i style="left:${worker.context}%"></i></span>
+        <span class="scale-ticks"><span style="left:0%">0%</span><span style="left:40%">40%</span><span style="left:70%">70%</span><span style="left:100%">100%</span></span>
+      </div>
+      <p class="alert" data-level="${worker.busy ? 'mid' : level}"><b aria-hidden="true">!</b><span>${alertText}</span></p>
+      <div class="records">
+        <div class="records-head">
+          <button class="records-toggle" type="button" data-action="toggle" aria-expanded="${recordsOpen}">自動摘要壓縮記錄</button>
+          ${moreLink}
+        </div>
+        ${recordsOpen ? recordList : ''}
+      </div>
+      <div class="actions">
+        <button class="act act-primary" type="button" data-action="compact" ${worker.busy ? 'disabled' : ''}>⟳ 立即執行摘要壓縮</button>
+        <button class="act" type="button" data-action="session" ${worker.busy ? 'disabled' : ''}>＋ 建立新 Session</button>
+      </div>`;
+  }
+
+  function taskDetail(worker) {
+    const parent = specialists.find(agent => agent.id === worker.parent);
+    const compactCount = worker.compactions.filter(record => record.kind === 'compact').length;
+    return `
+      <dl class="detail">
+        <div><dt>任務</dt><dd>${worker.task}</dd></div>
+        <div><dt>上層 Agent</dt><dd>${parent.short}（${parent.role}）</dd></div>
+        <div><dt>狀態</dt><dd>${stateText[workerState(worker)]}</dd></div>
+        <div><dt>任務進度</dt><dd>${worker.progress}%</dd></div>
+        <div><dt>Context</dt><dd>${worker.context}%（${tokensK(worker)}K / ${contextWindowK}K tokens）</dd></div>
+        <div><dt>摘要壓縮</dt><dd>${compactCount} 次</dd></div>
+      </dl>`;
+  }
+
+  function emptyNote(label) {
+    return `<p class="empty-note">「${label}」還沒有接資料。<br>這一頁是展示用畫面，不連後端。</p>`;
+  }
+
+  function renderTask() {
+    const worker = findWorker(selectedWorkerId);
+    const state = workerState(worker);
+    $('#taskPanel').dataset.state = state;
+    $('#taskHead').innerHTML = `
+      <span class="agent-icon">${icon('robot')}</span>
+      <h3 class="agent-name">${worker.name}<span>（小任務 Agent）</span></h3>
+      <span class="tag">${worker.tag}</span>
+      ${statePill(state)}`;
+    $('#workerPicker').innerHTML = workers.map(item =>
+      `<button class="mini" type="button" data-worker="${item.id}" data-state="${workerState(item)}" aria-pressed="${item.id === worker.id}">${item.name}</button>`
+    ).join('');
+    $('#taskTabs').innerHTML = taskTabs.map(tab =>
+      `<button class="tab" type="button" role="tab" data-tab="${tab.key}" aria-selected="${tab.key === taskTab}">${tab.label}</button>`
+    ).join('');
+    const tabLabel = taskTabs.find(tab => tab.key === taskTab).label;
+    if (taskTab === 'context') $('#taskBody').innerHTML = contextAnalysis(worker);
+    else if (taskTab === 'detail') $('#taskBody').innerHTML = taskDetail(worker);
+    else $('#taskBody').innerHTML = emptyNote(tabLabel);
+  }
+
+  function renderAll() {
+    renderOverview();
+    renderTask();
+    renderOps();
+  }
+
+  function compactWorker(worker) {
+    if (worker.busy) return;
+    const before = worker.context;
+    worker.busy = true;
+    renderAll();
+    setTimeout(() => {
+      worker.context = Math.max(3, Math.round(before * compactKeep / 100));
+      worker.compactions.unshift({ at: nowClock(), kind: 'compact', keep: compactKeep });
+      worker.busy = false;
+      logActivity(worker.name, `完成摘要壓縮，Context ${before}% → ${worker.context}%`);
+      renderAll();
+      addMessage('agent', `${worker.name} 已完成摘要壓縮，Context ${before}% → ${worker.context}%，任務繼續進行。`, nowClock());
+    }, 1200);
+  }
+
+  function startNewSession(worker) {
+    const before = worker.context;
+    worker.context = 2;
+    worker.compactions.unshift({ at: nowClock(), kind: 'session' });
+    logActivity(worker.name, `建立新 Session，Context ${before}% → ${worker.context}%`);
+    renderAll();
+    addMessage('agent', `${worker.name} 已建立新 Session，Context ${before}% → ${worker.context}%，舊對話已封存。`, nowClock());
+  }
+
+  // ---------- 總覽左邊：即時活動、異常警告、人工介入 ----------
+  function logActivity(who, what) {
+    activity.unshift({ at: nowClock(), who, what });
+  }
+
+  // Context 回到 70% 以下時告警自動消失，已讀狀態也一起清掉，下次超過再重新提醒
+  function currentAlerts() {
+    const contextAlerts = [];
+    workers.forEach(worker => {
+      const id = `ctx-${worker.id}`;
+      if (worker.context < 70) {
+        delete contextAlertAt[id];
+        readAlerts.delete(id);
+        return;
+      }
+      if (!contextAlertAt[id]) contextAlertAt[id] = nowClock();
+      contextAlerts.push({
+        id, kind: 'Context 偏高', level: 'high', agent: worker.name, at: contextAlertAt[id],
+        text: `Context 使用率 ${worker.context}%，超過 70%，下一個任務段落會自動摘要壓縮。`,
+      });
+    });
+    return [...contextAlerts, ...fixedAlerts].map(alert => ({ ...alert, read: readAlerts.has(alert.id) }));
+  }
+
+  function controlTargets() {
+    return [
+      { id: 'astra', name: lead.name, target: lead, state: agentState(lead) },
+      ...specialists.map(agent => ({ id: agent.id, name: agent.nick, target: agent, state: agentState(agent) })),
+      ...workers.map(worker => ({ id: worker.id, name: worker.name, target: worker, state: workerState(worker) })),
+    ];
+  }
+
+  function feedView() {
+    const names = ['all', ...new Set(activity.map(item => item.who))];
+    const items = feedFilter === 'all' ? activity : activity.filter(item => item.who === feedFilter);
+    const options = names.map(name =>
+      `<option value="${name}" ${name === feedFilter ? 'selected' : ''}>${name === 'all' ? '全部 Agent' : name}</option>`
+    ).join('');
+    return `
+      <label class="feed-filter"><span>篩選</span><select data-feed-filter>${options}</select></label>
+      <ol class="feed">${items.map(item => `
+        <li>
+          <time>${item.at}</time>
+          <b class="who" style="--who: ${whoColors[item.who] || 'var(--fg)'}">${item.who}</b>
+          <span class="what">${item.what}</span>
+        </li>`).join('')}</ol>`;
+  }
+
+  function alertsView(alertList) {
+    if (!alertList.length) return '<p class="muted">目前沒有異常。</p>';
+    // 未讀的排前面，已讀的沉到下面
+    const sorted = [...alertList.filter(alert => !alert.read), ...alertList.filter(alert => alert.read)];
+    return sorted.map(alert => `
+      <article class="alert-item" data-level="${alert.level}" data-read="${alert.read}">
+        <div class="ai-head"><b>${alert.kind}・${alert.agent}</b><time>${alert.at}</time></div>
+        <p>${alert.text}</p>
+        ${alert.read ? '<span class="ai-done">已讀</span>' : `<button class="link" type="button" data-op="read" data-id="${alert.id}">標為已讀</button>`}
+      </article>`).join('');
+  }
+
+  function manualView() {
+    const targets = controlTargets();
+    const allPaused = targets.every(item => item.target.paused);
+    const approvalList = approvals.length
+      ? `<ul class="approvals">${approvals.map(item => `
+          <li>
+            <div class="ai-head"><b>${item.agent}</b><time>${item.at}</time></div>
+            <p>${item.action}</p>
+            <div class="ap-actions">
+              <button class="mini-btn mini-ok" type="button" data-op="approve" data-id="${item.id}">核准</button>
+              <button class="mini-btn" type="button" data-op="reject" data-id="${item.id}">拒絕</button>
+            </div>
+          </li>`).join('')}</ul>`
+      : '<p class="muted">沒有待核准的動作。</p>';
+    return `
+      <button class="act act-danger" type="button" data-op="${allPaused ? 'resume-all' : 'stop-all'}">${allPaused ? '▶ 全部繼續' : '⏹ 停止全部 Agent'}</button>
+      <h3 class="ops-sub">個別 Agent</h3>
+      <ul class="ctl-list">${targets.map(item => `
+        <li>
+          <span class="ctl-name">${item.name}</span>
+          ${statePill(item.state)}
+          <button class="mini-btn" type="button" data-op="toggle" data-id="${item.id}">${item.target.paused ? '繼續' : '暫停'}</button>
+        </li>`).join('')}</ul>
+      <h3 class="ops-sub">待核准<span>${approvals.length}</span></h3>
+      ${approvalList}`;
+  }
+
+  function renderOps() {
+    const alertList = currentAlerts();
+    const unread = alertList.filter(alert => !alert.read);
+    const badges = {
+      feed: '',
+      alerts: unread.length ? `<b class="badge" data-tone="${unread.some(alert => alert.level === 'high') ? 'red' : 'amber'}">${unread.length}</b>` : '',
+      manual: approvals.length ? `<b class="badge">${approvals.length}</b>` : '',
+    };
+    $('#opsTabs').innerHTML = opsTabs.map(tab =>
+      `<button class="tab" type="button" role="tab" data-ops="${tab.key}" aria-selected="${tab.key === opsTab}">${tab.label}${badges[tab.key]}</button>`
+    ).join('');
+    $('#opsLabel').textContent = opsTabs.find(tab => tab.key === opsTab).title;
+    if (opsTab === 'feed') $('#opsBody').innerHTML = feedView();
+    else if (opsTab === 'alerts') $('#opsBody').innerHTML = alertsView(alertList);
+    else $('#opsBody').innerHTML = manualView();
+  }
+
+  function runOp(op, id) {
+    if (op === 'read') {
+      const alert = currentAlerts().find(item => item.id === id);
+      readAlerts.add(id);
+      logActivity('你', `已讀告警：${alert.kind}・${alert.agent}`);
+    } else if (op === 'toggle') {
+      const item = controlTargets().find(target => target.id === id);
+      item.target.paused = !item.target.paused;
+      logActivity('你', item.target.paused ? `暫停 ${item.name}` : `讓 ${item.name} 繼續執行`);
+    } else if (op === 'stop-all' || op === 'resume-all') {
+      const pause = op === 'stop-all';
+      controlTargets().forEach(item => { item.target.paused = pause; });
+      logActivity('你', pause ? '停止全部 Agent' : '全部 Agent 繼續執行');
+    } else if (op === 'approve' || op === 'reject') {
+      const index = approvals.findIndex(item => item.id === id);
+      const [item] = approvals.splice(index, 1);
+      logActivity('你', `${op === 'approve' ? '核准' : '拒絕'} ${item.agent}：${item.action}`);
+    }
+    renderAll();
+  }
+
+  // ---------- 控制台：系統資源 ----------
+  function renderGauges() {
+    $('#gauges').innerHTML = gauges.map(gauge => `
+      <figure class="gauge" data-gauge="${gauge.key}" style="--g: ${gauge.color}">
+        <figcaption>${gauge.label}</figcaption>
+        <div class="ring">
+          <svg viewBox="0 0 120 120" aria-hidden="true">
+            <circle class="ring-track" cx="60" cy="60" r="46"/>
+            <circle class="ring-fill" cx="60" cy="60" r="46" stroke-dasharray="${ringLength}" stroke-dashoffset="${ringLength}"/>
+          </svg>
+          <div class="ring-val"><strong></strong><small></small></div>
+        </div>
+      </figure>`).join('');
+  }
+
+  function setGauge(key, ratio, value, unit) {
+    const figure = document.querySelector(`[data-gauge="${key}"]`);
+    figure.querySelector('.ring-fill').style.strokeDashoffset = ringLength * (1 - Math.min(1, ratio));
+    figure.querySelector('strong').textContent = value;
+    figure.querySelector('small').textContent = unit;
+  }
+
+  // 網路的環以 20 Mbps 當滿格，只是讓環有變化，不代表頻寬上限
+  function renderResources() {
+    setGauge('cpu', resources.cpu / 100, `${Math.round(resources.cpu)}%`, '');
+    setGauge('memory', resources.memory / 16, `${resources.memory.toFixed(1)}GB`, '/ 16GB');
+    setGauge('network', resources.network / 20, `${Math.round(resources.network)}`, 'Mbps');
+  }
+
+  function drift(value, step, min, max) {
+    return Math.min(max, Math.max(min, value + (Math.random() * 2 - 1) * step));
+  }
+
+  function setResourcesLive(live) {
+    resourcesLive = live;
+    $('#pill').dataset.state = live ? 'live' : 'paused';
+    $('#pill').textContent = live ? 'LIVE' : 'PAUSED';
+    $('#resNote').textContent = live ? '每 2 秒更新一次' : '已暫停更新';
+  }
+
+  // ---------- 右側聊天窗：儀表板助手（跟控制台的 Astra 對話分開，只依頁面資料回答） ----------
+  function agentDirectory() {
+    return [
+      { key: 'astra', name: lead.name, role: lead.role, task: lead.task, progress: lead.progress, context: lead.context, state: agentState(lead) },
+      ...specialists.map(agent => ({ key: agent.id, name: agent.short, role: agent.role, task: agent.task, progress: agent.progress, context: agent.context, state: agentState(agent) })),
+      ...workers.map(worker => ({ key: worker.id.replace('-', ''), name: worker.name, role: '小任務 Agent', task: worker.task, progress: worker.progress, context: worker.context, state: workerState(worker) })),
+    ];
+  }
+
+  // 去掉空白和連字號再比對，「Luna 3」「luna-3」都認得
+  function botReply(text) {
+    const normalized = text.toLowerCase().replace(/[\s\-_]/g, '');
+    const directory = agentDirectory();
+    const matched = directory.filter(agent => normalized.includes(agent.key));
+    if (matched.length) {
+      return `<ul>${matched.map(agent =>
+        `<li>${agent.name}（${agent.role}）：${agent.task}，進度 ${agent.progress}%，Context ${agent.context}%，${stateText[agent.state]}</li>`
+      ).join('')}</ul>`;
+    }
+    if (/context|壓縮|上下文/.test(normalized)) {
+      const crowded = directory.filter(agent => agent.context >= 40).sort((a, b) => b.context - a.context);
+      if (!crowded.length) return '目前所有 Agent 的 Context 都在 40% 以下。';
+      const items = crowded.map(agent => `<li>${agent.name}：${agent.context >= 70 ? `<span class="hl">${agent.context}%</span>` : `${agent.context}%`}</li>`);
+      return `Context 在 40% 以上的 Agent：<ul>${items.join('')}</ul>超過 70% 的會在下一個任務段落自動摘要壓縮。`;
+    }
+    if (/資源|cpu|記憶體|網路|memory/.test(normalized)) {
+      const pausedNote = resourcesLive ? '' : '（監控已暫停，這是暫停前的數字）';
+      return `目前 CPU ${Math.round(resources.cpu)}%、記憶體 ${resources.memory.toFixed(1)} / 16 GB、網路 ${Math.round(resources.network)} Mbps${pausedNote}。`;
+    }
+    if (/進度|狀況|狀態|總覽|整體/.test(normalized)) {
+      return statusReply(`Astra 總進度 ${lead.progress}%，各 Agent 狀況：`);
+    }
+    return '我可以查：某個 Agent 的狀況（例如「Luna-3 現在怎樣？」）、哪些 Agent 的 Context 偏高、系統資源用量、整體進度。';
+  }
+
+  function askBot(text) {
+    appendMessage($('#botThread'), botSender, 'user', escapeHtml(text), nowClock());
+    setTimeout(() => appendMessage($('#botThread'), botSender, 'agent', botReply(text), nowClock()), 500);
+  }
+
+  function setChatOpen(open) {
+    chatOpen = open;
+    $('#chatbar').classList.toggle('is-open', open);
+    document.querySelectorAll('[data-chat-toggle]').forEach(button => button.setAttribute('aria-expanded', String(open)));
+    if (open) $('#botThread').scrollTop = $('#botThread').scrollHeight;
+  }
+
+  // ---------- 任務頁：plan 追溯樹（規則照搬 rtm_graph.py，兩邊算出來的斷線要一樣） ----------
+  function isEmptyCell(cell) {
+    return emptyCellMarkers.has((cell || '').trim());
+  }
+
+  function parseIdCell(cell) {
+    if (isEmptyCell(cell)) return [null, ''];
+    const match = cell.trim().match(/^([A-Za-z]+\d+)\s*(.*)$/);
+    return match ? [match[1].toUpperCase(), match[2].trim()] : [null, cell.trim()];
+  }
+
+  function analyzePlan(plan) {
+    const nodes = new Map([['root', { key: 'root', kind: 'plan', text: `${plan.id} ${plan.title}` }]]);
+    const edges = new Map();
+    const problems = { red: [], orange: [], yellow: [] };
+    let gapCount = 0;
+    const kindNames = { requirement: '需求', decision: '做法', task: '任務' };
+
+    const addEdge = (from, to, style) => edges.set(`${from}>${to}`, { from, to, style });
+    const addGap = (severity, text) => {
+      gapCount += 1;
+      const key = `gap${gapCount}`;
+      nodes.set(key, { key, kind: 'gap', severity, text });
+      return key;
+    };
+    // 同一個編號出現在多列代表同一個節點（例如一條需求拆成兩個任務），內容只要在其中一列寫
+    const upsertNode = (kind, nodeId, text, note, rowNumber, withRequirement) => {
+      const key = nodeId || `${kind}-row${rowNumber}`;
+      let node = nodes.get(key);
+      if (!node) {
+        node = { key, kind, id: nodeId, text, note, rows: [], withRequirement: false };
+        nodes.set(key, node);
+      } else if (text && node.text && text !== node.text) {
+        problems.yellow.push(`${nodeId} 在第 ${node.rows[0]} 列和第 ${rowNumber} 列寫的內容不一樣`);
+      }
+      node.text = node.text || text;
+      node.note = node.note || note;
+      node.rows.push(rowNumber);
+      node.withRequirement = node.withRequirement || withRequirement;
+      if (!nodeId) problems.yellow.push(`第 ${rowNumber} 列的${kindNames[kind]}沒有編號`);
+      return key;
+    };
+
+    // 沒有對應需求的列排到最後，橘色那條固定在最下面
+    const rows = plan.rows
+      .map((cells, index) => ({ rowNumber: index + 1, cells }))
+      .filter(row => !row.cells.every(isEmptyCell))
+      .sort((a, b) => Number(isEmptyCell(a.cells[0])) - Number(isEmptyCell(b.cells[0])));
+
+    rows.forEach(({ rowNumber, cells }) => {
+      const [reqId, reqText] = parseIdCell(cells[0]);
+      const [decId, decText] = parseIdCell(cells[2]);
+      const [taskId, taskText] = parseIdCell(cells[4]);
+      const understanding = isEmptyCell(cells[1]) ? '' : cells[1].trim();
+      const rejected = isEmptyCell(cells[3]) ? '' : cells[3].trim();
+      const verify = isEmptyCell(cells[5]) ? '' : cells[5].trim();
+      const hasRequirement = Boolean(reqId || reqText);
+      const where = `（第 ${rowNumber} 列）`;
+      let headKey;
+      let subject;
+      if (hasRequirement) {
+        headKey = upsertNode('requirement', reqId, reqText, understanding, rowNumber, true);
+        addEdge('root', headKey, 'solid');
+        subject = reqId || '需求';
+      } else {
+        headKey = addGap('orange', '沒有對應需求');
+        addEdge('root', headKey, 'extra');
+        subject = [decId, taskId].filter(Boolean).join(' → ') || '這列';
+        problems.orange.push(`${subject} 沒有對應需求${where}`);
+      }
+      const chain = [headKey];
+      const decKey = (decId || decText) ? upsertNode('decision', decId, decText, rejected, rowNumber, hasRequirement) : null;
+      const taskKey = (taskId || taskText) ? upsertNode('task', taskId, taskText, '', rowNumber, hasRequirement) : null;
+      const segments = [['做法', decKey], ['任務', taskKey]];
+      const missingNames = segments.filter(([, key]) => !key).map(([name]) => name);
+      if (missingNames.length) problems.red.push(`${subject} 缺${missingNames.join('、')}${where}`);
+      // 連續缺的段落合成一個色塊，一條線上只會出現一個紅塊
+      let pendingGaps = [];
+      segments.forEach(([name, key]) => {
+        if (!key) {
+          pendingGaps.push(name);
+          return;
+        }
+        if (pendingGaps.length) {
+          chain.push(addGap('red', `缺：${pendingGaps.join('、')}`));
+          pendingGaps = [];
+        }
+        chain.push(key);
+      });
+      if (pendingGaps.length) chain.push(addGap('red', `缺：${pendingGaps.join('、')}`));
+      if (verify) {
+        const key = `verify-row${rowNumber}`;
+        nodes.set(key, { key, kind: 'verify', text: verify });
+        chain.push(key);
+      } else if (taskKey) {
+        chain.push(addGap('yellow', '缺：驗證'));
+        problems.yellow.push(`${taskId || '任務'} 缺驗證${where}`);
+      }
+      chain.slice(1).forEach((key, index) => addEdge(chain[index], key, 'solid'));
+    });
+
+    // AI 理解可能只寫在需求第一次出現的那列，所以等全部列讀完才檢查
+    nodes.forEach(node => {
+      if (node.kind === 'requirement' && !node.note) {
+        problems.yellow.push(`${node.id || node.text} 缺 AI 理解（第 ${node.rows[0]} 列）`);
+      }
+    });
+
+    const children = new Map();
+    edges.forEach(edge => {
+      if (!children.has(edge.from)) children.set(edge.from, []);
+      children.get(edge.from).push(edge);
+    });
+    return { nodes, children, problems };
+  }
+
+  function planNodeClass(node) {
+    if (node.kind === 'gap') return { red: 'missing', orange: 'extra', yellow: 'incomplete' }[node.severity];
+    if ((node.kind === 'decision' || node.kind === 'task') && !node.withRequirement) return 'extra';
+    if (node.kind === 'requirement' && !node.note) return 'incomplete';
+    return node.kind;
+  }
+
+  function planNodeHtml(node) {
+    const nodeClass = planNodeClass(node);
+    if (node.kind === 'gap') {
+      return `<div class="pnode" data-class="${nodeClass}"><small>${gapLabels[nodeClass]}</small><b>${escapeHtml(node.text)}</b></div>`;
+    }
+    if (node.kind === 'plan' || node.kind === 'verify') {
+      return `<div class="pnode" data-class="${nodeClass}"><small>${planKindLabels[node.kind]}</small><b>${escapeHtml(node.text)}</b></div>`;
+    }
+    let note = '';
+    if (node.kind === 'requirement') note = `<p>理解：${escapeHtml(node.note || '（未寫）')}</p>`;
+    else if (node.kind === 'decision' && node.note) note = `<p>不採用：${escapeHtml(node.note)}</p>`;
+    const id = node.id ? `<span class="pid">${node.id}</span>` : '';
+    return `<div class="pnode" data-class="${nodeClass}"><small>${planKindLabels[node.kind]}</small><b>${id}${escapeHtml(node.text)}</b>${note}</div>`;
+  }
+
+  function planTreeItem(graph, key, edgeStyle, seen) {
+    seen.add(key);
+    const childEdges = (graph.children.get(key) || []).filter(edge => !seen.has(edge.to));
+    const childItems = childEdges.map(edge => planTreeItem(graph, edge.to, edge.style, seen)).join('');
+    return `<li data-edge="${edgeStyle}">${planNodeHtml(graph.nodes.get(key))}${childItems ? `<ul>${childItems}</ul>` : ''}</li>`;
+  }
+
+  function plansInScope() {
+    return plans.filter(item => item.modules[planArea] && (planModule === 'all' || item.modules[planArea] === planModule));
+  }
+
+  function renderPlanScope() {
+    const modules = [...new Set(plans.map(item => item.modules[planArea]).filter(Boolean))];
+    const areaButtons = planAreas.map(area =>
+      `<button type="button" data-plan-area="${area}" aria-pressed="${area === planArea}">${area}</button>`
+    ).join('');
+    const moduleOptions = [['all', '全部'], ...modules.map(name => [name, name])].map(([value, label]) =>
+      `<option value="${value}" ${value === planModule ? 'selected' : ''}>${label}</option>`
+    ).join('');
+    $('#planScope').innerHTML = `
+      <div class="scope-tabs" role="group" aria-label="前端或後端">${areaButtons}</div>
+      <label class="plan-pick"><span>功能模組</span><select data-plan-module>${moduleOptions}</select></label>`;
+  }
+
+  function renderPlan() {
+    renderPlanScope();
+    const scoped = plansInScope();
+    // 換了端或模組後，目前的 plan 不在範圍內就跳到範圍內第一份（照狀態選單的順序）
+    if (!scoped.some(item => item.id === selectedPlanId)) {
+      const ordered = planStatusGroups.flatMap(status => scoped.filter(item => item.status === status));
+      selectedPlanId = (ordered[0] || scoped[0] || {}).id;
+    }
+    const plan = scoped.find(item => item.id === selectedPlanId);
+    // 每個狀態一個選單；只有正在看的 plan 所屬的選單有選取值，其他回到「選擇…」
+    $('#planPicks').innerHTML = planStatusGroups.map(status => {
+      const group = scoped.filter(item => item.status === status);
+      const active = Boolean(plan) && plan.status === status;
+      const options = group.map(item =>
+        `<option value="${item.id}" ${active && item.id === plan.id ? 'selected' : ''}>${item.id} ${item.title}</option>`
+      ).join('');
+      return `
+        <label class="plan-pick" data-active="${active}">
+          <span>${status}<b>${group.length}</b></span>
+          <select data-plan-pick ${group.length ? '' : 'disabled'}>
+            <option value="" ${active ? '' : 'selected'}>${group.length ? '選擇…' : '（沒有）'}</option>${options}
+          </select>
+        </label>`;
+    }).join('');
+    $('#planStatus').hidden = !plan;
+    if (!plan) {
+      $('#planMeta').innerHTML = '';
+      $('#planProblems').innerHTML = '<p class="muted">這個模組沒有 plan。</p>';
+      $('#planTree').innerHTML = '<p class="muted">這個模組沒有 plan。</p>';
+      return;
+    }
+    const graph = analyzePlan(plan);
+    const supersededBy = plans.find(item => item.supersedes === plan.id);
+    $('#planStatus').dataset.status = plan.status;
+    $('#planStatus').textContent = plan.status;
+    const metaItems = [
+      ['分支', plan.branch],
+      ['範圍', plan.area.join('、')],
+      ['模組', planAreas.filter(area => plan.modules[area]).map(area => `${area}・${plan.modules[area]}`).join('、')],
+      ['建立', plan.created],
+      plan.supersedes ? ['取代', plan.supersedes] : null,
+      supersededBy ? ['被取代', supersededBy.id] : null,
+      ['來源', plan.source],
+    ].filter(Boolean);
+    $('#planMeta').innerHTML = metaItems.map(([label, value]) => `<div><dt>${label}</dt><dd>${value}</dd></div>`).join('');
+    const problemItems = severityOrder.flatMap(([severity, label, color]) =>
+      graph.problems[severity].map(text => `<li style="--k: ${color}">${label}｜${escapeHtml(text)}</li>`)
+    );
+    $('#planProblems').innerHTML = problemItems.length
+      ? `<ul class="plan-problems">${problemItems.join('')}</ul>`
+      : '<p class="plan-ok">沒有斷線：每條需求都有做法、任務和驗證。</p>';
+    $('#planTree').innerHTML = `<ul class="tree">${planTreeItem(graph, 'root', 'solid', new Set())}</ul>`;
+  }
+
+  // ---------- 跳轉 ----------
+  function showPage(key) {
+    const page = pages.find(item => item.key === key) || pages[0];
+    const sectionKey = builtPages.includes(page.key) ? page.key : 'placeholder';
+    document.querySelectorAll('.rail-btn[data-page]').forEach(link => {
+      if (link.dataset.page === page.key) link.setAttribute('aria-current', 'page');
+      else link.removeAttribute('aria-current');
+    });
+    document.querySelectorAll('.page').forEach(section => {
+      section.hidden = section.dataset.page !== sectionKey;
+    });
+    $('#emptyLabel').textContent = page.label;
+    $('#termPage').textContent = `— ${page.label}`;
+    if (page.key === 'console') {
+      renderTask();
+      $('#thread').scrollTop = $('#thread').scrollHeight;
+    }
+  }
+
+  function renderRail() {
+    $('#railLinks').innerHTML = pages.map(page =>
+      `<a class="rail-btn" href="#${page.key}" data-page="${page.key}" title="${page.label}">${icon(page.icon)}<span class="rail-lbl">${page.label}</span></a>`
+    ).join('');
+    document.querySelectorAll('[data-icon]').forEach(slot => {
+      slot.outerHTML = icon(slot.dataset.icon, slot.className);
+    });
+  }
+
+  // ---------- 事件 ----------
+  $('#railToggle').addEventListener('click', () => {
+    const wide = $('#rail').classList.toggle('is-wide');
+    $('#railToggle').setAttribute('aria-expanded', String(wide));
+    $('#railToggle').title = wide ? '收合選單' : '展開選單';
+  });
+
+  $('#squads').addEventListener('click', event => {
+    const card = event.target.closest('[data-worker]');
+    if (!card) return;
+    selectedWorkerId = card.dataset.worker;
+    showAllRecords = false;
+    if (location.hash === '#console') showPage('console');
+    else location.hash = 'console';
+  });
+
+  $('#chatTabs').addEventListener('click', event => {
+    const tab = event.target.closest('[data-mode]');
+    if (!tab) return;
+    chatMode = tab.dataset.mode;
+    renderChatTabs();
+  });
+
+  $('#composer').addEventListener('submit', event => {
+    event.preventDefault();
+    const text = $('#chatInput').value.trim();
+    if (!text) return;
+    addMessage('user', escapeHtml(text), nowClock());
+    $('#chatInput').value = '';
+    setTimeout(() => addMessage('agent', statusReply('收到，已排進下一輪分派。目前各 Agent 狀況：'), nowClock()), 600);
+  });
+
+  $('#workerPicker').addEventListener('click', event => {
+    const button = event.target.closest('[data-worker]');
+    if (!button) return;
+    selectedWorkerId = button.dataset.worker;
+    showAllRecords = false;
+    renderTask();
+  });
+
+  $('#taskTabs').addEventListener('click', event => {
+    const tab = event.target.closest('[data-tab]');
+    if (!tab) return;
+    taskTab = tab.dataset.tab;
+    renderTask();
+  });
+
+  $('#taskBody').addEventListener('click', event => {
+    const button = event.target.closest('[data-action]');
+    if (!button) return;
+    const worker = findWorker(selectedWorkerId);
+    const action = button.dataset.action;
+    if (action === 'compact') compactWorker(worker);
+    else if (action === 'session') startNewSession(worker);
+    else if (action === 'toggle') { recordsOpen = !recordsOpen; renderTask(); }
+    else if (action === 'all') { showAllRecords = !showAllRecords; renderTask(); }
+  });
+
+  document.addEventListener('click', event => {
+    if (event.target.closest('[data-chat-toggle]')) setChatOpen(!chatOpen);
+  });
+
+  $('#botComposer').addEventListener('submit', event => {
+    event.preventDefault();
+    const text = $('#botInput').value.trim();
+    if (!text) return;
+    $('#botInput').value = '';
+    askBot(text);
+  });
+
+  $('#botQuick').addEventListener('click', event => {
+    const button = event.target.closest('[data-ask]');
+    if (button) askBot(button.dataset.ask);
+  });
+
+  $('#opsTabs').addEventListener('click', event => {
+    const tab = event.target.closest('[data-ops]');
+    if (!tab) return;
+    opsTab = tab.dataset.ops;
+    renderOps();
+  });
+
+  $('#opsBody').addEventListener('click', event => {
+    const button = event.target.closest('[data-op]');
+    if (button) runOp(button.dataset.op, button.dataset.id);
+  });
+
+  $('#opsBody').addEventListener('change', event => {
+    if (!event.target.matches('[data-feed-filter]')) return;
+    feedFilter = event.target.value;
+    renderOps();
+  });
+
+  $('#planScope').addEventListener('click', event => {
+    const button = event.target.closest('[data-plan-area]');
+    if (!button || button.dataset.planArea === planArea) return;
+    planArea = button.dataset.planArea;
+    planModule = 'all';
+    renderPlan();
+  });
+
+  $('#planScope').addEventListener('change', event => {
+    if (!event.target.matches('[data-plan-module]')) return;
+    planModule = event.target.value;
+    renderPlan();
+  });
+
+  $('#planPicks').addEventListener('change', event => {
+    if (!event.target.matches('[data-plan-pick]') || !event.target.value) return;
+    selectedPlanId = event.target.value;
+    renderPlan();
+  });
+
+  $('#resMode').addEventListener('change', event => setResourcesLive(event.target.value === 'live'));
+  window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
+
+  // ---------- 啟動 ----------
+  renderRail();
+  renderOverview();
+  renderOps();
+  renderPlan();
+  renderChatTabs();
+  addMessage('user', '請協調各 Agent 進度，並關注 Luna-3 的 Context 使用率。', '14:28');
+  addMessage('agent', statusReply('目前各 Agent 運行狀況：'), '14:29');
+  renderGauges();
+  renderResources();
+  $('#botQuick').innerHTML = botQuickAsks.map(ask => `<button type="button" data-ask="${ask}">${ask}</button>`).join('');
+  appendMessage($('#botThread'), botSender, 'agent', '你好，我是儀表板助手。可以問我某個 Agent 的狀況、哪些 Agent 的 Context 偏高，或系統資源用量。', nowClock());
+  // 視窗夠寬才預設展開，不然中間的三層會被擠得太窄
+  setChatOpen(window.innerWidth >= 1200);
+  showPage(location.hash.slice(1));
+
+  setInterval(() => {
+    if (!resourcesLive) return;
+    resources.cpu = drift(resources.cpu, 5, 6, 94);
+    resources.memory = drift(resources.memory, 0.25, 6, 15.2);
+    resources.network = drift(resources.network, 3, 1, 19);
+    renderResources();
+  }, 2000);
+</script>
+</body>
+</html>
