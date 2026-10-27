@@ -1,3 +1,4 @@
+import contextlib
 import http.client
 import json
 import socket
@@ -5,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -13,22 +15,61 @@ import board
 import board_core
 import server
 from board_core import appendEvent
+from modules.system_monitor import api as monitorApi
+from modules.system_monitor import metrics
 
 toolDir = Path(__file__).resolve().parent.parent
 token = "test-token"
 cleanRows = ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |",
              "| R1 | | D1 | | T2 任務二 | T1 | 驗證二 |"]
 warningRows = cleanRows + ["| | | D2 額外做法 | | T3 額外任務 | | 驗證三 |"]
+gib = 1024 ** 3
+sampledAt = "2026-10-27T10:00:00.000+08:00"
+monitorAssets = {"monitor.html": "text/html; charset=utf-8", "monitor.css": "text/css; charset=utf-8",
+                 "monitor.js": "text/javascript; charset=utf-8"}
+
+
+@contextlib.contextmanager
+def serving(projectDir):
+  httpServer = server.makeServer(projectDir, 0, token)
+  thread = threading.Thread(target=httpServer.serve_forever, daemon=True)
+  thread.start()
+  try:
+    yield httpServer
+  finally:
+    httpServer.shutdown()
+    httpServer.server_close()
 
 
 @pytest.fixture
 def running(gitProject):
-  httpServer = server.makeServer(gitProject, 0, token)
-  thread = threading.Thread(target=httpServer.serve_forever, daemon=True)
-  thread.start()
-  yield gitProject, httpServer.server_address[1]
-  httpServer.shutdown()
-  httpServer.server_close()
+  with serving(gitProject) as httpServer:
+    yield gitProject, httpServer.server_address[1]
+
+
+@pytest.fixture
+def monitored(gitProject):
+  with serving(gitProject) as httpServer:
+    yield httpServer.RequestHandlerClass.dashboard, httpServer.server_address[1]
+
+
+def fakeCollector(projectDir, cpu=lambda: (0, 0, 0), memory=lambda: (16 * gib, 4 * gib),
+                  disk=lambda path: (500 * gib, 125 * gib, 375 * gib)):
+  # 固定替身資料，不讀真實主機；時鐘不動，同一個採集器一直回傳同一份快取
+  return metrics.Collector(projectDir, cpu, memory, disk, clock=lambda: 0.0,
+                           now=lambda: datetime(2026, 10, 27, 10, 0, tzinfo=timezone(timedelta(hours=8))))
+
+
+@pytest.fixture
+def assetDir(tmp_path, monkeypatch):
+  folder = tmp_path / "monitor-web"
+  folder.mkdir()
+  for name in monitorAssets:
+    (folder / name).write_text(f"/* {name} */", encoding="utf-8")
+  # 白名單以外的檔案就算放在同一個資料夾也不能下載
+  (folder / "notes.md").write_text("secret", encoding="utf-8")
+  monkeypatch.setattr(monitorApi, "webDir", folder)
+  return folder
 
 
 def call(port, method, path, body=None, headers=None, rawBody=None):
@@ -43,6 +84,15 @@ def call(port, method, path, body=None, headers=None, rawBody=None):
   if response.getheader("Content-Type", "").startswith("application/json"):
     return response.status, json.loads(data.decode("utf-8"))
   return response.status, data
+
+
+def fetch(port, path):
+  connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+  connection.request("GET", path)
+  response = connection.getresponse()
+  data = response.read()
+  connection.close()
+  return response.status, response.getheader("Content-Type"), data
 
 
 def post(port, path, body=None, withToken=token):
@@ -231,3 +281,93 @@ def test_catalogUsesRoleCommandAndShowsCliErrors(running, monkeypatch):
   assert post(port, "/api/models/writer", {"cli": "codex"})[0] == 400
   assert post(port, "/api/roles/writer", {"cli": "claude", "model": "opus"})[0] == 400
   assert post(port, "/api/roles/writer", {"cli": "claude"})[0] == 200
+
+
+def test_eachServerHasItsOwnCollectorForProject(gitProject):
+  first, second = server.Dashboard(gitProject, token), server.Dashboard(gitProject, token)
+  assert first.systemMonitor.collector is not second.systemMonitor.collector
+  assert first.systemMonitor.collector.projectDir == gitProject.resolve()
+
+
+def test_systemMonitorReturnsFixedFields(monitored):
+  dashboard, port = monitored
+  dashboard.systemMonitor.collector = fakeCollector(dashboard.projectDir)
+  status, contentType, data = fetch(port, "/api/system-monitor")
+  assert status == 200 and contentType == "application/json; charset=utf-8"
+  payload = json.loads(data.decode("utf-8"))
+  assert payload == {
+    "sampleId": 1, "sampledAt": sampledAt, "intervalSeconds": 3,
+    "cpu": {"status": "warming-up", "updatedAt": sampledAt, "message": "取樣中", "percent": None},
+    "memory": {"status": "ok", "updatedAt": sampledAt, "message": None, "totalBytes": 16 * gib,
+               "usedBytes": 12 * gib, "availableBytes": 4 * gib, "percent": 75.0},
+    "disk": {"status": "ok", "updatedAt": sampledAt, "message": None, "totalBytes": 500 * gib,
+             "usedBytes": 125 * gib, "freeBytes": 375 * gib, "percent": 25.0,
+             "volume": metrics.volumeLabel(dashboard.projectDir)},
+  }
+  # 不同頁面共用這個 server 的採集器：快取期間再讀是同一份取樣
+  assert call(port, "GET", "/api/system-monitor?from=console")[1] == payload
+
+
+def test_systemMonitorIsReadOnly(monitored):
+  dashboard, port = monitored
+  dashboard.systemMonitor.collector = fakeCollector(dashboard.projectDir)
+  assert call(port, "POST", "/api/system-monitor", {})[0] == 403
+  assert post(port, "/api/system-monitor")[0] == 404
+  assert call(port, "GET", "/api/system-monitor/refresh")[0] == 404
+
+
+def test_monitorAssetsHaveContentType(running, assetDir):
+  _, port = running
+  for name, contentType in monitorAssets.items():
+    assert fetch(port, monitorApi.assetPrefix + name) == (200, contentType, f"/* {name} */".encode("utf-8"))
+  assert fetch(port, monitorApi.assetPrefix + "monitor.js?v=2")[0] == 200
+  # 白名單裡的檔案還沒放上去時是 404，不是 500
+  (assetDir / "monitor.css").unlink()
+  assert call(port, "GET", monitorApi.assetPrefix + "monitor.css")[0] == 404
+
+
+def test_unknownAndTraversalAssetsAre404(running, assetDir):
+  _, port = running
+  names = ["notes.md", "MONITOR.JS", "", "./monitor.js", "web/monitor.js", "monitor.js/..", "api.py", "metrics.py",
+           "__init__.py", "README.md", "tests/test_metrics.py", "../system_monitor/api.py", "..%2Fapi.py",
+           "%2e%2e/api.py", "..\\api.py", "../../../server.py"]
+  for name in names:
+    assert call(port, "GET", monitorApi.assetPrefix + name)[0] == 404, name
+  # 模組資料夾不是靜態根目錄，換個寫法也拿不到 Python 和測試
+  for path in ["/modules/system-monitor", "/modules/", "/modules/system_monitor/api.py",
+               "/modules/system_monitor/web/monitor.js", "/monitor.js", "/js/../modules/system_monitor/metrics.py"]:
+    assert call(port, "GET", path)[0] == 404, path
+
+
+def test_monitorRoutesKeepHostCheck(monitored, assetDir):
+  dashboard, port = monitored
+  dashboard.systemMonitor.collector = fakeCollector(dashboard.projectDir)
+  for path in ["/api/system-monitor", monitorApi.assetPrefix + "monitor.js"]:
+    for host in ["evil.example", f"evil.example:{port}", f"127.0.0.1.evil.example:{port}"]:
+      status, payload = call(port, "GET", path, headers={"Host": host})
+      assert status == 403 and "localhost" in payload["message"]
+    assert call(port, "GET", path, headers={"Host": f"localhost:{port}"})[0] == 200
+
+
+def test_collectorFailuresKeepStateAndPageWorking(monitored):
+  dashboard, port = monitored
+  def fail(*args):
+    raise OSError("拒絕存取")
+  dashboard.systemMonitor.collector = fakeCollector(dashboard.projectDir, cpu=fail, memory=fail, disk=fail)
+  status, payload = call(port, "GET", "/api/system-monitor")
+  # 預期中的採集失敗只標在各項，整個回應仍然成功
+  assert status == 200
+  assert [payload[item]["status"] for item in ("cpu", "memory", "disk")] == ["error"] * 3
+  assert payload["memory"]["totalBytes"] is None and "拒絕存取" in payload["disk"]["message"]
+
+  class BrokenCollector:
+    def snapshot(self):
+      raise RuntimeError("採集器壞了")
+  dashboard.systemMonitor.collector = BrokenCollector()
+  status, payload = call(port, "GET", "/api/system-monitor")
+  # 沒預料到的錯誤沿用 server 原本的錯誤處理，不讓 server 停掉
+  assert status == 500 and "採集器壞了" in payload["message"]
+  status, state = call(port, "GET", "/api/state")
+  assert status == 200 and state["project"] == str(dashboard.projectDir)
+  status, page = call(port, "GET", "/")
+  assert status == 200 and b"<html" in page.lower()

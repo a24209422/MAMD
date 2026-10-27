@@ -21,6 +21,7 @@ import board_api
 import board_models
 from board_core import (BoardError, PlanStatus, cliNames, loadConfig, modelNamePattern, modelNameRule,
                         roleChoiceText, roleSpec, saveRoleChoice)
+from modules.system_monitor import SystemMonitor
 
 webDir = Path(__file__).resolve().parent / "web"
 scriptNames = ["core", "overview", "plan", "ops", "console", "assistant", "models", "main"]
@@ -58,6 +59,7 @@ class Dashboard:
     self.errorLock = threading.Lock()
     self.reportedErrors = set()
     self.modelCatalog = board_models.ModelCatalog(self.projectDir)
+    self.systemMonitor = SystemMonitor(self.projectDir)
 
   def tokenMatches(self, given):
     return hmac.compare_digest(given.encode("utf-8"), self.token.encode("utf-8"))
@@ -208,6 +210,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
       if filePath.is_file():
         self.sendBody(200, filePath.read_bytes(), contentType)
         return
+    mounted = self.dashboard.systemMonitor.handleGet(path)
+    if mounted:
+      self.sendBody(200, *mounted)
+      return
     for pattern, handler in getRoutes:
       match = pattern.match(path)
       if match:
