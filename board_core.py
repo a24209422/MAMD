@@ -35,6 +35,7 @@ defaultConfig = {
   "maxRounds": 3,
   "timeoutMinutes": 30,
   "testCommand": "",
+  "skipTests": False,
   "pollSeconds": 2,
   "writer": {"cli": "claude"},
   "reviewer": {"cli": "codex"},
@@ -80,13 +81,32 @@ def roleSpec(config, role):
           "allowedTools": list(allowedTools) if isinstance(allowedTools, list) else []}
 
 
-def configProblems(userConfig):
+def configProblems(userConfig, requireTestChoice=False):
+  if not isinstance(userConfig, dict):
+    return ["最外層要是物件"]
   problems = [f"{key} 已經不用了，請改寫成 {replacement}（見 README 的「換模型」）"
               for key, replacement in legacyConfigKeys.items() if key in userConfig]
   for role in roleNames:
     if role in userConfig:
       problems.extend(roleConfigProblems(role, userConfig[role]))
-  return problems
+  return problems + testConfigProblems(userConfig, requireTestChoice)
+
+
+def testConfigProblems(config, requireChoice=False):
+  command = config.get("testCommand", "")
+  skip = config.get("skipTests", False)
+  if not isinstance(command, str):
+    return ["testCommand 要是指令字串"]
+  if not isinstance(skip, bool):
+    return ["skipTests 要是 true 或 false"]
+  if skip and command:
+    return ["testCommand 和 skipTests: true 不能同時設定"]
+  if skip and config.get("tddCrap"):
+    return ["TDD 不能略過測試：tddCrap 和 skipTests: true 不能同時設定"]
+  if requireChoice and not skip and not command.strip():
+    return ["尚未設定測試方式：執行 board.py init --test-command \"你的測試指令\"，"
+            "或用 init --skip-tests 明確略過測試；Python 專案也可用 init --tdd"]
+  return []
 
 
 def roleConfigProblems(role, raw):

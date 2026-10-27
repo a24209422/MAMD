@@ -231,7 +231,7 @@ def runInit(projectDir, *args):
 
 
 def test_initCreatesAgentsAndGitignore(gitProject, capsys):
-  assert board.cmdInit(gitProject) == 0
+  assert board.cmdInit(gitProject, skipTests=True) == 0
   agents = readRaw(gitProject / "AGENTS.md")
   assert agents.startswith(board.agentsStartMarker + "\n")
   assert agents.endswith(board.agentsEndMarker + "\n")
@@ -239,30 +239,30 @@ def test_initCreatesAgentsAndGitignore(gitProject, capsys):
   assert snippet.replace("{{boardPy}}", str(board.boardPyPath)) in agents
   assert readRaw(gitProject / ".gitignore") == ".board/\nplans/_review/\n"
   assert "git add AGENTS.md .gitignore .claude/skills/agent-board-plan/SKILL.md" in capsys.readouterr().out
-  assert not (gitProject / ".board").exists()
+  assert json.loads(readRaw(gitProject / ".board" / "config.json")) == {"testCommand": "", "skipTests": True}
 
 
 def test_initWritesWhereBoardPyActuallyIs(gitProject, monkeypatch):
   # 別人 clone 到哪裡都不一定，Codex 要用 init 寫進去的路徑執行 submit
-  assert board.cmdInit(gitProject) == 0
+  assert board.cmdInit(gitProject, skipTests=True) == 0
   agents = readRaw(gitProject / "AGENTS.md")
   assert "{{boardPy}}" not in agents
   assert f"python {Path(board.__file__).resolve()} submit P0007" in agents
   monkeypatch.setattr(board, "boardPyPath", Path("C:/my tools/agent-board/board.py"))
-  assert board.cmdInit(gitProject) == 0
+  assert board.cmdInit(gitProject, skipTests=True) == 0
   assert f'python "{Path("C:/my tools/agent-board/board.py")}" status' in readRaw(gitProject / "AGENTS.md")
 
 
 def test_initKeepsExistingContentAndIsIdempotent(gitProject, capsys):
   writeRaw(gitProject / "AGENTS.md", "# 我的規則\n\n- 用中文")
   writeRaw(gitProject / ".gitignore", "node_modules/\n/.board\n")
-  assert board.cmdInit(gitProject) == 0
+  assert board.cmdInit(gitProject, skipTests=True) == 0
   agents = readRaw(gitProject / "AGENTS.md")
   assert agents.startswith("# 我的規則\n\n- 用中文\n\n" + board.agentsStartMarker)
   assert agents.count(board.agentsStartMarker) == 1
   assert readRaw(gitProject / ".gitignore") == "node_modules/\n/.board\nplans/_review/\n"
   capsys.readouterr()
-  assert board.cmdInit(gitProject) == 0
+  assert board.cmdInit(gitProject, skipTests=True) == 0
   assert readRaw(gitProject / "AGENTS.md") == agents
   out = capsys.readouterr().out
   assert "AGENTS.md：已是最新" in out and "不用 commit" in out
@@ -272,7 +272,7 @@ def test_initReplacesOldBlockAndKeepsCrlf(gitProject):
   writeRaw(gitProject / "AGENTS.md",
            f"# 前面\r\n\r\n{board.agentsStartMarker}\r\n舊的規則\r\n{board.agentsEndMarker}\r\n\r\n# 後面\r\n")
   writeRaw(gitProject / ".gitignore", "dist/\r\n")
-  assert board.cmdInit(gitProject) == 0
+  assert board.cmdInit(gitProject, skipTests=True) == 0
   agents = readRaw(gitProject / "AGENTS.md")
   assert "舊的規則" not in agents and snippetHeading in agents
   assert agents.startswith("# 前面\r\n\r\n" + board.agentsStartMarker + "\r\n")
@@ -284,7 +284,7 @@ def test_initReplacesOldBlockAndKeepsCrlf(gitProject):
 def test_initRefusesManuallyPastedRules(gitProject, capsys):
   original = f"# 專案\n\n{snippetHeading}\n\n舊的規則\n"
   writeRaw(gitProject / "AGENTS.md", original)
-  assert board.cmdInit(gitProject) == 1
+  assert board.cmdInit(gitProject, skipTests=True) == 1
   assert "第 3 行" in capsys.readouterr().out
   assert readRaw(gitProject / "AGENTS.md") == original
   assert not (gitProject / ".gitignore").exists()
@@ -348,20 +348,20 @@ def test_initTddChecksEverythingBeforeWriting(gitProject, fakeTddCrap, monkeypat
 def test_initCommandLine(gitProject):
   refused = runInit(gitProject, "--source", "lib")
   assert refused.returncode == 2 and "--tdd" in refused.stdout
-  completed = runInit(gitProject)
+  completed = runInit(gitProject, "--skip-tests")
   assert completed.returncode == 0 and "AGENTS.md" in completed.stdout
   assert (gitProject / "AGENTS.md").exists()
 
 
 def test_initWritesPlanSkillForClaude(gitProject, capsys):
-  assert board.cmdInit(gitProject) == 0
+  assert board.cmdInit(gitProject, skipTests=True) == 0
   skill = readRaw(gitProject / ".claude" / "skills" / "agent-board-plan" / "SKILL.md")
   assert skill.startswith("---\nname: agent-board-plan\n")
   assert "disable-model-invocation: true" in skill and board.planSkillMarker in skill
   assert snippetHeading in skill
   assert f"python {Path(board.__file__).resolve()} submit P0007" in skill
   capsys.readouterr()
-  assert board.cmdInit(gitProject) == 0
+  assert board.cmdInit(gitProject, skipTests=True) == 0
   out = capsys.readouterr().out
   assert ".claude/skills/agent-board-plan/SKILL.md：已是最新" in out and "不用 commit" in out
 
@@ -369,7 +369,7 @@ def test_initWritesPlanSkillForClaude(gitProject, capsys):
 def test_initRefusesSkillItDidNotWrite(gitProject, capsys):
   mine = "---\nname: agent-board-plan\n---\n我自己的\n"
   writeRaw(gitProject / ".claude" / "skills" / "agent-board-plan" / "SKILL.md", mine)
-  assert board.cmdInit(gitProject) == 1
+  assert board.cmdInit(gitProject, skipTests=True) == 1
   assert "不是 init 產生的" in capsys.readouterr().out
   assert readRaw(gitProject / ".claude" / "skills" / "agent-board-plan" / "SKILL.md") == mine
   assert not (gitProject / "AGENTS.md").exists()

@@ -82,7 +82,19 @@ def taskHeadline(plan, taskId, roundNumber):
   return f"plan {planId(plan)}「{plan['title']}」的任務 {taskId}：{plan['graph'].tasks[taskId]['text']}（第 {roundNumber} 輪）"
 
 
-def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", qualityCommand="", cli="claude"):
+def testExecutionLines(testCommand, skipTests):
+  if testCommand:
+    return ["專案設定的測試指令（流程已將這個指令加入 writer 的允許清單）：", testCommand,
+            "- 請照原樣執行；針對性測試依該工具語法追加參數，保留上述指令前綴。",
+            "- 測試設定已由流程提供，不需要讀取主專案的 .board/config.json。",
+            "- 無法執行或測試失敗時據實回報，不要把未執行說成通過。"]
+  if skipTests:
+    return ["使用者已明確略過自動測試：不要求執行測試指令；交付時說明未執行測試，不要宣稱通過。"]
+  return []
+
+
+def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", qualityCommand="", cli="claude",
+                     testCommand="", skipTests=False):
   parts = [
     taskHeadline(plan, taskId, roundNumber), "",
     "這個任務要滿足的需求：", *requirementLines(plan, taskId), "",
@@ -92,13 +104,14 @@ def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", 
     parts += ["", "上一輪審查沒有通過，請修正「必改」的每一條（「建議」可以參考，不強制）：", reviewMarkdown]
   if userNote:
     parts += ["", "使用者補充：" + userNote]
+  parts += ["", *testExecutionLines(testCommand, skipTests)]
   if qualityCommand:
     parts += ["", *tddWriteLines(qualityCommand, cli)]
   parts += ["", "改完後要能照表格的「驗證」欄驗證。完成後依格式回覆。"]
   return "\n".join(parts)
 
 
-def buildResolvePrompt(plan, taskId, roundNumber, conflicts, userNote=""):
+def buildResolvePrompt(plan, taskId, roundNumber, conflicts, userNote="", testCommand="", skipTests=False):
   parts = [
     taskHeadline(plan, taskId, roundNumber), "",
     "這一輪要解合併衝突：其他任務已經先合併進 plan 分支，和這個任務改到同樣的檔案。",
@@ -106,12 +119,13 @@ def buildResolvePrompt(plan, taskId, roundNumber, conflicts, userNote=""):
     *[f"- {name}" for name in conflicts], "",
     "請解掉每一個衝突：同時保留這個任務的改動和其他任務已經合併的改動，不要刪掉別人的功能。",
     "兩邊真的互相矛盾、無法同時保留時，status 填 blocked，blockedReason 說明矛盾在哪裡。",
-    "解完後確認檔案裡沒有任何衝突標記，再跑測試。", "",
+    "解完後確認檔案裡沒有任何衝突標記，依下方專案測試設定驗證。", "",
     "這個任務要滿足的需求：", *requirementLines(plan, taskId), "",
     "plan 裡和這個任務有關的列：", formatRows(taskRows(plan, taskId)),
   ]
   if userNote:
     parts += ["", "使用者補充：" + userNote]
+  parts += ["", *testExecutionLines(testCommand, skipTests)]
   parts += ["", "完成後依格式回覆。"]
   return "\n".join(parts)
 

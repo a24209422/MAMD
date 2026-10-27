@@ -36,6 +36,7 @@ def fakeConfig(**overrides):
   config = {"writer": fakeRole("claude"), "reviewer": fakeRole("codex"),
             "pollSeconds": 0.05, "timeoutMinutes": 1, "maxParallel": 3, "maxRounds": 3, "testCommand": ""}
   config.update(overrides)
+  config.setdefault("skipTests", not bool(config["testCommand"]))
   return config
 
 

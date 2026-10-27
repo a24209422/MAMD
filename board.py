@@ -11,7 +11,7 @@ from pathlib import Path
 
 import board_git
 from board_core import (PlanStatus, TaskStatus, appendEvent, boardDir, deriveState, loadConfig, loadPlans,
-                        planTasks, readEvents, taskKey)
+                        planTasks, readEvents, taskKey, testConfigProblems)
 from board_index import buildIndex
 from board_prompts import tddCrapDir
 
@@ -368,7 +368,7 @@ def tddProblems(projectDir, sources, testsDir, config, command):
   return problems
 
 
-def cmdInit(projectDir, tdd=False, sources=None, testsDir=None):
+def cmdInit(projectDir, tdd=False, sources=None, testsDir=None, testCommand=None, skipTests=False):
   projectDir = Path(projectDir)
   sources, testsDir = list(sources or ["src"]), testsDir or "tests"
   if not projectDir.is_dir():
@@ -383,11 +383,35 @@ def cmdInit(projectDir, tdd=False, sources=None, testsDir=None):
   skillPath = projectDir / planSkillPath
   agentsText, skillText = readKeepingNewlines(agentsPath), readKeepingNewlines(skillPath)
   problems += [problem for problem in [agentsProblem(agentsText), planSkillProblem(skillText)] if problem]
-  config, command = None, None
+  config, configProblem = readRawConfig(projectDir)
+  problems += [configProblem] if configProblem else []
+  command = None
+  explicitChoices = int(bool(tdd)) + int(testCommand is not None) + int(bool(skipTests))
+  if explicitChoices > 1:
+    problems.append("--tdd、--test-command、--skip-tests 只能選一個")
+  newConfig = dict(config or {})
   if tdd:
-    config, configProblem = readRawConfig(projectDir)
     command = qualityCommand(sources, testsDir)
-    problems += [configProblem] if configProblem else tddProblems(projectDir, sources, testsDir, config, command)
+    if not configProblem:
+      problems += tddProblems(projectDir, sources, testsDir, config, command)
+    newConfig.update(tddCrap=True, testCommand=command)
+    newConfig.pop("skipTests", None)
+  elif testCommand is not None:
+    if not isinstance(testCommand, str) or not testCommand.strip():
+      problems.append("--test-command 要提供非空白的測試指令")
+    elif newConfig.get("tddCrap") and testCommand.strip() != newConfig.get("testCommand"):
+      problems.append("目前已啟用 TDD；一般 --test-command 不會覆蓋 TDD 的品質檢查指令")
+    else:
+      newConfig["testCommand"] = testCommand.strip()
+      newConfig.pop("skipTests", None)
+  elif skipTests:
+    if newConfig.get("tddCrap"):
+      problems.append("目前已啟用 TDD，不能用 --skip-tests 略過測試")
+    else:
+      newConfig["testCommand"] = ""
+      newConfig["skipTests"] = True
+  if not configProblem:
+    problems += testConfigProblems(newConfig, requireChoice=True)
   # 全部檢查完才動手，有問題時專案維持原狀，修好再跑一次就好
   if problems:
     print("沒有修改任何檔案：")
@@ -423,17 +447,20 @@ def cmdInit(projectDir, tdd=False, sources=None, testsDir=None):
     changed.append(skillName)
     print(f"{skillName}：{'已換成最新版' if skillText else '已建立'}"
           "（在 Claude Code 打 /agent-board-plan 加上需求，就由 Claude 寫 plan）")
+  if newConfig != config:
+    writeKeepingNewlines(boardDir(projectDir) / "config.json", json.dumps(newConfig, ensure_ascii=False, indent=2) + "\n")
   if tdd:
-    config.update(tddCrap=True, testCommand=command)
-    writeKeepingNewlines(boardDir(projectDir) / "config.json", json.dumps(config, ensure_ascii=False, indent=2) + "\n")
     print(f".board/config.json：已開啟 tddCrap，品質檢查指令是 {command}")
     absent = missingPackages()
     if absent:
       # 檢查的是執行 init 的這個 Python；conductor 跑品質檢查時用的是 PATH 上的 python
       print(f"提醒：{sys.executable} 沒有安裝 {'、'.join(absent)}，請執行：")
       print(f"  python -m pip install -r {tddCrapDir / 'requirements.txt'}")
+  elif newConfig.get("skipTests"):
+    print("測試設定：已明確略過自動測試，這不代表測試通過")
   else:
-    print("提醒：.board/config.json 可以設定 testCommand 等選項，見 README")
+    print(f"測試指令：{newConfig['testCommand']}")
+  print("若 Alfred 已在執行，測試設定變更後請重啟 Alfred 才會生效")
   print("提醒：測試產物（例如 __pycache__/、.pytest_cache/）請自己加進 .gitignore，否則會被 commit 進任務分支")
   if changed:
     print("接下來請 commit：")
@@ -465,7 +492,10 @@ def buildParser():
   sub.add_parser("cleanup").add_argument("plan")
   sub.add_parser("index")
   init = sub.add_parser("init")
-  init.add_argument("--tdd", action="store_true", help="寫程式的 agent 照 tdd-crap 寫程式（只適用 Python 專案）")
+  testing = init.add_mutually_exclusive_group()
+  testing.add_argument("--tdd", action="store_true", help="寫程式的 agent 照 tdd-crap 寫程式（只適用 Python 專案）")
+  testing.add_argument("--test-command", help="專案的測試指令，例如 python -m pytest -q；明確指定時更新測試設定")
+  testing.add_argument("--skip-tests", action="store_true", help="明確略過自動測試，不宣稱測試通過")
   init.add_argument("--source", action="append", help="原始碼資料夾，可以重複，預設 src")
   init.add_argument("--tests", help="測試資料夾，預設 tests")
   return parser
@@ -494,7 +524,7 @@ def main(argv=None):
     "resume": lambda: cmdResume(projectDir),
     "cleanup": lambda: cmdCleanup(projectDir, args.plan),
     "index": lambda: cmdIndex(projectDir),
-    "init": lambda: cmdInit(projectDir, args.tdd, args.source, args.tests),
+    "init": lambda: cmdInit(projectDir, args.tdd, args.source, args.tests, args.test_command, args.skip_tests),
   }
   return commands[args.command]()
 

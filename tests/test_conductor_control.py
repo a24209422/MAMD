@@ -301,6 +301,7 @@ def test_mainRefusesLegacyConfig(gitProject, capsys):
 def test_mainRefusesSecondConductor(gitProject, monkeypatch, capsys):
   lockPath = lockPathOf(gitProject)
   lockPath.parent.mkdir(parents=True, exist_ok=True)
+  (lockPath.parent / "config.json").write_text('{"skipTests": true}', encoding="utf-8")
   lockPath.write_text(str(os.getpid()), encoding="utf-8")
   started = []
   monkeypatch.setattr(conductorModule, "Conductor", lambda projectDir: started.append(projectDir))
@@ -312,6 +313,8 @@ def test_mainRefusesSecondConductor(gitProject, monkeypatch, capsys):
 
 def test_mainHoldsLockWhileRunningAndReleasesAfter(gitProject, monkeypatch):
   lockPath = lockPathOf(gitProject)
+  lockPath.parent.mkdir(parents=True, exist_ok=True)
+  (lockPath.parent / "config.json").write_text('{"skipTests": true}', encoding="utf-8")
   seenLocks = []
 
   class FakeConductor:

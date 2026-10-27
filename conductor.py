@@ -102,6 +102,9 @@ class Conductor:
       return
     config = dict(defaultConfig)
     config.update(userConfig)
+    if any(config[key] != self.config.get(key, defaultConfig[key]) for key in ("testCommand", "skipTests")):
+      self.notifyOnce("測試設定已變更：testCommand／skipTests 需要重啟 Alfred 才會生效，"
+                      "目前仍使用啟動時的測試指令與權限")
     for role in roleNames:
       spec = roleSpec(config, role)
       if spec != self.roles[role]["spec"]:
@@ -296,11 +299,13 @@ class Conductor:
         cleanRemerge = not info["conflicts"]
       if not cleanRemerge:
         if info["mode"] == "resolve":
-          prompt = buildResolvePrompt(plan, info["task"], info["round"], info["conflicts"], taskState["userNote"])
+          prompt = buildResolvePrompt(plan, info["task"], info["round"], info["conflicts"], taskState["userNote"],
+                                      self.config["testCommand"], self.config.get("skipTests", False))
         else:
           prompt = buildWritePrompt(plan, info["task"], info["round"], self.readReview(taskState["lastReviewNotes"]),
                                     taskState["userNote"],
-                                    self.config["testCommand"] if self.config.get("tddCrap") else "", cli)
+                                    self.config["testCommand"] if self.config.get("tddCrap") else "", cli,
+                                    self.config["testCommand"], self.config.get("skipTests", False))
         argv, stdinText, lineParser = self.writeLaunch(info, worktree, prompt, resume)
         info["job"] = board_agents.AgentJob(argv, worktree, stdinText, self.logPath(info, "write"), lineParser,
                                             self.timeoutSeconds()).start()
@@ -643,7 +648,10 @@ def main(argv=None):
   if board_git.runGit(projectDir, "rev-parse", "--is-inside-work-tree", check=False) != "true":
     print(f"{projectDir} 不是 git repo，Alfred 需要用 git 建立 worktree")
     return 1
-  problems = configProblems(readUserConfig(projectDir))
+  try:
+    problems = configProblems(readUserConfig(projectDir), requireTestChoice=True)
+  except (OSError, ValueError) as error:
+    problems = [f"讀不懂：{error}"]
   if problems:
     print(".board/config.json 要先修正：")
     for problem in problems:

@@ -45,7 +45,7 @@ python <agent-board>\install_skill.py
 2. 在專案資料夾執行：
 
    ```
-   python <agent-board>\board.py init
+   python <agent-board>\board.py init --test-command "python -m pytest -q"
    ```
 
    - 把 `docs/AGENTS-snippet.md` 的規則寫進專案的 `AGENTS.md`，前後加標記；規則更新後再跑一次 `init`，會整段換成最新版
@@ -55,6 +55,14 @@ python <agent-board>\install_skill.py
    - 不會自動 commit，最後會印出要執行的 git 指令
    - 測試產物（例如 `__pycache__/`、`.pytest_cache/`）要自己加進 `.gitignore`，否則會被 commit 進任務分支
    - `AGENTS.md` 以前手動貼過規則的話，要先刪掉那一段再跑
+
+   `--test-command` 使用專案自己的指令，例如 `npm test` 或 `cargo test`，不限定 Python。
+   新專案要選擇測試指令、TDD 或明確略過；沒有選擇時會先列出用法，不修改任何檔案。
+   已經有測試指令或明確略過設定的專案，重跑普通 `init` 會沿用既有選擇；
+   明確傳入 `--test-command` 會更新該指令並保留模型等其他設定，不會覆蓋已啟用的 TDD 品質檢查。
+   沒有自動測試的專案使用 `python <agent-board>\board.py init --skip-tests`，
+   它會保存 `skipTests: true`，writer 也會收到「未執行測試，不宣稱通過」的說明。
+   `--test-command`、`--skip-tests`、`--tdd` 三者互斥。
 
    Python 專案要讓寫程式的 agent 照 tdd-crap skill 寫程式時，改用：
 
@@ -68,7 +76,7 @@ python <agent-board>\install_skill.py
    - 專案的 Python 要裝好 pytest、coverage、radon；沒裝時 `init` 會印出安裝指令
    - `--source` 可以重複；沒指定時是 `src`、`tests`
 
-3. 需要的話建立 `.board/config.json`（全部選填）：
+3. 初始化會保存測試方式。需要其他選項時，編輯 `.board/config.json`，保留初始化寫入的設定：
 
    ```json
    { "maxParallel": 3, "maxRounds": 3, "timeoutMinutes": 30, "testCommand": "python -m pytest -q" }
@@ -83,6 +91,8 @@ python <agent-board>\install_skill.py
    - `maxParallel` 是寫程式、審查各自同時跑的上限：設 1 代表同時最多 1 個寫程式加 1 個審查
    - `writer`、`reviewer` 兩段（例如任務卡住後才加 `allowedTools`）改了之後，Alfred（指揮程式，檔名是 `conductor.py`）從下一個新啟動的 agent 開始用；其他設定改了要重開 Alfred 才生效
    - `testCommand` 在 Alfred 裡同步執行，跑測試時 Alfred 不會排新工作，測試要夠快
+   - Alfred 啟動前會檢查測試方式：沒有非空白的 `testCommand`，也沒有 `skipTests: true` 時，會先停止並提示初始化選項，不會等到 writer 執行測試才卡住
+   - `testCommand`／`skipTests` 執行中改動時會提示重啟 Alfred；目前執行仍沿用啟動時的指令與權限。每個 writer（含解衝突）都會收到同一份測試指令
    - 寫程式、審查要用哪個 CLI 和模型，見「換模型」
 
 ## 換模型
@@ -158,7 +168,7 @@ python <agent-board>\install_skill.py
 |---|---|
 | `status [P0007]` | 看進度 |
 | `index` | 產生總覽頁與線路圖 |
-| `init [--tdd --source src --tests tests]` | 在專案啟用 agent-board，見「在專案裡啟用」 |
+| `init [--test-command "指令" / --skip-tests / --tdd]` | 在專案啟用 agent-board 並明確選擇測試方式；TDD 可搭配 --source、--tests |
 | `approve P0007` | 核准（有橘、黃問題時會先問你） |
 | `reject P0007 --reason "..."` | 退回 plan |
 | `abandon P0007` | 放棄 plan，正在跑的 agent 會被結束 |

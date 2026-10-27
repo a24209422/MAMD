@@ -58,7 +58,7 @@ def main():
   (projectDir / "plans" / "0001-demo.md").write_text(planText, encoding="utf-8")
   scenarioPath = projectDir / ".board" / "scenario.json"
   scenarioPath.write_text(json.dumps(scenario, ensure_ascii=False), encoding="utf-8")
-  config = {"maxParallel": 2, "maxRounds": 3, "timeoutMinutes": 5, "testCommand": "",
+  config = {"maxParallel": 2, "maxRounds": 3, "timeoutMinutes": 5, "testCommand": "", "skipTests": True,
             "writer": {"cli": "claude", "command": [sys.executable, str(fakesDir / "fake_claude.py")]},
             "reviewer": {"cli": "codex", "command": [sys.executable, str(fakesDir / "fake_codex.py")]}}
   (projectDir / ".board" / "config.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
