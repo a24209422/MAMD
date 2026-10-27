@@ -1,0 +1,140 @@
+/* 系統監控模組的樣式：完整頁（.smon）與控制台摘要（.smon-summary）
+   沿用儀表板的字型與色彩變數（--fg、--line-2、--blue…），class 一律以 smon- 開頭，不影響主畫面其他元件 */
+.smon {
+  container: smon / inline-size;
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.smon-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+.smon-title { margin: 0; color: var(--fg); font: 700 15px/1.4 var(--font-cjk); }
+.smon-meta { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; color: var(--fg-3); font: 12px/1.5 var(--font-cjk); }
+.smon-meta b { color: var(--fg-2); font: 500 12px/1.5 var(--font-mono); font-variant-numeric: tabular-nums; }
+.smon-status:empty { display: none; }
+.smon-banner {
+  --al: var(--fg-2);
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--al);
+  background: color-mix(in srgb, var(--al) 7%, transparent);
+  color: var(--al);
+  font: 12.5px/1.6 var(--font-cjk);
+  overflow-wrap: anywhere;
+}
+.smon-banner[data-state="error"] { --al: var(--red); }
+.smon-banner[data-state="stale"] { --al: var(--amber); }
+
+/* 狀態一律寫成文字標籤（取樣中、不支援、讀取失敗、過期），不只靠顏色 */
+.smon-tag {
+  --t: var(--fg-2);
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border: 1px solid var(--t);
+  color: var(--t);
+  font: 500 11px/1.6 var(--font-cjk);
+  white-space: nowrap;
+}
+.smon-tag[data-state="loading"], .smon-tag[data-state="warming-up"] { --t: var(--blue); }
+.smon-tag[data-state="stale"] { --t: var(--amber); }
+.smon-tag[data-state="error"] { --t: var(--red); }
+.smon-tag[data-state="unsupported"] { --t: var(--fg-3); }
+
+/* ---------- 三張卡 ---------- */
+.smon-cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.smon-card {
+  --m: var(--fg-3);
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px 14px 14px;
+  border: 1px solid var(--line-2);
+  background: var(--panel);
+}
+.smon-card[data-level="ok"], .smon-sum-row[data-level="ok"] { --m: var(--green); }
+.smon-card[data-level="mid"], .smon-sum-row[data-level="mid"] { --m: var(--amber); }
+.smon-card[data-level="high"], .smon-sum-row[data-level="high"] { --m: var(--red); }
+/* 過期的數值還留著，但改成灰色、虛線框 */
+.smon-card[data-stale="true"], .smon-sum-row[data-stale="true"] { --m: var(--fg-3); }
+.smon-card[data-stale="true"] { border-style: dashed; }
+.smon-card[data-stale="true"] .smon-value, .smon-sum-row[data-stale="true"] .smon-sum-value { color: var(--fg-2); }
+.smon-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0; }
+.smon-card-head h3 { flex: 1 1 auto; min-width: 0; margin: 0; color: var(--fg); font: 700 13px/1.4 var(--font-cjk); overflow-wrap: anywhere; }
+.smon-value { margin: 0; color: var(--fg); font: 700 28px/1.15 var(--font-mono); font-variant-numeric: tabular-nums; }
+/* 分格進度條，和儀表板的 meter 同一種樣子 */
+.smon-meter {
+  position: relative;
+  display: block;
+  height: 8px;
+  background: repeating-linear-gradient(90deg, var(--line-2) 0 6px, transparent 6px 8px);
+}
+.smon-meter i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: repeating-linear-gradient(90deg, var(--m) 0 6px, transparent 6px 8px);
+  transition: width 0.5s;
+}
+.smon-detail { margin: 0; display: grid; gap: 2px; font-size: 12px; }
+.smon-detail div { display: flex; justify-content: space-between; gap: 10px; }
+.smon-detail dt { color: var(--fg-3); font-family: var(--font-cjk); }
+.smon-detail dd { margin: 0; color: var(--fg-2); text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.smon-note { margin: 0; color: var(--fg-2); font: 12px/1.55 var(--font-cjk); overflow-wrap: anywhere; }
+
+/* ---------- 走勢：一張圖一條線，標題前的短線就是圖例 ---------- */
+.smon-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.smon-chart {
+  --s: var(--blue);
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-2);
+  background: var(--panel);
+}
+.smon-chart[data-key="memory"] { --s: var(--violet); }
+.smon-chart-title { margin: 0; display: flex; align-items: center; gap: 8px; color: var(--fg); font: 700 13px/1.4 var(--font-cjk); }
+.smon-chart-title::before { content: ""; flex: none; width: 14px; height: 2px; background: var(--s); }
+.smon-chart-title small { color: var(--fg-3); font: 500 11.5px/1.4 var(--font-cjk); }
+.smon-stats { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; color: var(--fg-2); font: 12px/1.5 var(--font-cjk); font-variant-numeric: tabular-nums; }
+.smon-plot { position: relative; height: 150px; margin-left: 5ch; border-left: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); }
+.smon-plot svg { display: block; width: 100%; height: 100%; overflow: visible; }
+/* 縱軸刻度放在 SVG 外面，圖拉寬拉窄時字不會變形 */
+.smon-axis-y { position: absolute; top: 0; bottom: 0; right: 100%; width: 5ch; }
+.smon-axis-y span { position: absolute; right: 6px; transform: translateY(-50%); color: var(--fg-3); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.smon-grid { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; vector-effect: non-scaling-stroke; }
+.smon-area { fill: var(--s); fill-opacity: 0.12; }
+.smon-line { fill: none; stroke: var(--s); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.smon-dot { fill: none; stroke: var(--s); stroke-width: 8; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.smon-plot svg[data-stale="true"] { --s: var(--fg-3); }
+.smon-axis-x { margin: 0 0 0 5ch; display: flex; justify-content: space-between; gap: 8px; color: var(--fg-3); font: 10.5px/1.4 var(--font-cjk); font-variant-numeric: tabular-nums; }
+
+/* ---------- 窄畫面：改成直向排列 ---------- */
+@container smon (max-width: 860px) {
+  .smon-charts { grid-template-columns: minmax(0, 1fr); }
+}
+@container smon (max-width: 600px) {
+  .smon-cards { grid-template-columns: minmax(0, 1fr); }
+  .smon-value { font-size: 24px; }
+}
+
+/* ---------- 控制台摘要：整塊是連到完整頁的連結，Tab 可以停在上面 ---------- */
+.smon-summary { display: grid; gap: 10px; min-width: 0; color: inherit; text-decoration: none; }
+.smon-sum-rows { display: grid; gap: 8px; }
+.smon-sum-row {
+  --m: var(--fg-3);
+  display: grid;
+  grid-template-columns: 6em minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px 10px;
+  font-size: 12px;
+}
+.smon-sum-name { overflow: hidden; color: var(--fg-2); font-family: var(--font-cjk); white-space: nowrap; text-overflow: ellipsis; }
+.smon-sum-value { color: var(--fg); font-family: var(--font-cjk); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.smon-sum-row small { grid-column: 2 / -1; color: var(--fg-3); font: 11px/1.4 var(--font-cjk); }
+.smon-sum-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; color: var(--fg-3); font: 11.5px/1.5 var(--font-cjk); }
+.smon-sum-state { color: var(--fg-2); }
+.smon-sum-state[data-state="error"] { color: var(--red); }
+.smon-sum-more { margin-left: auto; color: var(--blue); }
+.smon-summary:hover .smon-sum-more, .smon-summary:focus-visible .smon-sum-more { text-decoration: underline; }
