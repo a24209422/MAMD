@@ -4,3 +4,4 @@ __pycache__/
 plans/_review/
 docs/superpowers/
 spikes/
+.board/
