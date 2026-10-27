@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>系統監控</title>
+<link rel="stylesheet" href="monitor.css">
+<style>
+/* 單獨開這一頁時沒有儀表板的變數，這裡補上同一組值；掛進儀表板時由 web/index.html 提供 */
+:root {
+  color-scheme: dark;
+  --ground: #05060b;
+  --panel: #0d1018;
+  --line: #1b2030;
+  --line-2: #283044;
+  --fg: #d9dfee;
+  --fg-2: #929bb3;
+  --fg-3: #5d6680;
+  --violet: #a985ff;
+  --blue: #4d8eff;
+  --green: #39d98a;
+  --red: #ff5c66;
+  --amber: #ffc53d;
+  --font-mono: "JetBrains Mono", "Noto Sans TC", "Microsoft JhengHei", ui-monospace, monospace;
+  --font-cjk: "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", sans-serif;
+}
+body { margin: 0; padding: 24px 16px; background: var(--ground); color: var(--fg); font: 13px/1.5 var(--font-mono); }
+main { max-width: 1200px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<main id="systemMonitorPage" aria-label="系統監控"></main>
+<script src="monitor.js"></script>
+<script>SystemMonitor.shared().mountPage(document.getElementById('systemMonitorPage')).setVisible(true);</script>
+</body>
+</html>
