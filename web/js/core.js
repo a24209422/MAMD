@@ -6,17 +6,19 @@ const pages = [
   { key: 'tasks', label: '任務', icon: 'clipboard' },
   { key: 'models', label: '模型', icon: 'cube' },
   { key: 'console', label: '控制台', icon: 'monitor' },
-  { key: 'topology', label: '拓撲', icon: 'nodes' },
+  { key: 'system-monitor', label: '系統監控', icon: 'pulse' },
   { key: 'settings', label: '設定', icon: 'gear' },
 ];
-const builtPages = ['overview', 'tasks', 'models', 'console'];
+const builtPages = ['overview', 'tasks', 'models', 'console', 'system-monitor'];
+// 改過名的頁面：舊網址換成新頁面，例如原本空白的 #topology 換成 #system-monitor
+const pageAliases = { topology: 'system-monitor' };
 const iconPaths = {
   expand: '<path d="M5 6l6 6-6 6M12 6l6 6-6 6"/>',
   grid: '<rect x="4" y="4" width="7" height="7"/><rect x="13" y="4" width="7" height="7"/><rect x="4" y="13" width="7" height="7"/><rect x="13" y="13" width="7" height="7"/>',
   clipboard: '<rect x="5" y="5" width="14" height="16"/><path d="M9 3h6v4H9zM8.5 11.5h7M8.5 15.5h5"/>',
   cube: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5l8 4.5 8-4.5M12 12v9"/>',
   monitor: '<rect x="3" y="4" width="18" height="12"/><path d="M8 20h8M12 16v4M7 8h6M7 11.5h9"/>',
-  nodes: '<circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M6.5 6.5l3.7 3.7M17.5 6.5l-3.7 3.7M6.5 17.5l3.7-3.7M17.5 17.5l-3.7-3.7"/>',
+  pulse: '<rect x="3" y="4" width="18" height="16"/><path d="M6 13h3l2-4 3 7 2-3h2"/>',
   gear: '<circle cx="12" cy="12" r="3"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M5.3 18.7l2.1-2.1M16.6 7.4l2.1-2.1"/>',
   crown: '<path d="M3 8l4.5 4L12 5l4.5 7L21 8l-2 11H5z"/>',
   code: '<path d="M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"/>',
@@ -248,6 +250,11 @@ function rerender(container, html) {
 }
 
 function showPage(key) {
+  if (Object.hasOwn(pageAliases, key)) {
+    key = pageAliases[key];
+    // 用 replaceState 換網址不會再觸發 hashchange，上一頁也不會回到舊網址
+    history.replaceState(null, '', `${location.pathname}${location.search}#${key}`);
+  }
   const page = pages.find(item => item.key === key) || pages[0];
   app.page = page.key;
   const sectionKey = builtPages.includes(page.key) ? page.key : 'placeholder';
@@ -276,6 +283,13 @@ function renderRail() {
     slot.outerHTML = icon(slot.dataset.icon, slot.className);
   });
 }
+
+// 系統監控頁的內容由 modules/system_monitor 的 monitor.js 畫；這裡只掛上節點，進出這一頁時開始或停止它的 3 秒輪詢
+let monitorPage = null;
+onPageChange(page => {
+  if (!monitorPage) monitorPage = SystemMonitor.shared().mountPage($('#systemMonitorPage'));
+  monitorPage.setVisible(page === 'system-monitor');
+});
 
 document.addEventListener('input', event => {
   if (event.target.dataset && event.target.dataset.draft) drafts[event.target.dataset.draft] = event.target.value;

@@ -1,9 +1,12 @@
 """用 Edge（或 Chrome）無頭模式載入儀表板，檢查畫面真的畫出 API 的資料。找不到瀏覽器就跳過。"""
+import itertools
 import json
 import re
 import shutil
 import subprocess
 import threading
+from datetime import datetime, timedelta, timezone
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -11,6 +14,8 @@ import pytest
 import board
 import server
 from board_core import appendEvent
+from modules.system_monitor import api as monitorApi
+from modules.system_monitor import metrics
 
 toolDir = Path(__file__).resolve().parent.parent
 browserCandidates = [
@@ -27,6 +32,7 @@ thumbRows = ["| R1 上傳不要變慢 | 不等縮圖就回應 | D1 背景產生�
 claudeLog = [{"type": "assistant", "message": {
   "content": [{"type": "tool_use", "id": "tu1", "name": "Write", "input": {"file_path": "D:\\w\\upload.py", "content": "x"}}],
   "usage": {"input_tokens": 2, "cache_read_input_tokens": 149000, "cache_creation_input_tokens": 998, "output_tokens": 10}}}]
+gib = 1024 ** 3
 
 
 def findBrowser():
@@ -40,6 +46,20 @@ def findBrowser():
 browser = findBrowser()
 nodePath = shutil.which("node")
 needsBrowser = pytest.mark.skipif(browser is None, reason="找不到 Edge 或 Chrome，跳過網頁畫面測試")
+
+
+def fixedCollector(projectDir):
+  # 替身主機數據，不讀真實主機：每次請求都是新的一筆、時間往後 3 秒；CPU 60%（第一筆取樣中）、RAM 75%、磁碟 25%
+  clockTicks = itertools.count(0, metrics.intervalSeconds)
+  cpuTicks = itertools.count()
+  stamps = itertools.count()
+  start = datetime(2026, 10, 27, 10, 0, tzinfo=timezone(timedelta(hours=8)))
+  def cpuTimes():
+    tick = next(cpuTicks)
+    return 4 * tick, 6 * tick, 4 * tick
+  return metrics.Collector(projectDir, cpuTimes, lambda: (16 * gib, 4 * gib), lambda path: (500 * gib, 125 * gib, 375 * gib),
+                           clock=lambda: next(clockTicks),
+                           now=lambda: start + timedelta(seconds=metrics.intervalSeconds * next(stamps)))
 
 
 @pytest.fixture
@@ -63,6 +83,7 @@ def dashboard(gitProject, writePlan):
   appendEvent(gitProject, "needsYou", plan="P0001", task="T2", roundNumber=1,
               data={"kind": "blocked", "reason": "寫程式的 agent 回報卡住：缺少 API 位址"})
   httpServer = server.makeServer(gitProject, 0, token)
+  httpServer.RequestHandlerClass.dashboard.systemMonitor.collector = fixedCollector(gitProject)
   thread = threading.Thread(target=httpServer.serve_forever, daemon=True)
   thread.start()
   yield f"http://127.0.0.1:{httpServer.server_address[1]}/"
@@ -70,13 +91,38 @@ def dashboard(gitProject, writePlan):
   httpServer.server_close()
 
 
-def renderDom(tmp_path, url):
+def renderDom(tmp_path, url, *extraArgs):
   # virtual-time-budget 讓頁面的計時器先跑幾輪輪詢，再把畫好的 DOM 印出來
   completed = subprocess.run(
     [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-     f"--user-data-dir={tmp_path / 'browser'}", "--virtual-time-budget=6000", "--dump-dom", url],
+     f"--user-data-dir={tmp_path / 'browser'}", "--virtual-time-budget=6000", *extraArgs, "--dump-dom", url],
     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
   return completed.stdout
+
+
+def addProbe(tmp_path, monkeypatch, script):
+  # 只在測試伺服器的 main.js 後面接一段操作與量測；結果寫進 body 的 data-probe，dump-dom 才看得到
+  # 包在區塊裡，量測用的變數不會和儀表板的全域名稱撞到
+  main = tmp_path / "main.js"
+  main.write_text((toolDir / "web/js/main.js").read_text(encoding="utf-8") + "\n{\n" + script + "\n}\n", encoding="utf-8")
+  monkeypatch.setitem(server.staticFiles, "/js/main.js", (str(main), "text/javascript; charset=utf-8"))
+
+
+def readProbe(dom):
+  match = re.search(r'data-probe="([^"]*)"', dom)
+  assert match, "頁面裡的量測沒有跑完"
+  return json.loads(unescape(match.group(1)))
+
+
+def sectionTag(dom, page):
+  match = re.search(rf'<section[^>]*data-page="{page}"[^>]*>', dom)
+  assert match, page
+  return match.group(0)
+
+
+def railLink(dom, page):
+  match = re.search(rf'<a class="rail-btn"[^>]*data-page="{page}"[^>]*>', dom)
+  return match.group(0) if match else None
 
 
 @pytest.mark.skipif(nodePath is None, reason="找不到 node，跳過 JavaScript 語法檢查")
@@ -96,6 +142,19 @@ def test_pageScriptsAreServedAndExist():
   assert names == [name for name in server.scriptNames if name in names]
   for name in names:
     assert (toolDir / "web" / "js" / f"{name}.js").is_file()
+
+
+def test_dashboardLoadsMonitorModuleFromWhitelist():
+  html = (toolDir / "web" / "index.html").read_text(encoding="utf-8")
+  # 主頁只引用模組的樣式和程式，走 server 的模組白名單，不另存一份
+  assets = re.findall(r'(?:href|src)="(modules/[^"]+)"', html)
+  assert assets == ["modules/system-monitor/monitor.css", "modules/system-monitor/monitor.js"]
+  for asset in assets:
+    assert "/" + asset in monitorApi.assets
+  # 換頁時才掛載，模組程式要比 main.js 先載入
+  assert html.index('src="modules/system-monitor/monitor.js"') < html.index('src="js/main.js"')
+  assert 'id="systemMonitorPage"' in html and 'id="systemMonitorSummary"' in html
+  assert "「系統資源監控」還沒有接資料" not in html
 
 
 @needsBrowser
@@ -151,7 +210,125 @@ def test_consoleShowsBusyAgentDetail(dashboard, tmp_path):
   dom = renderDom(tmp_path, dashboard + "#console")
   assert "（Claude・寫程式）" in dom
   assert "P0001 T1 後端批次 API" in dom and "第 1/3 輪" in dom
-  assert "「Astra 對話窗」還沒有接資料" in dom and "「系統資源監控」還沒有接資料" in dom
+  assert "「Astra 對話窗」還沒有接資料" in dom and "「系統資源監控」還沒有接資料" not in dom
+  # 系統資源區塊換成系統監控模組的三項摘要，整塊連到完整頁
+  summary = dom[dom.index('id="systemMonitorSummary"'):]
+  assert summary.startswith('id="systemMonitorSummary"><a class="smon-summary" href="#system-monitor">')
+  for key in ("cpu", "memory", "disk"):
+    assert f'class="smon-sum-row" data-key="{key}"' in summary
+  assert "75.0%" in summary and "25.0%" in summary and "server 主機" in summary
+
+
+@needsBrowser
+def test_systemMonitorPageMountsCardsAndCharts(dashboard, gitProject, tmp_path):
+  dom = renderDom(tmp_path, dashboard + "#system-monitor")
+  assert "hidden" not in sectionTag(dom, "system-monitor")
+  assert "hidden" in sectionTag(dom, "overview") and "hidden" in sectionTag(dom, "placeholder")
+  link = railLink(dom, "system-monitor")
+  assert link and 'aria-current="page"' in link and 'title="系統監控"' in link
+  assert '<span id="termPage">— 系統監控</span>' in dom
+  page = dom[dom.index('id="systemMonitorPage"'):]
+  for key in ("cpu", "memory", "disk"):
+    assert f'class="smon-card" data-key="{key}"' in page
+  for key in ("cpu", "memory"):
+    assert re.search(rf'class="smon-chart" data-key="{key}"[^>]*>.*?<svg', page, re.S)
+  assert f"磁碟 {metrics.volumeLabel(gitProject.resolve())}" in page
+  assert "75.0%" in page and "25.0%" in page and "監控對象：server 主機" in page
+
+
+@needsBrowser
+def test_topologyLinkRedirectsToSystemMonitor(dashboard, tmp_path, monkeypatch):
+  addProbe(tmp_path, monkeypatch, "document.body.dataset.probe = JSON.stringify({ hash: location.hash, page: app.page });")
+  dom = renderDom(tmp_path, dashboard + "#topology")
+  assert readProbe(dom) == {"hash": "#system-monitor", "page": "system-monitor"}
+  assert "hidden" not in sectionTag(dom, "system-monitor")
+  # 左側導覽不再有空白的拓撲頁
+  assert railLink(dom, "topology") is None and "拓撲" not in dom
+
+
+@needsBrowser
+def test_consoleSummaryOpensFullPage(dashboard, tmp_path, monkeypatch):
+  addProbe(tmp_path, monkeypatch, """
+    const summaryLink = document.querySelector('#systemMonitorSummary a');
+    const focusable = summaryLink.tabIndex >= 0;
+    setTimeout(() => summaryLink.click(), 1000);
+    setTimeout(() => {
+      document.body.dataset.probe = JSON.stringify({
+        focusable, hash: location.hash, page: app.page,
+        shown: !document.querySelector('#systemMonitorPage').hidden,
+        cards: document.querySelectorAll('#systemMonitorPage .smon-card').length,
+      });
+    }, 2500);""")
+  dom = renderDom(tmp_path, dashboard + "#console")
+  assert readProbe(dom) == {"focusable": True, "hash": "#system-monitor", "page": "system-monitor", "shown": True, "cards": 3}
+
+
+@needsBrowser
+def test_switchingPagesKeepsOtherPagesAndStopsMonitorPolling(dashboard, tmp_path, monkeypatch):
+  # 從系統監控頁依序切到總覽、任務、模型、設定，再到控制台；離開期間不能再讀監控資料，到控制台摘要才再讀
+  addProbe(tmp_path, monkeypatch, """
+    let monitorCalls = 0;
+    const realFetch = window.fetch;
+    window.fetch = (url, init) => {
+      if (String(url).includes('/api/system-monitor')) monitorCalls += 1;
+      return realFetch(url, init);
+    };
+    const visits = [];
+    const record = () => visits.push({
+      hash: location.hash,
+      current: document.querySelector('.rail-btn[aria-current="page"]').dataset.page,
+      shown: [...document.querySelectorAll('.page')].filter(section => !section.hidden).map(section => section.dataset.page),
+    });
+    const result = { visits };
+    ['overview', 'tasks', 'models', 'settings'].forEach((key, index) => {
+      setTimeout(() => { location.hash = key; }, 300 + index * 500);
+      setTimeout(record, 550 + index * 500);
+    });
+    setTimeout(() => { result.whileAway = monitorCalls; location.hash = 'console'; }, 4000);
+    setTimeout(() => {
+      result.onConsole = monitorCalls;
+      document.body.dataset.probe = JSON.stringify(result);
+    }, 4800);""")
+  dom = renderDom(tmp_path, dashboard + "#system-monitor")
+  probe = readProbe(dom)
+  assert probe["visits"] == [
+    {"hash": "#overview", "current": "overview", "shown": ["overview"]},
+    {"hash": "#tasks", "current": "tasks", "shown": ["tasks"]},
+    {"hash": "#models", "current": "models", "shown": ["models"]},
+    {"hash": "#settings", "current": "settings", "shown": ["placeholder"]},
+  ]
+  # 3 秒的輪詢在離開系統監控頁時就停了；進控制台立刻讀一次
+  assert probe["whileAway"] == 0 and probe["onConsole"] == 1
+  assert '<span class="box-label" id="emptyLabel">設定</span>' in dom
+
+
+@needsBrowser
+def test_narrowWindowStacksMonitorCardsWithoutOverflow(dashboard, tmp_path, monkeypatch):
+  addProbe(tmp_path, monkeypatch, """
+    setTimeout(() => {
+      const page = document.querySelector('#systemMonitorPage');
+      const right = page.getBoundingClientRect().right;
+      const rights = [...page.querySelectorAll('*')].map(node => node.getBoundingClientRect().right);
+      const lefts = selector => [...page.querySelectorAll(selector)].map(node => Math.round(node.getBoundingClientRect().left));
+      const tops = selector => [...page.querySelectorAll(selector)].map(node => Math.round(node.getBoundingClientRect().top));
+      document.body.dataset.probe = JSON.stringify({
+        width: innerWidth,
+        documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        pageOverflow: page.scrollWidth - page.clientWidth,
+        contentOverflow: Math.max(...rights) - right,
+        cardLefts: lefts('.smon-card'), cardTops: tops('.smon-card'),
+        chartLefts: lefts('.smon-chart'), chartTops: tops('.smon-chart'),
+      });
+    }, 3000);""")
+  dom = renderDom(tmp_path, dashboard + "#system-monitor", "--window-size=560,1000")
+  probe = readProbe(dom)
+  assert probe["width"] <= 760
+  assert probe["documentOverflow"] <= 0 and probe["pageOverflow"] <= 0 and probe["contentOverflow"] <= 1
+  # 三張卡和兩張走勢都改成直向排列：同一個左邊界，由上往下
+  assert len(set(probe["cardLefts"])) == 1 and probe["cardTops"] == sorted(set(probe["cardTops"]))
+  assert len(probe["cardTops"]) == 3
+  assert len(set(probe["chartLefts"])) == 1 and probe["chartTops"] == sorted(set(probe["chartTops"]))
+  assert len(probe["chartTops"]) == 2
 
 
 @needsBrowser

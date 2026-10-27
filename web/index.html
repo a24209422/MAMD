@@ -1222,6 +1222,8 @@ button, input, select { font: inherit; color: inherit; }
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
 </style>
+<!-- 系統監控模組（modules/system_monitor）的樣式，沿用上面的色彩與字型變數 -->
+<link rel="stylesheet" href="modules/system-monitor/monitor.css">
 </head>
 <body>
 <div class="app">
@@ -1333,7 +1335,7 @@ button, input, select { font: inherit; color: inherit; }
 
           <section class="boxed panel panel-res" aria-label="系統資源監控">
             <span class="box-label">系統資源監控</span>
-            <p class="empty-note">「系統資源監控」還沒有接資料。</p>
+            <div id="systemMonitorSummary"></div>
           </section>
         </section>
 
@@ -1354,12 +1356,15 @@ button, input, select { font: inherit; color: inherit; }
           </section>
         </section>
 
+        <!-- 系統監控：內容由系統監控模組掛進來 -->
+        <section class="page" data-page="system-monitor" id="systemMonitorPage" aria-label="系統監控" hidden></section>
+
         <!-- 其他跳轉頁：還沒有內容 -->
         <section class="page" data-page="placeholder" hidden>
           <div class="boxed empty">
             <span class="box-label" id="emptyLabel">任務</span>
             <strong>這一頁還沒有內容</strong>
-            <p class="muted">目前有畫面的是「總覽」、「任務」（plan 追溯樹）、「模型」和「控制台」（agent 身分的詳細資料）。</p>
+            <p class="muted">目前有畫面的是「總覽」、「任務」（plan 追溯樹）、「模型」、「控制台」（agent 身分的詳細資料）和「系統監控」。</p>
           </div>
         </section>
       </div>
@@ -1389,6 +1394,7 @@ button, input, select { font: inherit; color: inherit; }
   </aside>
 </div>
 
+<script src="modules/system-monitor/monitor.js"></script>
 <script src="js/core.js"></script>
 <script src="js/overview.js"></script>
 <script src="js/plan.js"></script>
