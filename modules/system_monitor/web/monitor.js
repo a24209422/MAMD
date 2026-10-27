@@ -130,10 +130,12 @@
     const clearTimer = options.clearTimeout || (id => root.clearTimeout(id));
     const doc = options.document || root.document || null;
     // latest：最後一次成功的回應；error：最近一次讀取失敗的原因，成功後清掉
-    const cache = { latest: null, receivedAt: 0, error: null, history: [], gapPending: false };
+    // segment：走勢的段落編號，讀取失敗或停止輪詢錯過讀取時加一，不同段的點不連線
+    const cache = { latest: null, receivedAt: 0, error: null, history: [], segment: 0 };
     const views = new Set();
     const viewOf = new WeakMap();
     let timer = null;
+    let nextTickAt = null;
     let loading = false;
 
     if (doc && typeof doc.addEventListener === 'function') doc.addEventListener('visibilitychange', sync);
@@ -145,7 +147,10 @@
     // 已經在輪詢就不重設計時器：換頁進出、兩個畫面輪流顯示都只有一個排程
     function sync() {
       if (active()) {
-        if (timer === null) tick();
+        if (timer !== null) return;
+        // 停止期間錯過了原本排定的讀取（切頁、頁籤隱藏），回來的資料另起一段，不和停止前連線
+        if (nextTickAt !== null && now() >= nextTickAt) cache.segment += 1;
+        tick();
       } else if (timer !== null) {
         clearTimer(timer);
         timer = null;
@@ -154,6 +159,7 @@
 
     function tick() {
       timer = setTimer(tick, intervalMs);
+      nextTickAt = now() + intervalMs;
       // 上一次還沒回來就不再發，請求不會重疊；只重畫，讓太久沒更新的數值標成過期
       if (loading) renderAll();
       else load();
@@ -161,6 +167,8 @@
 
     async function load() {
       loading = true;
+      // 依發出請求時的段落記錄；停止前就發出、停止後才回來的資料仍接在停止前那一段
+      const segment = cache.segment;
       const controller = new AbortController();
       // server 卡住時中斷請求，不然連線一直佔著，之後也不會再讀
       const timeout = setTimer(() => controller.abort(), requestTimeoutMs);
@@ -174,27 +182,27 @@
       }
       clearTimer(timeout);
       loading = false;
-      if (payload) accept(payload);
+      if (payload) accept(payload, segment);
       else fail(failure);
       // 只重畫還掛著的畫面；已卸載的節點不會再被寫入
       renderAll();
     }
 
-    function accept(payload) {
+    function accept(payload, segment) {
       cache.latest = payload;
       cache.receivedAt = now();
       cache.error = null;
-      addPoint(payload);
+      addPoint(payload, segment);
     }
 
     function fail(message) {
       cache.error = message;
-      // 下一筆新資料不和中斷前的連線
-      cache.gapPending = true;
+      // 之後的新資料不和中斷前的連線
+      cache.segment += 1;
     }
 
     // 只加入新的 sampleId；時間用 server 的 sampledAt，不用瀏覽器收到的時間
-    function addPoint(payload) {
+    function addPoint(payload, segment) {
       const history = cache.history;
       const t = Date.parse(payload.sampledAt);
       const last = history[history.length - 1];
@@ -208,10 +216,10 @@
         sampledAt: payload.sampledAt,
         cpu: validPercent(payload.cpu),
         memory: validPercent(payload.memory),
-        // 斷線過，或隔太久才有下一筆（切頁、頁籤隱藏），都另起一段
-        broken: !previous || cache.gapPending || t - previous.t > staleMs,
+        segment,
+        // 斷線過、停止輪詢錯過讀取，或隔太久才有下一筆，都另起一段
+        broken: !previous || previous.segment !== segment || t - previous.t > staleMs,
       });
-      cache.gapPending = false;
       while (history.length && (history[0].t < t - windowMs || history.length > maxPoints)) history.shift();
     }
 

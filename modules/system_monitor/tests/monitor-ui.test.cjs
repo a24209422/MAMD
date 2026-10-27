@@ -227,6 +227,40 @@ test('leaving the page or hiding the tab stops polling; coming back reads at onc
   assert.equal(server.requests.length, 5);
 });
 
+test('a short page switch or hidden tab still leaves a gap; a switch that misses no update does not', async () => {
+  const { clock, server, document, monitor } = setup();
+  const box = element();
+  const page = monitor.mountPage(box);
+  const summary = monitor.mountSummary(element());
+  page.setVisible(true);
+  await reply(server, sample(1, 0));
+  await clock.advance(3000);
+  await reply(server, sample(2, 3));
+  // 離頁 6 秒（不到 10 秒）：錯過了讀取，回來的第一筆另起一段
+  page.setVisible(false);
+  await clock.advance(6000);
+  page.setVisible(true);
+  await reply(server, sample(3, 9));
+  assert.equal(monitor.snapshot().history.at(-1).broken, true);
+  assert.equal(linePath(box, 'cpu'), 'M510.0,128.0L540.0,128.0M600.0,128.0h0');
+  // 頁籤隱藏 6 秒也一樣
+  await clock.advance(3000);
+  await reply(server, sample(4, 12));
+  document.setHidden(true);
+  await clock.advance(6000);
+  document.setHidden(false);
+  await reply(server, sample(5, 18));
+  const history = monitor.snapshot().history;
+  assert.equal(history.at(-2).broken, false);
+  assert.equal(history.at(-1).broken, true);
+  // 換到控制台摘要時還沒到下一次讀取，沒有錯過資料，照常連線
+  await clock.advance(1000);
+  page.setVisible(false);
+  summary.setVisible(true);
+  await reply(server, sample(6, 19));
+  assert.equal(monitor.snapshot().history.at(-1).broken, false);
+});
+
 test('summary reuses the shared cache and keeps the same keyboard link while updating', async () => {
   const { clock, server, monitor } = setup();
   const pageBox = element();
