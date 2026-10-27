@@ -127,8 +127,9 @@ def railLink(dom, page):
 
 @pytest.mark.skipif(nodePath is None, reason="找不到 node，跳過 JavaScript 語法檢查")
 def test_scriptsHaveValidSyntax():
-  scripts = sorted((toolDir / "web" / "js").glob("*.js"))
-  assert scripts
+  # 儀表板自己的程式，加上各模組掛進儀表板的畫面程式
+  scripts = sorted((toolDir / "web" / "js").glob("*.js")) + sorted((toolDir / "modules").glob("*/web/*.js"))
+  assert toolDir / "web/js/main.js" in scripts and toolDir / "modules/system_monitor/web/monitor.js" in scripts
   for script in scripts:
     completed = subprocess.run([nodePath, "--check", str(script)], capture_output=True, text=True,
                                encoding="utf-8", errors="replace")
@@ -278,6 +279,7 @@ def test_switchingPagesKeepsOtherPagesAndStopsMonitorPolling(dashboard, tmp_path
       hash: location.hash,
       current: document.querySelector('.rail-btn[aria-current="page"]').dataset.page,
       shown: [...document.querySelectorAll('.page')].filter(section => !section.hidden).map(section => section.dataset.page),
+      label: document.querySelector('#emptyLabel').textContent,
     });
     const result = { visits };
     ['overview', 'tasks', 'models', 'settings'].forEach((key, index) => {
@@ -291,15 +293,15 @@ def test_switchingPagesKeepsOtherPagesAndStopsMonitorPolling(dashboard, tmp_path
     }, 4800);""")
   dom = renderDom(tmp_path, dashboard + "#system-monitor")
   probe = readProbe(dom)
+  # 標籤在當下那一頁記錄；最後停在控制台，DOM 裡的標籤已經換掉
   assert probe["visits"] == [
-    {"hash": "#overview", "current": "overview", "shown": ["overview"]},
-    {"hash": "#tasks", "current": "tasks", "shown": ["tasks"]},
-    {"hash": "#models", "current": "models", "shown": ["models"]},
-    {"hash": "#settings", "current": "settings", "shown": ["placeholder"]},
+    {"hash": "#overview", "current": "overview", "shown": ["overview"], "label": "總覽"},
+    {"hash": "#tasks", "current": "tasks", "shown": ["tasks"], "label": "任務"},
+    {"hash": "#models", "current": "models", "shown": ["models"], "label": "模型"},
+    {"hash": "#settings", "current": "settings", "shown": ["placeholder"], "label": "設定"},
   ]
   # 3 秒的輪詢在離開系統監控頁時就停了；進控制台立刻讀一次
   assert probe["whileAway"] == 0 and probe["onConsole"] == 1
-  assert '<span class="box-label" id="emptyLabel">設定</span>' in dom
 
 
 @needsBrowser
