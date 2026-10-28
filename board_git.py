@@ -13,7 +13,9 @@ def runGit(cwd, *args, check=True):
   completed = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
                              encoding="utf-8", errors="replace")
   if check and completed.returncode != 0:
-    raise GitError(f"git {' '.join(args)} 失敗：{completed.stderr.strip()}")
+    # git hook 可能把擋下的原因印在 stdout，只看 stderr 會漏掉
+    output = "\n".join(text for text in (completed.stderr.strip(), completed.stdout.strip()) if text)
+    raise GitError(f"git {' '.join(args)} 失敗：{output}")
   return completed.stdout.strip()
 
 

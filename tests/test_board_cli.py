@@ -124,6 +124,23 @@ def test_submitStopsWhenCommitFails(gitProject, writePlan, capsys):
   assert eventTypes(gitProject) == ["planSubmitted"]
 
 
+def test_submitShowsCommitFailureReasonPrintedToStdout(gitProject, writePlan, monkeypatch, capsys):
+  realRun = subprocess.run
+
+  def fakeRun(command, *args, **kwargs):
+    # 模擬 git commit 把失敗原因只印在 stdout、stderr 是空的
+    if command[:2] == ["git", "commit"]:
+      return subprocess.CompletedProcess(command, 1, stdout="reason on stdout\n", stderr="")
+    return realRun(command, *args, **kwargs)
+
+  monkeypatch.setattr(board_git.subprocess, "run", fakeRun)
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 1
+  output = capsys.readouterr().out
+  assert "reason on stdout" in output and "git add -- plans/0001-ok.md" in output
+  assert "planSubmitted" not in eventTypes(gitProject)
+
+
 def test_approveRefusesPlanChangedAfterSubmit(gitProject, writePlan, capsys):
   writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
   assert board.cmdSubmit(gitProject, "P0001") == 0
