@@ -17,9 +17,14 @@ writerBaseRules = """你是自動流程裡負責寫程式的 agent。
 - 只做這個任務要求的事，不要順手重構或加功能。
 - AGENTS.md 的 plan 撰寫與送出規則只適用於規劃角色；你直接依已核准任務實作。共通的使用者專屬操作與 .board/ 限制仍有效，不要呼叫 agent-board-init 或 agent-board-plan。
 - 完成後，最後的回覆照指定的 JSON 格式：status 填 done，summary 用一句話說明改了什麼。
-- 缺少資訊或遇到自己無法解決的問題時，status 填 blocked，blockedReason 寫清楚需要人提供什麼。"""
+- 缺少資訊或遇到自己無法解決的問題時，status 填 blocked，blockedReason 寫清楚需要人提供什麼。
+- 最後回覆的 summary、blockedReason 一律用正體中文（台灣用語）寫，程式碼、指令、檔名、測試名稱與錯誤訊息保留原文。"""
 # Claude 寫程式時只放行測試指令，串接的指令會整串被拒；Codex 在沙箱裡沒有這層限制
-claudeShellRule = "- 執行指令一次只跑一個，不要用 ;、&&、| 串接；只有被允許的指令（通常是專案的測試指令）能執行，其他會被拒絕。"
+claudeShellRule = "\n".join([
+  "- 執行指令一次只跑一個，不要用 ;、&&、| 串接；只有被允許的指令（通常是專案的測試指令）能執行，其他會被拒絕。",
+  # 實測 PowerShell 的 & "路徑" 呼叫怎麼寫允許規則都比對不到，同一個指令用 Bash 才放行
+  '- 測試指令用 Bash 工具執行，不要用 PowerShell 工具；PowerShell 的 `& "..."` 呼叫比對不到允許清單，會被自動拒絕。',
+])
 
 reviewerRules = """你是自動流程裡負責審查的 agent，只能讀不能改。
 - 依照需求、AI 理解、做法、驗證，判斷這個任務的 diff 有沒有達成。
@@ -34,22 +39,21 @@ def writerRules(cli):
   return (writerBaseRules + "\n" + claudeShellRule) if cli == "claude" else writerBaseRules
 
 
-def tddWriteLines(qualityCommand, cli, skillPath=None, pythonCommand="python"):
-  if cli == "claude":
-    steps = [
-      "- 先用 Skill 工具載入 tdd-crap，照它的流程寫：一次一個行為，先寫測試並確認失敗，再寫實作、整理。",
-      f"- 品質檢查指令要照原樣執行，換別的寫法會被拒絕：{qualityCommand}",
-      f"- 只想快速跑幾個測試時，用 {pythonCommand} -m pytest 開頭的指令。",
-    ]
+qualityReportHint = "讀這個 worktree 的 .quality/report.json 找出超標的函式（測試輸出只附最後 50 行）"
+
+
+def tddWriteLines(cli, skillPath=None, pythonCommand="python"):
+  if cli == "claude" and not skillPath:
+    first = "- 先用 Skill 工具載入 tdd-crap，照它的流程寫：一次一個行為，先寫測試並確認失敗，再寫實作、整理。"
   else:
-    # Codex 沒有 Skill 工具，直接讀 skill 檔照著做
-    steps = [
-      f"- 先讀 {Path(skillPath or tddCrapDir) / 'SKILL.md'}，照它的流程寫：一次一個行為，先寫測試並確認失敗，再寫實作、整理。",
-      f"- 品質檢查指令：{qualityCommand}",
-    ]
-  if skillPath:
-    steps[0] = f"- 先讀 {Path(skillPath) / 'SKILL.md'}，照它的流程寫：一次一個行為，先寫測試並確認失敗，再寫實作、整理。"
-  return ["這個專案照 tdd-crap 開發：", *steps, "- pytest、coverage、radon 已經裝好，不用檢查或安裝。"]
+    # Codex 沒有 Skill 工具；專案內的 skill 也直接指檔案，兩種 CLI 讀到的是同一份
+    first = f"- 先讀 {Path(skillPath or tddCrapDir) / 'SKILL.md'}，照它的流程寫：一次一個行為，先寫測試並確認失敗，再寫實作、整理。"
+  return ["這個專案照 tdd-crap 開發：", first,
+          f"- Red、Green 和回歸都用 {pythonCommand} -m pytest 只跑相關的測試檔或測試。",
+          # 完整品質檢查約 11 分鐘，超過 Claude Code Bash 工具 10 分鐘的上限會被轉到背景，writer 交卷後還拖住程式
+          "- tdd-crap 開發循環第 6 步的品質檢查由流程在交付後執行，不必自己跑。",
+          f"- 品質檢查沒過被退回時，{qualityReportHint}。",
+          "- pytest、coverage、radon 已經裝好，不用檢查或安裝。"]
 
 
 tddReviewLines = [
@@ -98,7 +102,8 @@ def taskHeadline(plan, taskId, roundNumber):
 def testExecutionLines(testCommand, skipTests):
   if testCommand:
     return ["專案設定的測試指令（流程已將這個指令加入 writer 的允許清單）：", testCommand,
-            "- 請照原樣執行；針對性測試依該工具語法追加參數，保留上述指令前綴。",
+            "- 開發時只跑跟這次改動相關的測試：保留上述指令前綴，依該工具語法追加參數。",
+            "- 不要自己跑完整測試，也不要用背景執行跑測試；交付後流程會在這個 worktree 跑一次完整測試，結果決定能不能送審。",
             "- 測試設定已由流程提供，不需要讀取主專案的 .board/config.json。",
             "- 無法執行或測試失敗時據實回報，不要把未執行說成通過。"]
   if skipTests:
@@ -106,11 +111,14 @@ def testExecutionLines(testCommand, skipTests):
   return []
 
 
-def testFailureLines(lastTest):
+def testFailureLines(lastTest, tddCrap=False):
   names = lastTest.get("newFailures") or []
-  return ["上一輪的自動測試出現基準沒有的失敗，沒有送審；請修正到這些測試通過：",
-          *([f"- {name}" for name in names] or ["- （輸出裡分不出測試名稱，請看下面的測試輸出）"]),
-          "測試輸出最後 50 行：", "```", lastTest.get("tail", ""), "```"]
+  lines = ["上一輪的自動測試出現基準沒有的失敗，沒有送審；請修正到這些測試通過：",
+           *([f"- {name}" for name in names] or ["- （輸出裡分不出測試名稱，請看下面的測試輸出）"])]
+  if tddCrap:
+    # 覆蓋率或複雜度沒過時 pytest 全部通過，輸出裡沒有失敗的測試名稱，writer 只看輸出會找不到原因
+    lines.append(f"- 品質檢查的覆蓋率或複雜度沒過時，輸出裡沒有測試名稱，請{qualityReportHint}。")
+  return [*lines, "測試輸出最後 50 行：", "```", lastTest.get("tail", ""), "```"]
 
 
 def baselineFailureLines(testRun, baselineFailures):
@@ -133,14 +141,14 @@ def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", 
   ]
   if lastTest and lastTest.get("verdict") == "newFailure":
     # 被測試退回的這一輪沒有審查；更早的審查意見針對的是舊的改動，附上反而會讓 writer 改錯方向
-    parts += ["", *testFailureLines(lastTest)]
+    parts += ["", *testFailureLines(lastTest, bool(qualityCommand))]
   elif reviewMarkdown:
     parts += ["", "上一輪審查沒有通過，請修正「必改」的每一條（「建議」可以參考，不強制）：", reviewMarkdown]
   if userNote:
     parts += ["", "使用者補充：" + userNote]
   parts += ["", *testExecutionLines(testCommand, skipTests)]
   if qualityCommand:
-    parts += ["", *tddWriteLines(qualityCommand, cli, tddSkill, pythonCommand)]
+    parts += ["", *tddWriteLines(cli, tddSkill, pythonCommand)]
   parts += ["", "改完後要能照表格的「驗證」欄驗證。完成後依格式回覆。"]
   return "\n".join(parts)
 

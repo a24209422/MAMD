@@ -118,7 +118,7 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 
    - 此舊版入口仍使用全域 skill，需先執行 `python <agent-board>\install_skill.py`，安裝至 `~/.claude/skills/tdd-crap`；已有同名自訂 skill 時不覆蓋
    - `.board/config.json` 會開啟 `tddCrap`，`testCommand` 設成 tdd-crap 的品質檢查（每個函式的覆蓋率、循環複雜度）
-   - 寫程式的 agent 照 tdd-crap 的流程寫（Claude 用 Skill 工具載入，Codex 直接讀 skill 檔），可以執行品質檢查和 `python -m pytest`；審查時另外檢查測試有沒有真的在驗證行為
+   - 寫程式的 agent 照 tdd-crap 的流程寫（Claude 用 Skill 工具載入，Codex 直接讀 skill 檔），開發時用 `python -m pytest` 只跑相關的測試；完整的品質檢查由 Alfred 在「測試中」跑，writer 不必自己跑；審查時另外檢查測試有沒有真的在驗證行為
    - 專案的 Python 要裝好 pytest、coverage、radon；沒裝時 `init` 會印出安裝指令
    - `--source` 可以重複；沒指定時是 `src`、`tests`
 
@@ -128,7 +128,7 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
    { "maxParallel": 3, "maxRounds": 3, "timeoutMinutes": 30, "testCommand": "python -m pytest -q" }
    ```
 
-   寫程式的 agent 是 Claude 時，預設只能執行 `testCommand` 這一個 shell 指令（其他都會被拒絕）。需要其他指令時，加進 `writer.allowedTools`，Bash 和 PowerShell 兩種寫法都要列（Windows 上 Claude 用的是 PowerShell）：
+   寫程式的 agent 是 Claude 時，預設只能執行 `testCommand` 這一個 shell 指令（其他都會被拒絕）。需要其他指令時，加進 `writer.allowedTools`，建議 Bash 和 PowerShell 兩種寫法都列。Claude writer 跑測試時一律用 Bash 工具：Windows 上 PowerShell 的 `& "..."` 呼叫比對不到允許清單，會被自動拒絕：
 
    ```json
    { "testCommand": "python -m pytest -q", "writer": { "cli": "claude", "allowedTools": ["Bash(npm install*)", "PowerShell(npm install*)"] } }
@@ -139,8 +139,9 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
    - `writer`、`reviewer` 兩段（例如任務卡住後才加 `allowedTools`）改了之後，Alfred（指揮程式，檔名是 `conductor.py`）從下一個新啟動的 agent 開始用；其他設定改了要重開 Alfred 才生效
    - 任務寫完後的 `testCommand` 在背景執行，不擋派工、合併和審查，多個任務的測試可以同時跑；跑測試的任務狀態是「測試中」，總覽的 Alfred 卡片會列出這些任務（見「測試把關」）
    - plan 開始時的基準測試也在背景執行，跑基準時 Alfred 照常處理其他 plan 的派工、合併和審查（見「測試把關」）
+   - agent 交出最終結果後，如果它開的背景程式（例如被轉到背景的測試）讓 CLI 不退出，Alfred 等 10 秒寬限時間就結束它留下的整個程式樹，照常 commit、送測試或寫審查結果，不算中斷
    - Alfred 啟動前會檢查測試方式：沒有非空白的 `testCommand`，也沒有 `skipTests: true` 時，會先停止並提示初始化選項，不會等到 writer 執行測試才卡住
-   - `testCommand`／`skipTests` 執行中改動時會提示重啟 Alfred；目前執行仍沿用啟動時的指令與權限。每個 writer（含解衝突）都會收到同一份測試指令
+   - `testCommand`／`skipTests` 執行中改動時會提示重啟 Alfred；目前執行仍沿用啟動時的指令與權限。每個 writer（含解衝突）都會收到 Alfred 跑的同一個測試指令：Claude writer 收到 Bash 寫法（`testCommand`、`pythonCommand`），Codex writer 在 Windows 上收到 PowerShell 寫法（`writerTestCommand`、`writerPythonCommand`）
    - 寫程式、審查要用哪個 CLI 和模型，見「換模型」
 
 ## 換模型
@@ -204,7 +205,7 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 
 ### 測試把關
 
-有設定 `testCommand`（而且沒有 `skipTests`）時，測試沒過的任務不會送審：
+有設定 `testCommand`（而且沒有 `skipTests`）時，測試沒過的任務不會送審。驗證分兩層：writer 開發時只跑跟改動相關的測試，幾十秒內看到結果、同一輪自己修；完整的 `testCommand`（tdd-crap 專案是品質檢查）只由 Alfred 在「測試中」跑，writer 不自己跑，也不用背景執行跑測試。
 
 1. plan 核准後、派出第一個任務前，Alfred 先在 baseCommit 跑一次 `testCommand` 當基準。基準在暫時的 worktree（`<專案>-worktrees/P0007-baseline`）裡跑，跑完就移除；基準記下來之前這份 plan 不派工。基準在背景執行，不擋其他 plan。基準跑到一半時放棄這份 plan 或執行 `stop`，Alfred 會在下一輪就結束測試的整個程式樹並移除基準 worktree，不必等整套測試跑完；Ctrl+C 結束 Alfred 時也會一併結束基準。`stop` 之後 `resume`（或重開 Alfred）會重跑基準
 2. 每個任務寫完後，狀態先變成「測試中」，`testCommand` 在背景跑，結果跟基準比（規則見下面「測試判定」）；結果出來才變成待審查或退回。測試中的任務會列在總覽 Alfred 卡片的「測試中」那一行。暫停或重開 Alfred 時，跑到一半的測試會結束，繼續或重開後重跑

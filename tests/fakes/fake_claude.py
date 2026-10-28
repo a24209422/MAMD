@@ -4,7 +4,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fake_agent import argValue, demoDelay, emit, failEarly, reviewResults, startCall, writeFiles  # noqa: E402
+from fake_agent import (argValue, demoDelay, emit, failEarly, lingerAfterResult, reviewResults, startCall,  # noqa: E402
+                        writeFiles)
 
 
 def emitTool(name, fileName, callNumber):
@@ -23,15 +24,22 @@ def main():
   if call["kind"] == "review":
     emitTool("Read", "README.md", call["callNumber"])
     demoDelay()
-    structured = reviewResults[call["action"]]
+    # linger 只決定交出結果後要不要留著不退出，審查結果本身是通過
+    structured = reviewResults["pass" if call["action"] == "linger" else call["action"]]
   else:
     status, blockedReason, changed = writeFiles(call["action"], call["taskId"], call["callNumber"])
     for fileName in changed:
       emitTool("Edit" if call["action"] == "resolve" else "Write", fileName, call["callNumber"])
     demoDelay()
     structured = {"status": status, "summary": f"{call['taskId']} 完成", "blockedReason": blockedReason}
-  emit({"type": "result", "subtype": "success", "is_error": False, "session_id": sessionId,
-        "result": json.dumps(structured, ensure_ascii=False), "structured_output": structured})
+  if call["action"] == "lingererror":
+    emit({"type": "result", "subtype": "error_during_execution", "is_error": True, "session_id": sessionId,
+          "result": "假的錯誤結果"})
+  else:
+    emit({"type": "result", "subtype": "success", "is_error": False, "session_id": sessionId,
+          "result": json.dumps(structured, ensure_ascii=False), "structured_output": structured})
+  if call["action"] in ("linger", "lingererror"):
+    lingerAfterResult(call)
 
 
 if __name__ == "__main__":

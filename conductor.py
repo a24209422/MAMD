@@ -485,9 +485,15 @@ class Conductor:
     sessionId = taskState["sessionId"] if resume else (str(uuid.uuid4()) if cli == "claude" else None)
     return resume, sessionId
 
+  def writerCommands(self, cli):
+    testCommand, pythonCommand = self.config["testCommand"], self.config.get("pythonCommand", "python")
+    if cli == "claude":
+      # Claude 用 Bash 工具跑測試；writer* 是給 PowerShell 的 & "..." 寫法，Claude Code 的允許規則比對不到
+      return testCommand, pythonCommand
+    return self.config.get("writerTestCommand", testCommand), self.config.get("writerPythonCommand", pythonCommand)
+
   def writePrompt(self, plan, taskState, info):
-    testCommand = self.config.get("writerTestCommand", self.config["testCommand"])
-    pythonCommand = self.config.get("writerPythonCommand", self.config.get("pythonCommand", "python"))
+    testCommand, pythonCommand = self.writerCommands(info["cli"])
     if info["mode"] == "resolve":
       return buildResolvePrompt(plan, info["task"], info["round"], info["conflicts"], taskState["userNote"],
                                 testCommand, self.config.get("skipTests", False))

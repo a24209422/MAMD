@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -84,11 +85,19 @@ def writeFiles(action, taskId, callNumber):
       kept = [line for line in lines if not line.startswith(("<<<<<<<", "=======", ">>>>>>>"))]
       path.write_text("\n".join(kept) + "\n", encoding="utf-8")
       changed.append(path.name)
-  elif action in ("done", "slow", "conflict", "conflictcjk"):
+  elif action in ("done", "slow", "conflict", "conflictcjk", "linger", "lingererror"):
     fileName = {"conflict": "shared.txt", "conflictcjk": "說明.txt"}.get(action, f"{taskId}.txt")
     Path(fileName).write_text(f"{taskId} 第 {callNumber} 次\n", encoding="utf-8")
     changed.append(fileName)
   return "done", "", changed
+
+
+def lingerAfterResult(call):
+  """交出結果後留著背景程式不退出，模擬 writer 交卷時還有被轉到背景的測試在跑；子程式的 pid 寫給測試確認有被結束。"""
+  child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+  scenarioDir = Path(os.environ["FAKE_SCENARIO"]).parent
+  (scenarioDir / f"linger-{call['kind']}-{call['taskId']}-{call['callNumber']}.pid").write_text(str(child.pid))
+  time.sleep(120)
 
 
 def demoDelay():
