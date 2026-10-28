@@ -131,6 +131,81 @@ def test_statusAndIndex(gitProject, writePlan, capsys):
   assert (gitProject / "plans" / "_review" / "index.html").exists()
 
 
+def writeEvents(projectDir, events):
+  boardPath = board_core.boardDir(projectDir)
+  boardPath.mkdir(parents=True, exist_ok=True)
+  lines = [json.dumps(event, ensure_ascii=False) + "\n" for event in events]
+  (boardPath / board_core.eventsFileName).write_text("".join(lines), encoding="utf-8")
+
+
+def test_statsOfPlanMatchesReferenceValues(gitProject, writePlan, capsys):
+  from test_board_stats import p0001Events
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="系統監控", projectDir=gitProject)
+  writeEvents(gitProject, p0001Events())
+  assert board.cmdStats(gitProject, "P0001") == 0
+  lines = capsys.readouterr().out.splitlines()
+  assert lines[0] == "P0001 系統監控｜完成"
+  assert [line.strip() for line in lines[1:16]] == [
+    "任務：完成 5／放棄 0／全部 5",
+    "平均輪數：1.2",
+    "寫完次數：6",
+    "審查：6 次（通過 5、不通過 1）",
+    "第一次審查就通過：4/5",
+    "測試：1 次，失敗 0，退回 0",
+    "寫完後被退回：1/6",
+    "你的決定：1（retry 1）",
+    "還在等你：0",
+    "等你的時間：9 分 52 秒",
+    "agent 失敗、合併衝突：0、0",
+    "plan 退回：0",
+    "耗時：1 小時 13 分 29 秒",
+    "模型：writer：claude opus xhigh；reviewer：codex gpt-6.1-sol xhigh",
+    "每個任務的輪數：",
+  ]
+  assert [line.strip() for line in lines[16:]] == ["T1 1 輪｜完成", "T2 1 輪｜完成", "T3 2 輪｜完成",
+                                                   "T4 1 輪｜完成", "T5 1 輪｜完成"]
+
+
+def test_statsListsApprovedPlansAndTotal(gitProject, writePlan, capsys):
+  from test_board_stats import p0001Events
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="系統監控", projectDir=gitProject)
+  writePlan("0002-ok.md", cleanRows, planId="P0002", projectDir=gitProject)
+  writeEvents(gitProject, p0001Events())
+  board.cmdSubmit(gitProject, "P0002")
+  capsys.readouterr()
+  assert board.cmdStats(gitProject) == 0
+  summary = "任務 5／0／5｜平均輪數 1.2｜第一次審查就通過 4/5｜寫完後被退回 1/6｜你的決定 1｜耗時 1 小時 13 分 29 秒"
+  assert capsys.readouterr().out.splitlines() == [f"P0001 系統監控｜完成｜{summary}", f"總計（1 份）｜{summary}"]
+  # 待核准的 plan 不列，也算不出成效
+  assert board.cmdStats(gitProject, "P0002") == 1
+  assert "還沒核准過" in capsys.readouterr().out
+
+
+def test_statsBeforeAnyApprovalAndTaskNotStarted(gitProject, writePlan, capsys):
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
+  assert board.cmdStats(gitProject) == 0
+  assert capsys.readouterr().out.strip() == "還沒有核准過的 plan"
+  board.cmdSubmit(gitProject, "P0001")
+  board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y")
+  capsys.readouterr()
+  assert board.cmdStats(gitProject, "P0001") == 0
+  output = capsys.readouterr().out
+  assert "平均輪數：-" in output
+  assert "秒（進行中）" in output
+  assert "T2 還沒開始｜排隊中" in output
+
+
+def test_statsIsNotHumanOnly(gitProject, writePlan):
+  from test_board_stats import p0001Events
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
+  writeEvents(gitProject, p0001Events())
+  completed = subprocess.run([sys.executable, str(toolDir / "board.py"), "--project", str(gitProject), "stats", "P0001"],
+                             capture_output=True, text=True, encoding="utf-8", stdin=subprocess.PIPE)
+  assert completed.returncode == 0, completed.stderr
+  assert "平均輪數：1.2" in completed.stdout
+  assert "stats" not in board.humanOnlyCommands
+
+
 def test_humanOnlyCommandsRefusedWhenPiped(gitProject):
   completed = subprocess.run([sys.executable, str(toolDir / "board.py"), "--project", str(gitProject), "stop"],
                              capture_output=True, text=True, encoding="utf-8", stdin=subprocess.PIPE)
