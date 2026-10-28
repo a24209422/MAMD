@@ -197,6 +197,36 @@ def test_tasksPageDrawsTreeFromServer(dashboard, tmp_path):
 
 
 @needsBrowser
+def test_tasksPageShowsStatsOfApprovedPlan(dashboard, gitProject, tmp_path, monkeypatch, capsys):
+  # 一開始選的是待核准的 P0002，沒有成效；換到進行中的 P0001 才出現，數字和 board.py stats P0001 一樣
+  addProbe(tmp_path, monkeypatch, """
+    const read = () => ({
+      plan: app.selectedPlan, hidden: document.querySelector('#planStats').hidden,
+      items: [...document.querySelectorAll('#planStatsList dt')].map(dt => [dt.textContent, dt.nextElementSibling.textContent]),
+    });
+    const result = {};
+    setTimeout(() => { result.pending = read(); selectPlan('P0001'); }, 1500);
+    setTimeout(() => { result.approved = read(); document.body.dataset.probe = JSON.stringify(result); }, 3500);""")
+  probe = readProbe(renderDom(tmp_path, dashboard + "#tasks"))
+  assert probe["pending"] == {"plan": "P0002", "hidden": True, "items": []}
+  assert probe["approved"]["plan"] == "P0001" and probe["approved"]["hidden"] is False
+  capsys.readouterr()
+  assert board.cmdStats(gitProject, "P0001") == 0
+  cliLines = [line.strip() for line in capsys.readouterr().out.splitlines()[1:]]
+  pageLines = []
+  for label, value in probe["approved"]["items"]:
+    if label == "每個任務的輪數":
+      pageLines += [f"{label}：", *value.split("\n")]
+    else:
+      pageLines.append(f"{label}：{value}")
+  # 耗時算到現在，兩邊讀的時間不同，只比是不是進行中
+  elapsed = [line for line in pageLines if line.startswith("耗時：")]
+  assert len(elapsed) == 1 and elapsed[0].endswith("（進行中）")
+  assert [line for line in pageLines if not line.startswith("耗時：")] == \
+         [line for line in cliLines if not line.startswith("耗時：")]
+
+
+@needsBrowser
 def test_opsFeedAndBadges(dashboard, tmp_path):
   dom = renderDom(tmp_path, dashboard + "#token=" + token)
   assert "開始寫程式" in dom

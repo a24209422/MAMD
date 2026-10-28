@@ -4,7 +4,7 @@ const abandonableStatuses = ['草稿', '待核准', '退回', '進行中'];
 const severityOrder = [['red', '紅', 'var(--red)'], ['orange', '橘', 'var(--orange)'], ['yellow', '黃', 'var(--amber)']];
 const planKindLabels = { plan: 'PLAN', requirement: '需求', decision: '做法', task: '任務', verify: '驗證' };
 const gapLabels = { missing: '漏做', extra: '多做', incomplete: '資訊不完整' };
-const planUi = { side: 'all', module: 'all', detail: null, detailText: '', confirmAbandon: false, message: '' };
+const planUi = { side: 'all', module: 'all', detail: null, detailText: '', treeText: '', confirmAbandon: false, message: '' };
 
 function planSides(plans) {
   return [...new Set(plans.flatMap(plan => plan.area.map(item => item.side)))];
@@ -58,7 +58,10 @@ function renderPlanPicks(scoped, plan) {
 function clearPlanDetail(message, isError = false) {
   planUi.detail = null;
   planUi.detailText = '';
+  planUi.treeText = '';
   $('#planStatus').hidden = true;
+  $('#planStats').hidden = true;
+  $('#planStatsList').innerHTML = '';
   $('#planMeta').innerHTML = '';
   $('#planActions').innerHTML = '';
   $('#planProblems').innerHTML = `<p class="${isError ? 'op-msg' : 'muted'}">${escapeHtml(message)}</p>`;
@@ -94,7 +97,64 @@ async function loadPlanDetail(planId) {
   if (planId !== app.selectedPlan || app.page !== 'tasks' || text === planUi.detailText) return;
   planUi.detailText = text;
   planUi.detail = JSON.parse(text);
-  renderPlanDetail();
+  // 進行中的 plan 耗時每次輪詢都會變，只有成效變了就只重畫成效，追溯樹不動
+  const { stats, ...rest } = planUi.detail;
+  const treeText = JSON.stringify(rest);
+  if (treeText !== planUi.treeText) {
+    planUi.treeText = treeText;
+    renderPlanDetail();
+  }
+  renderPlanStats();
+}
+
+// 數字的寫法和 board.py stats P0007 一樣，兩邊對得起來
+function statsDuration(seconds) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const parts = hours ? [`${hours} 小時`] : [];
+  if (hours || minutes) parts.push(`${minutes} 分`);
+  return [...parts, `${seconds % 60} 秒`].join(' ');
+}
+
+function statsModels(items) {
+  const names = items.map(combo => Object.values(combo).filter(Boolean).join(' ')).filter(Boolean);
+  return names.join('、') || '-';
+}
+
+function statsDecisions(decisions) {
+  const counts = ['retry', 'done', 'abandon'].filter(action => decisions[action]).map(action => `${action} ${decisions[action]}`);
+  return counts.length ? `${decisions.total}（${counts.join('、')}）` : String(decisions.total);
+}
+
+function statsItems(stats) {
+  const { tasks, reviews, tests } = stats;
+  const rounds = stats.taskRounds.map(item => `${item.task} ${item.rounds ? `${item.rounds} 輪` : '還沒開始'}｜${item.status}`);
+  return [
+    ['任務', `完成 ${tasks.done}／放棄 ${tasks.abandoned}／全部 ${tasks.total}`],
+    ['平均輪數', stats.averageRounds === null ? '-' : String(stats.averageRounds)],
+    ['寫完次數', String(stats.written)],
+    ['審查', `${reviews.total} 次（通過 ${reviews.passed}、不通過 ${reviews.failed}）`],
+    ['第一次審查就通過', `${stats.firstReviewPassed.passed}/${stats.firstReviewPassed.reviewed}`],
+    ['測試', `${tests.runs} 次，失敗 ${tests.failed}，退回 ${tests.returned}`],
+    ['寫完後被退回', `${stats.returnedAfterWrite.returned}/${stats.returnedAfterWrite.written}`],
+    ['你的決定', statsDecisions(stats.decisions)],
+    ['還在等你', String(stats.waiting)],
+    ['等你的時間', statsDuration(stats.waitSeconds)],
+    ['agent 失敗、合併衝突', `${stats.agentFailed}、${stats.conflicts}`],
+    ['plan 退回', String(stats.planRejected)],
+    ['耗時', statsDuration(stats.duration.seconds) + (stats.duration.inProgress ? '（進行中）' : '')],
+    ['模型', `writer：${statsModels(stats.models.writer)}；reviewer：${statsModels(stats.models.reviewer)}`],
+    ['每個任務的輪數', rounds.join('\n')],
+  ];
+}
+
+// 還沒核准過的 plan 沒有成效，整個區塊藏起來
+function renderPlanStats() {
+  const stats = planUi.detail && planUi.detail.stats;
+  $('#planStats').hidden = !stats;
+  $('#planStatsList').innerHTML = stats
+    ? statsItems(stats).map(([label, value]) => `<dt>${label}</dt><dd>${escapeHtml(value)}</dd>`).join('')
+    : '';
 }
 
 function renderPlanDetail() {
