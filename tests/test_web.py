@@ -204,10 +204,19 @@ def addProbe(tmp_path, monkeypatch, script):
   monkeypatch.setitem(server.staticFiles, "/js/main.js", (str(main), "text/javascript; charset=utf-8"))
 
 
+def probeMatch(dom):
+  return re.search(r'data-probe="([^"]*)"', dom)
+
+
 def readProbe(dom):
-  match = re.search(r'data-probe="([^"]*)"', dom)
+  match = probeMatch(dom)
   assert match, "頁面裡的量測沒有跑完"
   return json.loads(unescape(match.group(1)))
+
+
+def probeReady(pick):
+  # 量測在計時器到了就寫出，畫面還沒有資料時也會寫；要等第一個斷言要看的值有資料才算畫好，值對不對仍交給斷言
+  return lambda dom: bool(probeMatch(dom)) and bool(pick(readProbe(dom)))
 
 
 def sectionTag(dom, page):
@@ -398,7 +407,7 @@ def test_overview_has_main_agents_and_two_children_per_role(dashboard, gitProjec
         document.body.dataset.probe = JSON.stringify(result);
       }, 500);
     }, 1000);""")
-  dom = renderDom(tmp_path, dashboard, "--window-size=1440,1200")
+  dom = renderUntil(tmp_path, dashboard, probeReady(lambda probe: probe["main"]), "--window-size=1440,1200")
   probe = readProbe(dom)
   assert probe["main"] == ["writer", "reviewer"]
   assert probe["children"] == ["writer-sub1", "writer-sub2", "reviewer-sub1", "reviewer-sub2"]
@@ -429,7 +438,7 @@ def test_main_status_is_its_own_task_not_a_child_summary(dashboard, tmp_path, mo
         .every(node => node.dataset.state === 'paused');
       document.body.dataset.probe = JSON.stringify(result);
     }, 1000);""")
-  probe = readProbe(renderDom(tmp_path, dashboard))
+  probe = readProbe(renderUntil(tmp_path, dashboard, probeReady(lambda probe: probe.get("mainState"))))
   assert probe["mainState"] == "idle" and "待命" in probe["mainText"]
   assert "P0001 T1" not in probe["mainText"]
   assert probe["childState"] == "warn" and "75%" in probe["childText"]
@@ -450,7 +459,7 @@ def test_single_capacity_shows_only_mains_and_no_child_cards(dashboard, gitProje
         text: document.querySelector('#squads').textContent,
       });
     }, 1000);""")
-  probe = readProbe(renderDom(tmp_path, dashboard))
+  probe = readProbe(renderUntil(tmp_path, dashboard, probeReady(lambda probe: probe["main"])))
   assert probe["main"] == ["writer", "reviewer"]
   assert probe["children"] == 0 and "無子 agent 名額" in probe["text"]
 
@@ -473,8 +482,8 @@ def test_main_and_child_cards_fit_the_window(dashboard, gitProject, tmp_path, mo
       });
     }, 1500);""")
   screenshot = tmp_path / f"agent-overview-{width}.png"
-  dom = renderDom(tmp_path, dashboard + "#token=" + token,
-                  f"--window-size={width},1200", f"--screenshot={screenshot}")
+  dom = renderUntil(tmp_path, dashboard + "#token=" + token, probeReady(lambda probe: probe["total"]),
+                    f"--window-size={width},1200", f"--screenshot={screenshot}")
   probe = readProbe(dom)
   assert probe["total"] == 6
   assert probe["overflow"] <= 0 and probe["right"] <= probe["viewport"]
@@ -483,7 +492,7 @@ def test_main_and_child_cards_fit_the_window(dashboard, gitProject, tmp_path, mo
 
 @needsBrowser
 def test_overviewShowsConductorGroupsAndAgents(dashboard, tmp_path):
-  dom = renderDom(tmp_path, dashboard + "#token=" + token)
+  dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "Alfred<span>（指揮程式）</span>" in dom)
   assert "Alfred<span>（指揮程式）</span>" in dom and "沒有啟動" in dom
   assert "進行中 1 份 plan" in dom and "P0001 批次上傳" in dom
   assert 'data-agent="writer-sub1"' in dom and 'data-agent="reviewer-sub1"' in dom
@@ -499,12 +508,14 @@ def test_overviewLeadCardListsTestingTasks(dashboard, gitProject, tmp_path):
   # 寫完在背景跑測試時列在 Alfred 卡片；測試跑完轉成待審查就不再列出
   appendEvent(gitProject, "taskWritten", plan="P0001", task="T1", roundNumber=1,
               data={"commit": "c1", "summary": "完成", "testing": True})
-  dom = renderDom(tmp_path, dashboard + "#token=" + token)
+  dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "測試中：P0001 T1" in dom)
   lead = re.search(r'id="leadCard".*?</article>', dom, re.S)
   assert lead and "測試中：P0001 T1" in lead.group(0)
   appendEvent(gitProject, "testRun", plan="P0001", task="T1", roundNumber=1,
               data={"passed": True, "tail": "ok", "verdict": "passed", "newFailures": []})
-  assert "測試中：" not in renderDom(tmp_path, dashboard + "#token=" + token)
+  # 要看的是「測試中：」不在畫面上，沒有資料的畫面也不在；等 Alfred 卡片畫出來才算有資料
+  dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "Alfred<span>（指揮程式）</span>" in dom)
+  assert "測試中：" not in dom
 
 
 @needsBrowser
@@ -512,7 +523,7 @@ def test_overviewShowsRunningCliUntilMainTaskEnds(dashboard, gitProject, tmp_pat
   (gitProject / ".board" / "config.json").write_text(json.dumps({
     "maxParallel": 2, "writer": {"cli": "codex", "model": "gpt-6.1-sol"}, "reviewer": {"cli": "claude", "model": "opus"},
   }), encoding="utf-8")
-  dom = renderDom(tmp_path, dashboard + "#token=" + token)
+  dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "Claude<span>（寫程式）</span>" in dom)
   # writer 還在執行舊的 Claude 任務，大卡要呈現真實執行身分；閒置的 reviewer 使用新設定。
   assert "Claude<span>（寫程式）</span>" in dom and "Claude<span>（審查）</span>" in dom
   assert "Codex<span>（寫程式）</span>" not in dom and "opus" in dom
@@ -526,19 +537,20 @@ def test_idleMainShowsTheNewRoleConfiguration(dashboard, gitProject, tmp_path):
   }), encoding="utf-8")
   appendEvent(gitProject, "taskWritten", plan="P0001", task="T1", agent="writer", roundNumber=1,
               data={"commit": "abc", "summary": "完成任務"})
-  dom = renderDom(tmp_path, dashboard)
+  dom = renderUntil(tmp_path, dashboard, lambda dom: "Codex<span>（寫程式）</span>" in dom)
   assert "Codex<span>（寫程式）</span>" in dom and "Claude<span>（審查）</span>" in dom
   assert "gpt-6.1-sol" in dom and "opus" in dom
 
 
 @needsBrowser
 def test_withoutTokenPageIsReadOnly(dashboard, tmp_path):
-  assert "唯讀：請用 server.py 印出的網址重新開啟" in renderDom(tmp_path, dashboard)
+  readOnly = "唯讀：請用 server.py 印出的網址重新開啟"
+  assert readOnly in renderUntil(tmp_path, dashboard, lambda dom: readOnly in dom)
 
 
 @needsBrowser
 def test_tasksPageDrawsTreeFromServer(dashboard, tmp_path):
-  dom = renderDom(tmp_path, dashboard + "#tasks")
+  dom = renderUntil(tmp_path, dashboard + "#tasks", lambda dom: 'data-plan-side="前端"' in dom)
   assert 'data-plan-side="前端"' in dom and 'data-plan-side="後端"' in dom
   assert "P0002 背景縮圖" in dom
   assert "橘｜" in dom and "沒有對應需求" in dom
@@ -558,7 +570,7 @@ def test_tasksPageShowsStatsOfApprovedPlan(dashboard, gitProject, tmp_path, monk
     const result = {};
     setTimeout(() => { result.pending = read(); selectPlan('P0001'); }, 1500);
     setTimeout(() => { result.approved = read(); document.body.dataset.probe = JSON.stringify(result); }, 3500);""")
-  probe = readProbe(renderDom(tmp_path, dashboard + "#tasks"))
+  probe = readProbe(renderUntil(tmp_path, dashboard + "#tasks", probeReady(lambda probe: probe["pending"]["plan"])))
   assert probe["pending"] == {"plan": "P0002", "hidden": True, "items": []}
   assert probe["approved"]["plan"] == "P0001" and probe["approved"]["hidden"] is False
   capsys.readouterr()
@@ -579,7 +591,7 @@ def test_tasksPageShowsStatsOfApprovedPlan(dashboard, gitProject, tmp_path, monk
 
 @needsBrowser
 def test_opsFeedAndBadges(dashboard, tmp_path):
-  dom = renderDom(tmp_path, dashboard + "#token=" + token)
+  dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "開始寫程式" in dom)
   assert "開始寫程式" in dom
   # 異常：等你處理（紅）、conductor 沒在跑、Context 偏高 → 3 筆，有紅色所以徽章是紅的
   assert '<b class="badge" data-tone="red">3</b>' in dom
@@ -589,7 +601,7 @@ def test_opsFeedAndBadges(dashboard, tmp_path):
 
 @needsBrowser
 def test_consoleShowsBusyAgentDetail(dashboard, tmp_path):
-  dom = renderDom(tmp_path, dashboard + "#console")
+  dom = renderUntil(tmp_path, dashboard + "#console", lambda dom: "（Claude・寫程式）" in dom)
   assert "（Claude・寫程式）" in dom
   assert "P0001 T1 後端批次 API" in dom and "第 1/3 輪" in dom
   assert "「Astra 對話窗」還沒有接資料" in dom and "「系統資源監控」還沒有接資料" not in dom
@@ -603,7 +615,8 @@ def test_consoleShowsBusyAgentDetail(dashboard, tmp_path):
 
 @needsBrowser
 def test_systemMonitorPageMountsCardsAndCharts(dashboard, gitProject, tmp_path):
-  dom = renderDom(tmp_path, dashboard + "#system-monitor")
+  # 換頁不用等資料，先看的區塊顯示與否沒有資料也成立；等監控卡片畫出來才算有資料
+  dom = renderUntil(tmp_path, dashboard + "#system-monitor", lambda dom: 'class="smon-card"' in dom)
   assert "hidden" not in sectionTag(dom, "system-monitor")
   assert "hidden" in sectionTag(dom, "overview") and "hidden" in sectionTag(dom, "placeholder")
   link = railLink(dom, "system-monitor")
@@ -621,7 +634,7 @@ def test_systemMonitorPageMountsCardsAndCharts(dashboard, gitProject, tmp_path):
 @needsBrowser
 def test_topologyLinkRedirectsToSystemMonitor(dashboard, tmp_path, monkeypatch):
   addProbe(tmp_path, monkeypatch, "document.body.dataset.probe = JSON.stringify({ hash: location.hash, page: app.page });")
-  dom = renderDom(tmp_path, dashboard + "#topology")
+  dom = renderUntil(tmp_path, dashboard + "#topology", probeReady(lambda probe: probe.get("page")))
   assert readProbe(dom) == {"hash": "#system-monitor", "page": "system-monitor"}
   assert "hidden" not in sectionTag(dom, "system-monitor")
   # 左側導覽不再有空白的拓撲頁
@@ -641,7 +654,7 @@ def test_consoleSummaryOpensFullPage(dashboard, tmp_path, monkeypatch):
         cards: document.querySelectorAll('#systemMonitorPage .smon-card').length,
       });
     }, 2500);""")
-  dom = renderDom(tmp_path, dashboard + "#console")
+  dom = renderUntil(tmp_path, dashboard + "#console", probeReady(lambda probe: probe["cards"]))
   assert readProbe(dom) == {"focusable": True, "hash": "#system-monitor", "page": "system-monitor", "shown": True, "cards": 3}
 
 
@@ -672,7 +685,7 @@ def test_switchingPagesKeepsOtherPagesAndStopsMonitorPolling(dashboard, tmp_path
       result.onConsole = monitorCalls;
       document.body.dataset.probe = JSON.stringify(result);
     }, 4800);""")
-  dom = renderDom(tmp_path, dashboard + "#system-monitor")
+  dom = renderUntil(tmp_path, dashboard + "#system-monitor", probeReady(lambda probe: probe["visits"]))
   probe = readProbe(dom)
   # 標籤在當下那一頁記錄；最後停在控制台，DOM 裡的標籤已經換掉
   assert probe["visits"] == [
@@ -703,7 +716,9 @@ def test_narrowWindowStacksMonitorCardsWithoutOverflow(dashboard, tmp_path, monk
         chartLefts: lefts('.smon-chart'), chartTops: tops('.smon-chart'),
       });
     }, 3000);""")
-  dom = renderDom(tmp_path, dashboard + "#system-monitor", "--window-size=560,1000")
+  # 視窗寬度沒有資料也量得到；等監控卡片畫出來才算有資料
+  dom = renderUntil(tmp_path, dashboard + "#system-monitor", probeReady(lambda probe: probe["cardTops"]),
+                    "--window-size=560,1000")
   probe = readProbe(dom)
   assert probe["width"] <= 760
   assert probe["documentOverflow"] <= 0 and probe["pageOverflow"] <= 0 and probe["contentOverflow"] <= 1
@@ -716,14 +731,15 @@ def test_narrowWindowStacksMonitorCardsWithoutOverflow(dashboard, tmp_path, monk
 
 @needsBrowser
 def test_assistantGreetsAndOffersQuickAsks(dashboard, tmp_path):
-  dom = renderDom(tmp_path, dashboard)
+  dom = renderUntil(tmp_path, dashboard, lambda dom: "你好，我是儀表板助手" in dom)
   assert "你好，我是儀表板助手" in dom
   assert 'data-ask="等你處理的有哪些？"' in dom and 'data-ask="writer 在做什麼？"' in dom
 
 
 @needsBrowser
 def test_modelsPageShowsRoleSettings(dashboard, tmp_path):
-  dom = renderDom(tmp_path, dashboard + "#models")
+  # 換頁不用等資料；等角色目前的設定畫出來才算有資料
+  dom = renderUntil(tmp_path, dashboard + "#models", lambda dom: "目前：Claude・sonnet" in dom)
   section = re.search(r'<section class="page models-page"[^>]*>', dom)
   assert section and "hidden" not in section.group(0)
   assert "目前：Claude・sonnet" in dom and "目前：Codex・預設模型" in dom
@@ -747,7 +763,7 @@ def test_modelsPageLoadsCliModelsAndEfforts(dashboard, tmp_path, monkeypatch):
   main.write_text(f"sessionStorage.setItem('boardToken', '{token}');\n" +
                   (toolDir / "web/js/main.js").read_text(encoding="utf-8"), encoding="utf-8")
   monkeypatch.setitem(server.staticFiles, "/js/main.js", (str(main), "text/javascript; charset=utf-8"))
-  dom = renderDom(tmp_path, dashboard + "#models")
+  dom = renderUntil(tmp_path, dashboard + "#models", lambda dom: "CLI New Version" in dom)
   assert "CLI New Version" in dom and "full-model-v2" in dom
   assert 'data-role-effort="writer"' in dom and 'value="high"' in dom
   assert "重新整理模型" in dom
