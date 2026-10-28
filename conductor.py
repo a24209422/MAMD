@@ -81,6 +81,48 @@ def compareWithBaseline(baseline, passed, failures):
   return "preexisting", []
 
 
+class BackgroundTestJob:
+  """在背景執行緒跑任務的測試；結果留給主執行緒的 collectFinishedJobs 寫事件，事件只由主執行緒寫。"""
+
+  def __init__(self, runTestCommand, cwd):
+    self.runTestCommand = runTestCommand
+    self.cwd = cwd
+    self.lock = threading.Lock()
+    self.process = None
+    self.killed = False
+    self.result = None
+    self.error = None
+    self.thread = threading.Thread(target=self.run, daemon=True)
+
+  def start(self):
+    self.thread.start()
+    return self
+
+  def run(self):
+    try:
+      self.result = self.runTestCommand(self.cwd, self.started)
+    except Exception as error:
+      self.error = error
+
+  def started(self, process):
+    with self.lock:
+      self.process = process
+      killNow = self.killed
+    # 測試程式還沒啟動就被要求結束時，啟動後立刻結束，不留下沒人等結果的測試
+    if killNow:
+      board_agents.killProcessTree(process.pid)
+
+  def poll(self):
+    return not self.thread.is_alive()
+
+  def kill(self):
+    with self.lock:
+      self.killed = True
+      process = self.process
+    if process is not None and process.poll() is None:
+      board_agents.killProcessTree(process.pid)
+
+
 def formatEvent(event):
   timeText = (event.get("time") or "")[11:19]
   who = " ".join(part for part in (event.get("plan"), event.get("task"), event.get("agent")) if part)
@@ -193,6 +235,8 @@ class Conductor:
       self.stopJobsOfInactiveTasks(state)
     self.collectFinishedJobs(plans, state)
     plans, state = self.currentState()
+    if not state["paused"]:
+      self.startTests(state)
     self.ensurePlanWorktrees(state)
     self.mergeReadyTasks(state)
     plans, state = self.currentState()
@@ -226,13 +270,15 @@ class Conductor:
       info = self.jobs.get(key)
       if info is None:
         continue
-      if recordInterruption and info["job"].process.poll() is not None:
+      finished = info["job"].poll() if info["kind"] == "test" else info["job"].process.poll() is not None
+      if recordInterruption and finished:
         # 已經自己結束的 agent 可能寫好了成果，留給 collectFinishedJobs 照常處理，暫停時才不會丟掉
         continue
       del self.jobs[key]
       info["job"].kill()
       info["job"].poll()
-      if recordInterruption:
+      # 測試不記中斷：狀態留在測試中，繼續或重開 Alfred 後 startTests 會重跑
+      if recordInterruption and info["kind"] != "test":
         self.event("taskInterrupted", info, stage=info["kind"])
 
   def stopJobsOfInactiveTasks(self, state):
@@ -271,6 +317,8 @@ class Conductor:
       try:
         if info["kind"] == "write":
           self.finishWrite(info)
+        elif info["kind"] == "test":
+          self.finishTests(state["plans"][info["plan"]], info)
         else:
           self.finishReview(plans[info["plan"]], state["tasks"][key], info)
       except BoardError:
@@ -389,8 +437,7 @@ class Conductor:
       # 最新的 plan 分支合併進來沒有衝突（例如你已經在任務的 worktree 處理過），不必叫寫程式的 agent，直接測試、審查
       info["agent"] = None
       self.event("taskWritten", info, commit=board_git.headCommit(worktree), summary="合併最新的 plan 分支，沒有衝突",
-                 mode="resolve", conflicts=[])
-      self.runTests(info)
+                 mode="resolve", conflicts=[], testing=bool(self.config["testCommand"]))
       return
     # 先登記再寫事件：事件寫入失敗時 agent 不會變成沒人管的孤兒
     key = taskKey(info["plan"], info["task"])
@@ -473,27 +520,44 @@ class Conductor:
       # 例如專案的 pre-commit hook 失敗；不記事件的話任務會永遠停在「寫程式中」
       self.event("needsYou", info, kind="commitFailed", reason=f"commit 失敗：{error}")
       return
+    # 有測試指令時先進測試中，由 startTests 在背景跑，不擋其他任務
     self.event("taskWritten", info, commit=commit, summary=result["summary"], mode=info["mode"],
-               conflicts=info.get("conflicts", []), **session)
-    self.runTests(info)
+               conflicts=info.get("conflicts", []), testing=bool(self.config["testCommand"]), **session)
 
-  def runTests(self, info):
+  def startTests(self, state):
     if not self.config["testCommand"]:
       return
-    passed, tail, failures = self.runTestCommand(info["worktree"])
+    # 測試不佔寫程式、審查的名額，也不限同時數量：同時進行的任務數已經被寫程式的名額限制住
+    for taskState in tasksWithStatus(state, TaskStatus.testing):
+      key = taskKey(taskState["plan"], taskState["task"])
+      planState = state["plans"][taskState["plan"]]
+      if key in self.jobs or planState["status"] != PlanStatus.active or self.needsTestBaseline(planState):
+        continue
+      info = {"kind": "test", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
+              "agent": taskState["agent"]}
+      worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
+      info["job"] = BackgroundTestJob(self.runTestCommand, worktree).start()
+      self.jobs[key] = info
+
+  def finishTests(self, planState, info):
+    job = info["job"]
+    if job.error is not None:
+      raise job.error
+    passed, tail, failures = job.result
     # verdict 在這裡算好寫進事件：之後重播事件時，結果才不會因為基準或輸出不同而改變
-    baseline = self.currentState()[1]["plans"][info["plan"]]["testBaseline"]
-    verdict, newFailures = compareWithBaseline(baseline, passed, failures)
+    verdict, newFailures = compareWithBaseline(planState["testBaseline"], passed, failures)
     self.event("testRun", info, passed=passed, tail=tail, verdict=verdict, newFailures=newFailures)
 
-  def runTestCommand(self, cwd):
+  def runTestCommand(self, cwd, onStarted=None):
     command = self.config["testCommand"]
-    # 測試在這裡同步執行：跑測試的這段時間 conductor 不排新工作，所以測試指令要夠快
     # 不用 subprocess.run：Windows 上逾時只會結束 cmd.exe，孫行程還握著管線，communicate 會一直等
     options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
     process = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                encoding="utf-8", errors="replace", **options)
+    if onStarted:
+      # 背景測試要拿到程式才能在暫停、放棄時結束整個程式樹
+      onStarted(process)
     try:
       output, _ = process.communicate(timeout=self.timeoutSeconds())
       passed = process.returncode == 0
