@@ -12,6 +12,8 @@ from pathlib import Path
 from board_review import reviewResultSchema, writeResultSchema
 from board_core import compactTokenLimit
 
+# 交出結果後讓 CLI 自己收尾（例如寫完 session，下一輪 --resume 才接得回）的秒數；超過才結束它留下的程式
+resultGraceSeconds = 10
 # 不用 "limit reached"：Claude 的 "Context limit reached" 是對話太長，不是額度用完
 quotaPatterns = ["usage limit", "rate limit", "rate_limit", "quota", "hit your limit", "out of extra usage", "額度"]
 deniedShellPatterns = [
@@ -49,6 +51,8 @@ class AgentJob:
     self.exitCode = None
     self.timedOut = False
     self.killed = False
+    self.stoppedAfterResult = False
+    self.resultAt = None
     self.process = None
     self.reader = None
     self.startedAt = None
@@ -87,17 +91,34 @@ class AgentJob:
           self.lineParser(line, self.activity)
         except (ValueError, AttributeError, TypeError) as error:
           self.activity["parseError"] = str(error)
+        # 寬限時間從第一次看到最終結果起算；目前只有 Claude 的解析會記 result
+        if self.resultAt is None and self.activity.get("result"):
+          self.resultAt = time.time()
 
   def poll(self):
     if self.process.poll() is None:
-      if time.time() - self.startedAt > self.timeoutSeconds:
+      if self.resultAt is not None and time.time() - self.resultAt > resultGraceSeconds:
+        # agent 已經交卷，但它開的背景程式（例如被轉到背景的測試）讓 CLI 不退出；結果已經拿到，不必再等
+        self.stopAfterResult()
+      elif time.time() - self.startedAt > self.timeoutSeconds:
         self.timedOut = True
         self.kill()
-      return False
+        return False
+      else:
+        return False
     # 程式結束後，讀取執行緒可能還在把最後幾行寫進紀錄
     self.reader.join(timeout=5)
     self.exitCode = self.process.returncode
     return True
+
+  def stopAfterResult(self):
+    # 不設 killed：conductor 看到 killed 會當成中斷、丟掉這一輪的成果
+    self.stoppedAfterResult = True
+    killProcessTree(self.process.pid)
+    try:
+      self.process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+      self.process.kill()
 
   def kill(self):
     if self.process.poll() is not None:

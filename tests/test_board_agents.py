@@ -67,6 +67,77 @@ def test_killStopsChildProcesses(tmp_path):
   assert isAlive(childPid) is False
 
 
+lingerAfterResult = ("import json, subprocess, sys, time\n"
+                     "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                     "print(json.dumps({'type': 'system', 'subtype': 'init', 'child': child.pid}), flush=True)\n"
+                     "print(json.dumps({'type': 'result', 'is_error': False, 'structured_output': {'status': 'done'}}),"
+                     " flush=True)\n"
+                     "time.sleep(60)\n")
+
+
+def childPidOf(logPath):
+  return json.loads(logPath.read_text(encoding="utf-8").splitlines()[0])["child"]
+
+
+def test_jobStopsProcessTreeAfterResultGracePeriod(tmp_path, monkeypatch):
+  monkeypatch.setattr(board_agents, "resultGraceSeconds", 0.5)
+  job = board_agents.AgentJob([sys.executable, "-c", lingerAfterResult], tmp_path, "", tmp_path / "log.txt",
+                              board_agents.parseClaudeLine, 60).start()
+  started = time.time()
+  waitJob(job)
+  # 交出結果後只等寬限時間，不會等到 60 秒的逾時或子程式自己結束
+  assert time.time() - started < 15
+  assert job.stoppedAfterResult is True
+  assert job.killed is False and job.timedOut is False
+  assert board_agents.claudeFinalResult(job.activity) == ({"status": "done"}, "")
+  time.sleep(0.5)
+  assert isAlive(childPidOf(tmp_path / "log.txt")) is False
+
+
+def test_jobWaitsForGracePeriodBeforeStopping(tmp_path, monkeypatch):
+  monkeypatch.setattr(board_agents, "resultGraceSeconds", 30)
+  job = board_agents.AgentJob([sys.executable, "-c", lingerAfterResult], tmp_path, "", tmp_path / "log.txt",
+                              board_agents.parseClaudeLine, 60).start()
+  deadline = time.time() + 10
+  while not job.activity.get("result"):
+    assert time.time() < deadline
+    time.sleep(0.05)
+  # 寬限時間內讓 CLI 自己收尾（例如寫完 session），還不結束
+  assert job.poll() is False and job.stoppedAfterResult is False
+  job.kill()
+  waitJob(job)
+
+
+def test_stopAfterResultFallsBackToKillWhenTreeDoesNotExit(tmp_path, monkeypatch):
+  class StubbornProcess:
+    pid = 12345
+    killedDirectly = False
+
+    def wait(self, timeout):
+      raise subprocess.TimeoutExpired("agent", timeout)
+
+    def kill(self):
+      self.killedDirectly = True
+
+  treeKills = []
+  monkeypatch.setattr(board_agents, "killProcessTree", treeKills.append)
+  job = board_agents.AgentJob(["agent"], tmp_path, "", tmp_path / "log.txt", board_agents.parseClaudeLine, 30)
+  job.process = StubbornProcess()
+  job.stopAfterResult()
+  # 程式樹結束不了時至少結束 agent 本身，conductor 才不會一直等它
+  assert treeKills == [12345] and job.process.killedDirectly is True
+  assert job.stoppedAfterResult is True and job.killed is False
+
+
+def test_jobThatExitsAfterResultIsNotMarkedStopped(tmp_path, monkeypatch):
+  monkeypatch.setattr(board_agents, "resultGraceSeconds", 0.5)
+  script = "import json; print(json.dumps({'type': 'result', 'is_error': False, 'structured_output': {}}))"
+  job = board_agents.AgentJob([sys.executable, "-c", script], tmp_path, "", tmp_path / "log.txt",
+                              board_agents.parseClaudeLine, 30).start()
+  waitJob(job)
+  assert job.exitCode == 0 and job.stoppedAfterResult is False and job.killed is False
+
+
 def test_resolveCommand():
   assert board_agents.resolveCommand(["python", "fake.py"], "claude") == ["python", "fake.py"]
   assert len(board_agents.resolveCommand(None, "git")) == 1

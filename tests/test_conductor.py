@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import time
@@ -350,16 +351,32 @@ def test_tddCrapAddsStepsToPromptsAndAllowsPytest(startBoard):
   assert ".quality/report.json" in readCalls(scenarioDir, "review")[0]["prompt"]
 
 
-def test_projectTddCommandsReachWriterWithoutChangingRunner(startBoard):
-  conductor, scenarioDir = startBoard(oneTask, testCommand="git --version", tddCrap=True,
-                                    tddSkill=".agents/skills/tdd-crap", writerTestCommand="git --version --build-options",
-                                    writerPythonCommand='& "project-python"')
+projectTddCommands = {"testCommand": "git --version", "tddCrap": True, "tddSkill": ".agents/skills/tdd-crap",
+                      "pythonCommand": '"project-python"', "writerTestCommand": "git --version --build-options",
+                      "writerPythonCommand": '& "project-python"'}
+
+
+def test_claudeWriterGetsBashCommandsWithoutChangingRunner(startBoard):
+  conductor, scenarioDir = startBoard(oneTask, **projectTddCommands)
+  runUntil(conductor, planDone)
+  write = readCalls(scenarioDir, "write")[0]
+  # PowerShell 的 & "..." 呼叫比對不到允許規則，Claude 改拿 Bash 寫法（P0008 D4）
+  assert "git --version" in write["prompt"] and "git --version --build-options" not in write["prompt"]
+  assert '"project-python" -m pytest' in write["prompt"] and '& "project-python"' not in write["prompt"]
+  assert any("用 Bash 工具執行" in arg for arg in write["argv"])
+  assert 'Bash("project-python" -m pytest*)' in write["argv"]
+  assert "SKILL.md" in write["prompt"] and ".agents" in write["prompt"]
+  assert eventsOf(conductor, "testRun")[0]["data"]["passed"] is True
+
+
+def test_codexWriterKeepsPowerShellCommands(startBoard):
+  conductor, scenarioDir = startBoard(oneTask, writer=fakeRole("codex"), reviewer=fakeRole("claude"),
+                                      **projectTddCommands)
   runUntil(conductor, planDone)
   write = readCalls(scenarioDir, "write")[0]
   assert "git --version --build-options" in write["prompt"]
-  assert 'PowerShell(& "project-python" -m pytest*)' in write["argv"]
-  assert "SKILL.md" in write["prompt"] and ".agents" in write["prompt"]
-  assert eventsOf(conductor, "testRun")[0]["data"]["passed"] is True
+  assert '& "project-python" -m pytest' in write["prompt"]
+  assert "用 Bash 工具執行" not in write["prompt"]
 
 
 def test_mergeSkipsWhileUserResolvesConflictInPlanWorktree(startBoard, monkeypatch):
@@ -1060,3 +1077,51 @@ def test_badAllowedToolsWhileRunningKeepsPreviousRoles(startBoard):
   warning = ('警告｜.board/config.json 有問題，繼續用原本的寫程式、審查設定：'
              'writer.allowedTools 要是文字陣列，例如 ["Bash(npm install*)"]')
   assert lines.count(warning) == 1
+
+
+def lingeringChildrenAlive(scenarioDir):
+  return [pid for pid in (int(path.read_text()) for path in scenarioDir.glob("linger-*.pid")) if processAlive(pid)]
+
+
+def processAlive(pid):
+  if sys.platform == "win32":
+    return str(pid) in subprocess.run(["tasklist", "/FI", f"PID eq {pid}"], capture_output=True, text=True,
+                                      errors="replace").stdout
+  try:
+    os.kill(pid, 0)
+    return True
+  except OSError:
+    return False
+
+
+def test_writerThatLingersAfterResultIsCollectedAndResumed(startBoard, monkeypatch):
+  monkeypatch.setattr(board_agents, "resultGraceSeconds", 0.5)
+  # 第一輪交出結果後留著背景程式不退出；審查退回後第二輪要接回同一個對話
+  conductor, scenarioDir = startBoard(oneTask, {"write": {"T1": ["linger", "done"]}, "review": {"T1": ["fail", "pass"]}})
+  runUntil(conductor, planDone, timeout=40)
+  assert len(eventsOf(conductor, "taskWritten")) == 2
+  assert eventsOf(conductor, "taskInterrupted") == [] and eventsOf(conductor, "agentFailed") == []
+  calls = readCalls(scenarioDir, "write")
+  firstSession = calls[0]["argv"][calls[0]["argv"].index("--session-id") + 1]
+  assert calls[1]["argv"][calls[1]["argv"].index("--resume") + 1] == firstSession
+  time.sleep(0.5)
+  assert lingeringChildrenAlive(scenarioDir) == []
+
+
+def test_reviewerThatLingersAfterResultIsCollected(startBoard, monkeypatch):
+  monkeypatch.setattr(board_agents, "resultGraceSeconds", 0.5)
+  conductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["linger"]}}, reviewer=fakeRole("claude"))
+  runUntil(conductor, planDone, timeout=40)
+  assert len(eventsOf(conductor, "reviewPassed")) == 1
+  assert eventsOf(conductor, "taskInterrupted") == [] and eventsOf(conductor, "agentFailed") == []
+  time.sleep(0.5)
+  assert lingeringChildrenAlive(scenarioDir) == []
+
+
+def test_errorResultThatLingersIsRecordedAsAgentFailed(startBoard, monkeypatch):
+  monkeypatch.setattr(board_agents, "resultGraceSeconds", 0.5)
+  conductor, _ = startBoard(oneTask, {"write": {"T1": ["lingererror", "done"]}})
+  runUntil(conductor, planDone, timeout=40)
+  failed = eventsOf(conductor, "agentFailed")
+  assert len(failed) == 1 and "假的錯誤結果" in failed[0]["data"]["reason"]
+  assert eventsOf(conductor, "taskInterrupted") == []

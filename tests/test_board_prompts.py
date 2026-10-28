@@ -132,6 +132,18 @@ def test_onlyClaudeWriterIsToldCommandsAreRestricted():
   assert "串接" not in writerRules("codex")
 
 
+def test_bothWritersReportInTraditionalChinese():
+  for cli in ("claude", "codex"):
+    rules = writerRules(cli)
+    assert "summary、blockedReason 一律用正體中文" in rules
+    assert "測試名稱與錯誤訊息保留原文" in rules
+
+
+def test_onlyClaudeWriterIsToldToRunTestsWithBash():
+  assert "測試指令用 Bash 工具執行，不要用 PowerShell 工具" in writerRules("claude")
+  assert "Bash 工具" not in writerRules("codex")
+
+
 def test_formatRowsEscapesPipes():
   row = {"requirement": "R1 a|b", "understanding": "", "decision": "", "rejected": "", "task": "T1",
          "dependsOn": "", "verify": ""}
@@ -159,7 +171,8 @@ def test_writePromptAddsTddCrapStepsOnlyWhenEnabled(writePlan):
   command = "python C:/skills/tdd-crap/scripts/quality.py --source src -- tests"
   prompt = buildWritePrompt(samplePlan(writePlan), "T1", 1, qualityCommand=command)
   assert "Skill 工具載入 tdd-crap" in prompt
-  assert command in prompt and "python -m pytest" in prompt
+  # 品質檢查交給流程跑（P0008 D1），tdd 段落不再列出指令要 writer 照跑
+  assert command not in prompt and "python -m pytest" in prompt
   # 最後一行固定是交回結果的提醒，tdd 的段落要放在它前面
   assert prompt.splitlines()[-1] == "改完後要能照表格的「驗證」欄驗證。完成後依格式回覆。"
   assert "tdd-crap" not in buildWritePrompt(samplePlan(writePlan), "T1", 1)
@@ -174,9 +187,42 @@ def test_reviewPromptAddsTestQualityRuleOnlyWhenEnabled(writePlan):
   assert "tdd-crap" not in buildReviewPrompt(samplePlan(writePlan), "T1", 1, "+x")
 
 
+def test_writerRunsOnlyRelatedTestsAndLeavesFullRunToFlow(writePlan):
+  for prompt in (buildWritePrompt(samplePlan(writePlan), "T1", 1, testCommand="npm test"),
+                 buildResolvePrompt(samplePlan(writePlan), "T1", 2, ["calc.py"], testCommand="npm test")):
+    assert "npm test" in prompt
+    assert "只跑跟這次改動相關的測試" in prompt
+    assert "不要自己跑完整測試" in prompt and "背景執行" in prompt
+    assert "交付後流程會在這個 worktree 跑一次完整測試" in prompt
+    assert "請照原樣執行" not in prompt
+
+
+def test_tddWriterLeavesQualityCheckToFlow(writePlan):
+  command = "python C:/skills/tdd-crap/scripts/quality.py --source src -- tests"
+  for cli in ("claude", "codex"):
+    prompt = buildWritePrompt(samplePlan(writePlan), "T1", 1, qualityCommand=command, cli=cli, testCommand=command,
+                              pythonCommand='"project-python"')
+    assert '"project-python" -m pytest' in prompt
+    assert "第 6 步的品質檢查由流程在交付後執行" in prompt
+    assert ".quality/report.json" in prompt
+    # 品質檢查指令只出現在專案測試指令那一段，不再要求 writer 照原樣執行
+    assert prompt.count(command) == 1
+    assert "品質檢查指令要照原樣執行" not in prompt
+
+
+def test_writePromptAfterQualityReturnPointsToReport(writePlan):
+  lastTest = {"passed": False, "tail": "FAILED: .quality/report.json", "verdict": "newFailure", "newFailures": []}
+  tdd = buildWritePrompt(samplePlan(writePlan), "T1", 2, qualityCommand="quality", lastTest=lastTest)
+  # 提示要接在退回原因那段，writer 一讀到失敗就知道去哪裡找超標的函式
+  failureSection = tdd[tdd.index("基準沒有的失敗"):tdd.index("這個專案照 tdd-crap 開發")]
+  assert "覆蓋率或複雜度" in failureSection and ".quality/report.json" in failureSection
+  plain = buildWritePrompt(samplePlan(writePlan), "T1", 2, lastTest=lastTest)
+  assert "覆蓋率或複雜度" not in plain
+
+
 def test_codexWriterReadsTddSkillFile(writePlan):
   command = "python C:/skills/tdd-crap/scripts/quality.py --source src -- tests"
   prompt = buildWritePrompt(samplePlan(writePlan), "T1", 1, qualityCommand=command, cli="codex")
-  assert str(tddCrapDir / "SKILL.md") in prompt and command in prompt
+  assert str(tddCrapDir / "SKILL.md") in prompt and command not in prompt
   assert "Skill 工具" not in prompt
   assert prompt.splitlines()[-1] == "改完後要能照表格的「驗證」欄驗證。完成後依格式回覆。"
