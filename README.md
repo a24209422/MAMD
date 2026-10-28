@@ -142,6 +142,9 @@ python <agent-board>\install_skill.py
    一個專案同時只能跑一個 Alfred，第二個會拒絕啟動。
 
 2. 在專案資料夾開 `codex` 說你的需求；或開 `claude`，打 `/agent-board-plan 你的需求`。寫完 plan 會自己送出。
+   - 送出通過檢查時會自動 commit 這份 plan 檔，而且只 commit 這一個檔案，主資料夾其他已暫存或沒暫存的改動都不動；plan 檔跟目前的 commit 一樣時不另外 commit
+   - commit 失敗（例如 git hook 擋下）時不會送出，會印出 git 的錯誤和要自己執行的 `git add`、`git commit` 指令，自己 commit 之後再送出就會通過
+   - 送出後 plan 檔又被改過、跟目前的 commit 不同時不能核准，要重新送出
 3. 看線路圖：`python <agent-board>\board.py --project <專案資料夾> index`，打開 `plans/_review/index.html`
 4. 核准：`python <agent-board>\board.py --project <專案資料夾> approve P0007`，或在儀表板上按「核准」
 5. 之後看 Alfred 的終端機，或跑 `status`。完成後 `plan/P0007` 分支裡就是所有任務的成果，要不要合併到你的分支由你決定。跑 `stats P0007` 可以看這份 plan 的平均輪數、第一次審查就通過的比例等成效（見「指令」）。

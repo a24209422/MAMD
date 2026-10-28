@@ -87,6 +87,33 @@ def approveWarnings(projectDir, plan):
   return warnings
 
 
+def planFilePath(plan):
+  # loadPlans 只讀 plans/ 底下的檔案；給 git 用相對路徑，印出來的指令使用者也能直接照打
+  return f"plans/{plan['path'].name}"
+
+
+def planFileCommitted(projectDir, plan):
+  return board_git.fileMatchesHead(projectDir, planFilePath(plan))
+
+
+def commitPlanFile(projectDir, planIdValue, plan):
+  # plan 分支從核准時的 HEAD 開出來，plan 檔沒 commit 的話寫程式的 agent 在 worktree 裡看不到它
+  if planFileCommitted(projectDir, plan):
+    return True
+  path, message = planFilePath(plan), f"{planIdValue} 送出 plan：{plan['title']}"
+  try:
+    board_git.commitFile(projectDir, path, message)
+  except board_git.GitError as error:
+    print(f"{planIdValue} 的 plan 檔 commit 失敗，沒有送出：")
+    print("  " + str(error))
+    print("請自己 commit 這個 plan 檔，再重新送出：")
+    print(f"  git add -- {path}")
+    print(f'  git commit -m "{message}" -- {path}')
+    return False
+  print(f"已 commit {path}")
+  return True
+
+
 def cmdSubmit(projectDir, planIdValue):
   loadErrors = []
   plans, state = currentState(projectDir, loadErrors)
@@ -105,6 +132,8 @@ def cmdSubmit(projectDir, planIdValue):
     print(f"{planIdValue} 有問題，沒有送出：")
     for message in blockers:
       print("  紅｜" + message)
+    return 1
+  if not commitPlanFile(projectDir, planIdValue, plan):
     return 1
   appendEvent(projectDir, "planSubmitted", plan=planIdValue,
               data={"red": 0, "orange": len(problems["orange"]), "yellow": len(problems["yellow"])})
@@ -246,6 +275,11 @@ def cmdApprove(projectDir, planIdValue, confirm=input):
     print(f"{planIdValue} 送出後又被改出問題，不能核准，請寫 plan 的 agent 修好再送出：")
     for message in blockers:
       print("  紅｜" + message)
+    return 1
+  # plan 分支從 HEAD 開出來，plan 檔跟 HEAD 不同時分支裡會是舊版
+  if not planFileCommitted(projectDir, plans[planIdValue]):
+    print(f"{planIdValue} 的 plan 檔（{planFilePath(plans[planIdValue])}）送出後又被改過，跟目前的 commit 不同，"
+          "不能核准，請寫 plan 的 agent 重新執行 submit")
     return 1
   graph = plans[planIdValue]["graph"]
   warnings = approveWarnings(projectDir, plans[planIdValue])

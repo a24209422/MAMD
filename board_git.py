@@ -120,6 +120,23 @@ def cleanWorktree(path):
   runGit(path, "clean", "-fd")
 
 
+def gitSucceeds(cwd, *args):
+  return subprocess.run(["git", *args], cwd=cwd, capture_output=True).returncode == 0
+
+
+def fileMatchesHead(projectDir, relativePath):
+  # 沒被追蹤的檔案 git diff 看不到差異，要先確認 git 認得它
+  return (gitSucceeds(projectDir, "ls-files", "--error-unmatch", "--", relativePath)
+          and gitSucceeds(projectDir, "diff", "--quiet", "HEAD", "--", relativePath))
+
+
+def commitFile(projectDir, relativePath, message):
+  # commit 後面接路徑只 commit 這個檔案，主資料夾其他已暫存的改動照樣留在暫存區
+  runGit(projectDir, "add", "--", relativePath)
+  runGit(projectDir, "commit", "-q", "-m", message, "--", relativePath)
+  return runGit(projectDir, "rev-parse", "HEAD")
+
+
 def commitAll(path, message):
   runGit(path, "add", "-A")
   runGit(path, "commit", "-q", "-m", message)

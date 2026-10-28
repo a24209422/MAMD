@@ -79,9 +79,9 @@ class Dashboard:
       plans, state = board.currentState(self.projectDir)
       plan, planState = plans.get(planIdValue), state["plans"].get(planIdValue)
       warnings = []
-      # 不是待核准、或還有紅色問題時，直接交給 cmdApprove 回報原因，不用先問確認
+      # 不是待核准、還有紅色問題、或 plan 檔送出後又被改過時，直接交給 cmdApprove 回報原因，不用先問確認
       if (plan and plan["graph"] and planState and planState["status"] == PlanStatus.pending
-          and not board.planBlockers(plan)):
+          and not board.planBlockers(plan) and board.planFileCommitted(self.projectDir, plan)):
         warnings = board.approveWarnings(self.projectDir, plan)
       # 你看到的警告和現在的不同（例如這段時間主資料夾多了未 commit 的改動）就要重新確認
       if warnings and not (body.get("confirm") is True and body.get("warnings") == warnings):

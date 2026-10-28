@@ -78,6 +78,68 @@ def test_approveWarnsAboutTrackedChanges(gitProject, writePlan, capsys):
   assert "還沒 commit 的改動" in capsys.readouterr().out
 
 
+def test_submitCommitsOnlyThePlanFile(gitProject, writePlan, capsys):
+  (gitProject / "staged.txt").write_text("staged\n", encoding="utf-8")
+  board_git.runGit(gitProject, "add", "staged.txt")
+  (gitProject / "README.md").write_text("changed\n", encoding="utf-8")
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="批次上傳", projectDir=gitProject)
+  before = board_git.headCommit(gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert "已 commit plans/0001-ok.md" in capsys.readouterr().out
+  assert board_git.runGit(gitProject, "rev-parse", "HEAD~1") == before
+  assert board_git.runGit(gitProject, "show", "--name-only", "--format=", "HEAD") == "plans/0001-ok.md"
+  assert board_git.runGit(gitProject, "log", "-1", "--format=%s") == "P0001 送出 plan：批次上傳"
+  # 其他已暫存和沒暫存的改動都還在，沒有被 commit
+  assert board_git.runGit(gitProject, "diff", "--cached", "--name-only") == "staged.txt"
+  assert board_git.runGit(gitProject, "diff", "--name-only") == "README.md"
+  assert (gitProject / "README.md").read_text(encoding="utf-8") == "changed\n"
+  assert eventTypes(gitProject) == ["planSubmitted"]
+  committed = board_git.headCommit(gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert board_git.headCommit(gitProject) == committed
+  assert "已 commit" not in capsys.readouterr().out
+
+
+def test_submitStopsWhenCommitFails(gitProject, writePlan, capsys):
+  hookPath = gitProject / ".git" / "hooks" / "pre-commit"
+  hookPath.parent.mkdir(parents=True, exist_ok=True)
+  hookPath.write_bytes(b"#!/bin/sh\necho blocked by hook >&2\nexit 1\n")
+  hookPath.chmod(0o755)
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="批次上傳", projectDir=gitProject)
+  before = board_git.headCommit(gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 1
+  output = capsys.readouterr().out
+  assert "commit 失敗，沒有送出" in output and "blocked by hook" in output
+  assert "  git add -- plans/0001-ok.md" in output
+  assert '  git commit -m "P0001 送出 plan：批次上傳" -- plans/0001-ok.md' in output
+  assert board_git.headCommit(gitProject) == before
+  assert "planSubmitted" not in eventTypes(gitProject)
+  # 使用者照印出來的指令自己 commit 之後，再送出就會通過
+  hookPath.unlink()
+  board_git.runGit(gitProject, "add", "--", "plans/0001-ok.md")
+  board_git.runGit(gitProject, "commit", "-m", "P0001 送出 plan：批次上傳", "--", "plans/0001-ok.md")
+  committed = board_git.headCommit(gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert board_git.headCommit(gitProject) == committed
+  assert eventTypes(gitProject) == ["planSubmitted"]
+
+
+def test_approveRefusesPlanChangedAfterSubmit(gitProject, writePlan, capsys):
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="改過的標題", projectDir=gitProject)
+  capsys.readouterr()
+  asked = []
+  assert board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: asked.append(prompt) or "y") == 1
+  output = capsys.readouterr().out
+  assert "送出後又被改過" in output and "重新執行 submit" in output
+  assert asked == []
+  assert "planApproved" not in eventTypes(gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y") == 0
+  assert board_core.readEvents(gitProject)[-1]["data"]["baseCommit"] == board_git.headCommit(gitProject)
+
+
 def test_rejectAndAbandon(gitProject, writePlan):
   writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
   assert board.cmdReject(gitProject, "P0001", "缺驗證") == 1
