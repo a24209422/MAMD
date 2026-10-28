@@ -1,5 +1,6 @@
 """plan／任務分支與 worktree 的 git 操作。"""
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -36,6 +37,10 @@ def planWorktreePath(projectDir, planIdValue):
 
 def taskWorktreePath(projectDir, planIdValue, taskId):
   return worktreesRoot(projectDir) / f"{planIdValue}-{taskId}"
+
+
+def baselineWorktreePath(projectDir, planIdValue):
+  return worktreesRoot(projectDir) / f"{planIdValue}-baseline"
 
 
 def headCommit(projectDir):
@@ -81,6 +86,26 @@ def ensureTaskWorktree(projectDir, planIdValue, taskId):
     # 任務開始時才從 plan 分支開出來，前置任務的改動已經合併在裡面
     addWorktree(projectDir, path, taskBranch(planIdValue, taskId), planBranch(planIdValue))
   return path
+
+
+def addBaselineWorktree(projectDir, planIdValue, baseCommit):
+  # 上次沒移除乾淨的基準 worktree 可能留著舊的測試產物，先整個移除再重建
+  removeBaselineWorktree(projectDir, planIdValue)
+  path = baselineWorktreePath(projectDir, planIdValue)
+  path.parent.mkdir(parents=True, exist_ok=True)
+  # detached：基準只是暫時跑測試，不需要分支，也不會留下要清的分支
+  runGit(projectDir, "worktree", "add", "--detach", str(path), baseCommit)
+  return path
+
+
+def removeBaselineWorktree(projectDir, planIdValue):
+  path = baselineWorktreePath(projectDir, planIdValue)
+  if path.exists():
+    runGit(projectDir, "worktree", "remove", "--force", str(path), check=False)
+  if path.exists():
+    # 資料夾還在但已經不是登記中的 worktree（例如被 prune 過），git 不肯移除，只能直接刪
+    shutil.rmtree(path)
+  runGit(projectDir, "worktree", "prune")
 
 
 def cleanWorktree(path):
@@ -175,7 +200,11 @@ def removePlanWorktrees(projectDir, planIdValue):
   root = worktreesRoot(projectDir)
   if root.exists():
     for path in sorted(root.iterdir()):
-      if path.name == planIdValue or path.name.startswith(f"{planIdValue}-"):
+      if path == baselineWorktreePath(projectDir, planIdValue):
+        # Alfred 跑基準測試到一半被關掉時會留下來
+        removeBaselineWorktree(projectDir, planIdValue)
+        removed.append(path.name)
+      elif path.name == planIdValue or path.name.startswith(f"{planIdValue}-"):
         runGit(projectDir, "worktree", "remove", "--force", str(path))
         removed.append(path.name)
   branches = runGit(projectDir, "branch", "--list", f"task/{planIdValue}-*", "--format=%(refname:short)")

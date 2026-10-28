@@ -32,6 +32,7 @@ eventLabels = {
   "planRejected": "plan 被退回",
   "planAbandoned": "plan 已放棄",
   "planCompleted": "plan 完成",
+  "testBaseline": "跑基準測試",
   "taskStarted": "開始寫程式",
   "taskWritten": "寫完並 commit",
   "taskBlocked": "回報卡住",
@@ -59,7 +60,7 @@ def formatEvent(event):
     details.append(f"第 {event['round']} 輪")
   if event["type"] == "reviewFailed":
     details.append(f"必改 {data.get('mustFix', 0)} 條")
-  if event["type"] == "testRun":
+  if event["type"] in ("testRun", "testBaseline"):
     details.append("通過" if data.get("passed") else "失敗")
   if data.get("mode") == "resolve":
     details.append("解合併衝突")
@@ -167,6 +168,8 @@ class Conductor:
     plans, state = self.currentState()
     self.completeFinishedPlans(state)
     if not state["paused"]:
+      self.runTestBaselines(state)
+      plans, state = self.currentState()
       self.startReviews(plans, state)
       self.startWrites(plans, state)
     self.printNewEvents()
@@ -257,9 +260,45 @@ class Conductor:
           # plan 沒有「等你處理」狀態可以記，只能印出來；下一輪會自動再試
           self.notifyOnce(f"{planState['id']} 的 plan worktree 建立失敗：{error}")
 
+  def needsTestBaseline(self, planState):
+    command = self.config.get("testCommand", "")
+    if not command or self.config.get("skipTests", False):
+      return False
+    baseline = planState["testBaseline"]
+    # 基準要和任務測試用同一個指令才能比；testCommand 改掉後重開 Alfred 就要重跑
+    return baseline is None or baseline.get("command") != command
+
+  def runTestBaselines(self, state):
+    for planState in state["plans"].values():
+      if planState["status"] == PlanStatus.active and self.needsTestBaseline(planState):
+        self.runTestBaseline(planState)
+
+  def runTestBaseline(self, planState):
+    planIdValue, baseCommit = planState["id"], planState["baseCommit"]
+    # 不在 plan worktree 跑：測試產物會留成未追蹤檔案，之後合併任務可能被擋下
+    try:
+      worktree = board_git.addBaselineWorktree(self.projectDir, planIdValue, baseCommit)
+    except Exception as error:
+      # 基準沒記下來前這份 plan 不派工；下一輪會自動再試
+      self.notifyOnce(f"{planIdValue} 的基準測試 worktree 建立失敗：{error}")
+      return
+    try:
+      passed, tail = self.runTestCommand(worktree)
+      appendEvent(self.projectDir, "testBaseline", plan=planIdValue,
+                  data={"command": self.config["testCommand"], "commit": baseCommit, "passed": passed, "tail": tail})
+    finally:
+      try:
+        board_git.removeBaselineWorktree(self.projectDir, planIdValue)
+      except Exception as error:
+        # 結果已經記下來，不能因為移除失敗而每一輪重跑整套測試；下次建立前會先移除，cleanup 也會清掉
+        self.notifyOnce(f"{planIdValue} 的基準測試 worktree 移除失敗：{error}")
+
   def startWrites(self, plans, state):
     for taskState in readyTasks(state):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
+        continue
+      if self.needsTestBaseline(state["plans"][taskState["plan"]]):
+        # 基準還沒記下來（例如基準 worktree 建立失敗），之後任務的測試失敗就沒有東西可以比
         continue
       lane = self.freeLane("writer", "write", taskState["agent"])
       if lane is None:
@@ -407,13 +446,17 @@ class Conductor:
     self.runTests(info)
 
   def runTests(self, info):
-    command = self.config["testCommand"]
-    if not command:
+    if not self.config["testCommand"]:
       return
+    passed, tail = self.runTestCommand(info["worktree"])
+    self.event("testRun", info, passed=passed, tail=tail)
+
+  def runTestCommand(self, cwd):
+    command = self.config["testCommand"]
     # 測試在這裡同步執行：跑測試的這段時間 conductor 不排新工作，所以測試指令要夠快
     # 不用 subprocess.run：Windows 上逾時只會結束 cmd.exe，孫行程還握著管線，communicate 會一直等
     options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-    process = subprocess.Popen(command, shell=True, cwd=info["worktree"], stdin=subprocess.DEVNULL,
+    process = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                encoding="utf-8", errors="replace", **options)
     try:
@@ -430,7 +473,7 @@ class Conductor:
         threading.Thread(target=process.communicate, daemon=True).start()
         output = "測試超時（輸出無法取得）"
       passed = False
-    self.event("testRun", info, passed=passed, tail="\n".join(output.splitlines()[-50:]))
+    return passed, "\n".join(output.splitlines()[-50:])
 
   def startReviews(self, plans, state):
     for taskState in tasksWithStatus(state, TaskStatus.toReview):

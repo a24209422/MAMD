@@ -128,6 +128,84 @@ def test_testCommandResultGoesToReview(startBoard):
   assert "tdd-crap" not in readCalls(scenarioDir, "write")[0]["prompt"]
 
 
+def noBaselineWorktreeLeft(projectDir):
+  root = board_git.worktreesRoot(projectDir)
+  leftovers = [path.name for path in root.iterdir() if path.name.endswith("-baseline")] if root.exists() else []
+  return leftovers == [] and "-baseline" not in board_git.runGit(projectDir, "worktree", "list", "--porcelain")
+
+
+def test_testBaselineRunsAtBaseCommitBeforeFirstTaskThenIsRemoved(startBoard):
+  conductor, _ = startBoard(chainedTasks, testCommand="git rev-parse HEAD")
+  runUntil(conductor, planDone)
+  events = board_core.readEvents(conductor.projectDir)
+  types = [event["type"] for event in events]
+  assert types.count("testBaseline") == 1
+  assert types.index("testBaseline") < types.index("taskStarted")
+  baseCommit = eventsOf(conductor, "planApproved")[0]["data"]["baseCommit"]
+  baseline = eventsOf(conductor, "testBaseline")[0]
+  assert baseline["plan"] == "P0001" and baseline["task"] is None
+  assert baseline["data"] == {"command": "git rev-parse HEAD", "commit": baseCommit, "passed": True, "tail": baseCommit}
+  assert conductor.currentState()[1]["plans"]["P0001"]["testBaseline"] == baseline["data"]
+  assert noBaselineWorktreeLeft(conductor.projectDir)
+
+
+def test_failingBaselineStillDispatches(startBoard):
+  # 基準 commit 裡沒有 T1.txt，所以基準失敗；任務寫出 T1.txt 後測試通過
+  conductor, _ = startBoard(oneTask, testCommand="git cat-file -e HEAD:T1.txt")
+  runUntil(conductor, planDone)
+  assert eventsOf(conductor, "testBaseline")[0]["data"]["passed"] is False
+  assert eventsOf(conductor, "testRun")[0]["data"]["passed"] is True
+  assert noBaselineWorktreeLeft(conductor.projectDir)
+
+
+def test_changedTestCommandRerunsBaselineAfterRestart(startBoard):
+  firstConductor, _ = startBoard(oneTask, {"write": {"T1": ["blocked", "done"]}}, testCommand="git --version")
+  runUntil(firstConductor, taskIs(TaskStatus.needsYou))
+  sameCommand = Conductor(firstConductor.projectDir, config=fakeConfig(testCommand="git --version"), out=lambda line: None)
+  sameCommand.tick()
+  assert len(eventsOf(sameCommand, "testBaseline")) == 1
+  changed = Conductor(firstConductor.projectDir, config=fakeConfig(testCommand="git rev-parse HEAD"),
+                      out=lambda line: None)
+  board_core.appendEvent(changed.projectDir, "userDecision", plan="P0001", task="T1", data={"action": "retry"})
+  runUntil(changed, planDone)
+  events = board_core.readEvents(changed.projectDir)
+  baselines = [index for index, event in enumerate(events) if event["type"] == "testBaseline"]
+  starts = [index for index, event in enumerate(events) if event["type"] == "taskStarted"]
+  assert [events[index]["data"]["command"] for index in baselines] == ["git --version", "git rev-parse HEAD"]
+  assert baselines[0] < starts[0] and baselines[1] < starts[1]
+  assert noBaselineWorktreeLeft(changed.projectDir)
+
+
+def test_skipTestsRunsNoBaselineAndDispatches(startBoard):
+  conductor, _ = startBoard(oneTask)
+  assert conductor.config["skipTests"] is True
+  runUntil(conductor, planDone)
+  assert eventsOf(conductor, "testBaseline") == []
+  assert eventsOf(conductor, "testRun") == []
+  assert conductor.currentState()[1]["plans"]["P0001"]["testBaseline"] is None
+  assert noBaselineWorktreeLeft(conductor.projectDir)
+
+
+def test_noDispatchUntilBaselineIsRecorded(startBoard, monkeypatch):
+  conductor, _ = startBoard(oneTask, testCommand="git --version")
+  lines = []
+  conductor.out = lines.append
+
+  def failingBaseline(projectDir, planIdValue, baseCommit):
+    raise board_git.GitError("模擬基準 worktree 失敗")
+
+  realBaseline = board_git.addBaselineWorktree
+  monkeypatch.setattr(board_git, "addBaselineWorktree", failingBaseline)
+  for _ in range(3):
+    conductor.tick()
+  assert lines.count("P0001 的基準測試 worktree 建立失敗：模擬基準 worktree 失敗") == 1
+  assert eventsOf(conductor, "taskStarted") == [] and eventsOf(conductor, "testBaseline") == []
+  monkeypatch.setattr(board_git, "addBaselineWorktree", realBaseline)
+  runUntil(conductor, planDone)
+  types = [event["type"] for event in board_core.readEvents(conductor.projectDir)]
+  assert types.index("testBaseline") < types.index("taskStarted")
+
+
 def test_tddCrapAddsStepsToPromptsAndAllowsPytest(startBoard):
   conductor, scenarioDir = startBoard(oneTask, testCommand="git --version", tddCrap=True)
   runUntil(conductor, planDone)
@@ -190,7 +268,7 @@ def test_testOutputGivenUpWhenPipeStaysOpenAfterKill(startBoard, tmp_path, monke
     "options = {} if os.name == 'nt' else {'start_new_session': True}\n"
     "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'],\n"
     "                         stdout=sys.stdout, stderr=sys.stderr, **options)\n"
-    "open(sys.argv[1], 'w').write(str(child.pid))\n", encoding="utf-8")
+    "open(sys.argv[1], 'a').write(f'{child.pid}\\n')\n", encoding="utf-8")
   scriptPath = tmp_path / "slowTest.py"
   scriptPath.write_text(
     "import subprocess, sys, time\n"
@@ -208,8 +286,10 @@ def test_testOutputGivenUpWhenPipeStaysOpenAfterKill(startBoard, tmp_path, monke
     assert testRun["data"]["tail"] == "測試超時（輸出無法取得）"
     assert time.time() - startedAt < 15
   finally:
+    # 基準測試和任務測試各會留下一個脫離的孫程式
     if pidPath.exists():
-      board_agents.killProcessTree(int(pidPath.read_text()))
+      for pid in pidPath.read_text().split():
+        board_agents.killProcessTree(int(pid))
 
 
 def test_mergeBlockedByUntrackedFileNeedsYouThenRetryMerges(startBoard, gitProject):
@@ -265,6 +345,9 @@ def test_formatEvent():
   paused = makeEvent("paused", reason="你執行了 stop")
   paused["time"] = "2026-10-25T21:41:00+08:00"
   assert formatEvent(paused) == "21:41:00 全部暫停（你執行了 stop）"
+  baseline = makeEvent("testBaseline", plan="P0001", command="pytest -q", passed=False, tail="1 failed")
+  baseline["time"] = "2026-10-25T21:42:00+08:00"
+  assert formatEvent(baseline) == "21:42:00 P0001 跑基準測試（失敗）"
 
 
 def conflictedTask(conductor):

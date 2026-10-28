@@ -335,6 +335,11 @@ def onPlanApproved(state, planState, event, config):
     state["tasks"][taskKey(planState["id"], task["id"])] = newTaskState(planState["id"], task, config)
 
 
+def onTestBaseline(state, planState, event, config):
+  # 只留最新一次：testCommand 改掉後重跑的基準才是之後比對的依據
+  planState["testBaseline"] = event["data"]
+
+
 def onPlanAbandoned(state, planState, event, config):
   planState["status"] = PlanStatus.abandoned
 
@@ -347,6 +352,7 @@ planEventHandlers = {
   "planSubmitted": onPlanSubmitted,
   "planRejected": onPlanRejected,
   "planApproved": onPlanApproved,
+  "testBaseline": onTestBaseline,
   "planAbandoned": onPlanAbandoned,
   "planCompleted": onPlanCompleted,
 }
@@ -573,7 +579,8 @@ def deriveState(events, plans, config):
   state = {"paused": False, "pauseReason": "", "plans": {}, "tasks": {}}
   for planIdValue, plan in plans.items():
     state["plans"][planIdValue] = {"id": planIdValue, "title": plan["title"], "status": PlanStatus.draft,
-                                   "baseCommit": None, "rejectReason": "", "meta": plan["meta"]}
+                                   "baseCommit": None, "testBaseline": None, "rejectReason": "",
+                                   "meta": plan["meta"]}
   for event in events:
     eventType = event.get("type")
     if eventType == "paused":
