@@ -6,6 +6,8 @@ import argparse
 import importlib.util
 import json
 import os
+import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -92,6 +94,16 @@ def planFilePath(plan):
   return f"plans/{plan['path'].name}"
 
 
+def shellQuote(text, windows=os.name == "nt"):
+  # Windows 印 PowerShell 的寫法，其他系統印 sh 的寫法
+  if not windows:
+    return shlex.quote(text)
+  if re.fullmatch(r"[\w./-]+", text):
+    return text
+  # PowerShell 的單引號字串裡只有單引號（含彎引號）有特殊意義，重複一次就是字面上的單引號
+  return "'" + re.sub(r"(['‘’‚‛])", r"\1\1", text) + "'"
+
+
 def planFileCommitted(projectDir, plan):
   return board_git.fileMatchesHead(projectDir, planFilePath(plan))
 
@@ -106,9 +118,14 @@ def commitPlanFile(projectDir, planIdValue, plan):
   except board_git.GitError as error:
     print(f"{planIdValue} 的 plan 檔 commit 失敗，沒有送出：")
     print("  " + str(error))
-    print("請自己 commit 這個 plan 檔，再重新送出：")
-    print(f"  git add -- {path}")
-    print(f'  git commit -m "{message}" -- {path}')
+    # 標題可能有引號，各種 shell 的跳脫規則不同（PowerShell 5.1 傳給 git 時還會弄丟雙引號），
+    # 訊息寫進檔案用 -F 讀，指令裡就不必放標題
+    messageName = f"commit-message-{planIdValue}.txt"
+    boardDir(projectDir).mkdir(parents=True, exist_ok=True)
+    (boardDir(projectDir) / messageName).write_bytes(message.encode("utf-8"))
+    print(f"請在專案資料夾自己 commit 這個 plan 檔，再重新送出（{'PowerShell' if os.name == 'nt' else 'sh'} 指令）：")
+    print(f"  git add -- {shellQuote(path)}")
+    print(f"  git commit -F {shellQuote('.board/' + messageName)} -- {shellQuote(path)}")
     return False
   print(f"已 commit {path}")
   return True

@@ -111,16 +111,56 @@ def test_submitStopsWhenCommitFails(gitProject, writePlan, capsys):
   output = capsys.readouterr().out
   assert "commit 失敗，沒有送出" in output and "blocked by hook" in output
   assert "  git add -- plans/0001-ok.md" in output
-  assert '  git commit -m "P0001 送出 plan：批次上傳" -- plans/0001-ok.md' in output
+  assert "  git commit -F .board/commit-message-P0001.txt -- plans/0001-ok.md" in output
   assert board_git.headCommit(gitProject) == before
   assert "planSubmitted" not in eventTypes(gitProject)
   # 使用者照印出來的指令自己 commit 之後，再送出就會通過
   hookPath.unlink()
   board_git.runGit(gitProject, "add", "--", "plans/0001-ok.md")
-  board_git.runGit(gitProject, "commit", "-m", "P0001 送出 plan：批次上傳", "--", "plans/0001-ok.md")
+  board_git.runGit(gitProject, "commit", "-F", ".board/commit-message-P0001.txt", "--", "plans/0001-ok.md")
+  assert board_git.runGit(gitProject, "log", "-1", "--format=%s") == "P0001 送出 plan：批次上傳"
   committed = board_git.headCommit(gitProject)
   assert board.cmdSubmit(gitProject, "P0001") == 0
   assert board_git.headCommit(gitProject) == committed
+  assert eventTypes(gitProject) == ["planSubmitted"]
+
+
+def test_shellQuoteForPowerShellAndSh():
+  assert board.shellQuote("plans/0001-ok.md", windows=True) == "plans/0001-ok.md"
+  assert board.shellQuote("plans/0001 a's.md", windows=True) == "'plans/0001 a''s.md'"
+  assert board.shellQuote("a’b $x", windows=True) == "'a’’b $x'"
+  assert board.shellQuote("plans/0001-ok.md", windows=False) == "plans/0001-ok.md"
+  assert board.shellQuote("plans/0001 a's.md", windows=False) == "'plans/0001 a'\"'\"'s.md'"
+
+
+def test_printedCommitCommandsRunInShell(gitProject, capsys):
+  hookPath = gitProject / ".git" / "hooks" / "pre-commit"
+  hookPath.parent.mkdir(parents=True, exist_ok=True)
+  hookPath.write_bytes(b"#!/bin/sh\nexit 1\n")
+  hookPath.chmod(0o755)
+  plansDir = gitProject / "plans"
+  plansDir.mkdir()
+  title = "新增 \"CSV import\" 和 'x' $HOME `y` & z"
+  planPath = plansDir / "0001-a b's $x.md"
+  planPath.write_text(
+    f"---\nid: P0001\ncreated: 2026-10-25\n---\n\n# {title}\n\n"
+    "| 需求 | AI 理解 | 做法（ADR） | 不採用 | 任務 | 前置 | 驗證 |\n|---|---|---|---|---|---|---|\n"
+    + "\n".join(cleanRows) + "\n", encoding="utf-8")
+  assert board.cmdSubmit(gitProject, "P0001") == 1
+  commands = [line.strip() for line in capsys.readouterr().out.splitlines()[-2:]]
+  assert commands[0].startswith("git add ") and commands[1].startswith("git commit -F ")
+  hookPath.unlink()
+  for command in commands:
+    # 用印出來時對應的 shell 執行，確認使用者照打就能 commit
+    shell = (["powershell", "-NoProfile", "-NonInteractive", "-Command", command] if os.name == "nt"
+             else ["sh", "-c", command])
+    completed = subprocess.run(shell, cwd=gitProject, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=60)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+  assert board_git.runGit(gitProject, "log", "-1", "--format=%s") == f"P0001 送出 plan：{title}"
+  assert board_git.runGit(gitProject, "-c", "core.quotePath=false", "show", "--name-only", "--format=",
+                          "HEAD") == "plans/0001-a b's $x.md"
+  assert board.cmdSubmit(gitProject, "P0001") == 0
   assert eventTypes(gitProject) == ["planSubmitted"]
 
 
