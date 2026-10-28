@@ -288,6 +288,7 @@ class PlanStatus:
 class TaskStatus:
   queued = "排隊中"
   writing = "寫程式中"
+  testing = "測試中"
   toReview = "待審查"
   reviewing = "審查中"
   merging = "合併中"
@@ -388,7 +389,8 @@ def rememberSession(taskState, data):
 
 
 def onTaskWritten(taskState, event):
-  taskState["status"] = TaskStatus.toReview
+  # 測試改在背景跑：帶 testing 的寫完先進測試中，等 testRun 再決定；舊事件沒有這個欄位，照舊直接待審查
+  taskState["status"] = TaskStatus.testing if event["data"].get("testing") else TaskStatus.toReview
   taskState["lastCommit"] = event["data"].get("commit")
   taskState["failStreak"] = 0
   taskState["resumable"] = True
@@ -416,6 +418,8 @@ def onTestRun(taskState, event):
   taskState["lastTest"] = event["data"]
   # verdict 由 conductor 跑完測試時對照當時的基準算好；沒有 verdict 的舊事件照舊只記錄
   if event["data"].get("verdict") != "newFailure":
+    if taskState["status"] == TaskStatus.testing:
+      taskState["status"] = TaskStatus.toReview
     return
   # 有新增的失敗就不送審，和審查不通過一樣退回寫程式的 agent、算一輪
   if taskState["round"] < taskState["maxRounds"]:
