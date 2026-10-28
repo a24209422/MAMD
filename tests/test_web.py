@@ -168,6 +168,20 @@ def test_overviewShowsConductorGroupsAndAgents(dashboard, tmp_path):
   assert "Claude<span>（寫程式）</span>" in dom and "Codex<span>（審查）</span>" in dom
   assert "Write upload.py" in dom and "75%" in dom and "sonnet" in dom
   assert "唯讀" not in dom
+  assert "測試中：" not in dom
+
+
+@needsBrowser
+def test_overviewLeadCardListsTestingTasks(dashboard, gitProject, tmp_path):
+  # 寫完在背景跑測試時列在 Alfred 卡片；測試跑完轉成待審查就不再列出
+  appendEvent(gitProject, "taskWritten", plan="P0001", task="T1", roundNumber=1,
+              data={"commit": "c1", "summary": "完成", "testing": True})
+  dom = renderDom(tmp_path, dashboard + "#token=" + token)
+  lead = re.search(r'id="leadCard".*?</article>', dom, re.S)
+  assert lead and "測試中：P0001 T1" in lead.group(0)
+  appendEvent(gitProject, "testRun", plan="P0001", task="T1", roundNumber=1,
+              data={"passed": True, "tail": "ok", "verdict": "passed", "newFailures": []})
+  assert "測試中：" not in renderDom(tmp_path, dashboard + "#token=" + token)
 
 
 @needsBrowser
