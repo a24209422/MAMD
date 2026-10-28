@@ -267,6 +267,7 @@ def test_skipTestsRunsNoBaselineAndDispatches(startBoard):
   runUntil(conductor, planDone)
   assert eventsOf(conductor, "testBaseline") == []
   assert eventsOf(conductor, "testRun") == []
+  assert all(event["data"]["testing"] is False for event in eventsOf(conductor, "taskWritten"))
   assert conductor.currentState()[1]["plans"]["P0001"]["testBaseline"] is None
   assert noBaselineWorktreeLeft(conductor.projectDir)
 
@@ -355,6 +356,87 @@ def test_mergeSkipsWhileUserResolvesConflictInPlanWorktree(startBoard, monkeypat
   subprocess.run(["git", "add", "shared.txt"], cwd=planPath, check=True)
   subprocess.run(["git", "commit", "-q", "--no-edit"], cwd=planPath, check=True)
   runUntil(conductor, planDone)
+
+
+def sleepyTestCommand(tmp_path, sleeps):
+  # 假的測試在開始、結束時各記一行到 testLog.txt，照任務 worktree 的名稱睡幾秒；基準的 worktree 不睡
+  logPath = tmp_path / "testLog.txt"
+  scriptPath = tmp_path / "sleepyTests.py"
+  scriptPath.write_text(
+    "import os, pathlib, sys, time\n"
+    f"log, sleeps = pathlib.Path({str(logPath)!r}), {sleeps!r}\n"
+    "name = pathlib.Path.cwd().name\n"
+    "with open(log, 'a', encoding='utf-8') as file: file.write(f'start {name} {os.getpid()}\\n')\n"
+    "time.sleep(sleeps.get(name, 0))\n"
+    "with open(log, 'a', encoding='utf-8') as file: file.write(f'end {name} {os.getpid()}\\n')\n", encoding="utf-8")
+  return f'"{sys.executable}" "{scriptPath}"', logPath
+
+
+def taskTestLog(logPath, taskId="T1"):
+  lines = logPath.read_text(encoding="utf-8").splitlines() if logPath.exists() else []
+  return [line.split() for line in lines if line.split()[1] == f"P0001-{taskId}"]
+
+
+def taskTestStarted(logPath, count=1):
+  return lambda state: len([entry for entry in taskTestLog(logPath) if entry[0] == "start"]) >= count
+
+
+def test_testsRunInBackgroundInParallelWithoutBlockingOtherTasks(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 6, "P0001-T2": 1.5})
+  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command)
+  runUntil(conductor, taskIs(TaskStatus.testing))
+  runUntil(conductor, planDone)
+  assert all(event["data"]["testing"] is True for event in eventsOf(conductor, "taskWritten"))
+  order = [tuple(line.split()[:2]) for line in logPath.read_text(encoding="utf-8").splitlines()]
+  # 兩個任務的測試期間重疊：T2 的測試在 T1 的測試結束（之後才寫 testRun）之前就開始
+  assert order.index(("start", "P0001-T2")) < order.index(("end", "P0001-T1"))
+  events = [(event["type"], event["task"]) for event in board_core.readEvents(conductor.projectDir)]
+  assert events.index(("reviewStarted", "T2")) < events.index(("testRun", "T1"))
+
+
+def test_pauseWhileTestingRerunsTestsWithoutInterruption(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 3})
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  runUntil(conductor, taskTestStarted(logPath))
+  board_core.appendEvent(conductor.projectDir, "paused", data={"reason": "測試暫停"})
+  state = runUntil(conductor, lambda current: not conductor.jobs)
+  assert state["tasks"]["P0001/T1"]["status"] == TaskStatus.testing
+  board_core.appendEvent(conductor.projectDir, "resumed")
+  runUntil(conductor, planDone)
+  assert len(eventsOf(conductor, "testRun")) == 1
+  assert eventsOf(conductor, "taskInterrupted") == []
+  assert [entry[0] for entry in taskTestLog(logPath)] == ["start", "start", "end"]
+
+
+def test_abandonWhileTestingKillsTestsWithoutTestRun(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 5})
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  runUntil(conductor, taskTestStarted(logPath))
+  testPid = int(taskTestLog(logPath)[0][2])
+  board_core.appendEvent(conductor.projectDir, "planAbandoned", plan="P0001")
+  runUntil(conductor, lambda current: not conductor.jobs)
+  deadline = time.time() + 10
+  while conductorModule.processAlive(testPid) and time.time() < deadline:
+    time.sleep(0.1)
+  assert not conductorModule.processAlive(testPid)
+  for _ in range(3):
+    conductor.tick()
+  assert eventsOf(conductor, "testRun") == []
+  assert [entry[0] for entry in taskTestLog(logPath)] == ["start"]
+
+
+def test_restartWhileTestingRerunsTests(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 3})
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  runUntil(conductor, taskTestStarted(logPath))
+  # 和 Ctrl+C 結束 Alfred 時一樣
+  conductor.stopJobs(list(conductor.jobs), recordInterruption=True)
+  assert conductor.currentState()[1]["tasks"]["P0001/T1"]["status"] == TaskStatus.testing
+  restarted = Conductor(conductor.projectDir, config=fakeConfig(testCommand=command), out=lambda line: None)
+  runUntil(restarted, planDone)
+  assert len(eventsOf(restarted, "testRun")) == 1
+  assert eventsOf(restarted, "taskInterrupted") == []
+  assert [entry[0] for entry in taskTestLog(logPath)] == ["start", "start", "end"]
 
 
 def test_testCommandTimeoutKillsProcessTree(startBoard, tmp_path):

@@ -12,8 +12,8 @@ def started(roundNumber, agent="claude", taskId="T1"):
                    worktree="wt", sessionId=f"session-{roundNumber}", resume=roundNumber > 1)
 
 
-def written(taskId="T1"):
-  return makeEvent("taskWritten", plan="P0001", task=taskId, commit="c1", summary="完成")
+def written(taskId="T1", **data):
+  return makeEvent("taskWritten", plan="P0001", task=taskId, commit="c1", summary="完成", **data)
 
 
 def reviewStarted(roundNumber, taskId="T1"):
@@ -111,6 +111,23 @@ def test_testRunWithoutNewFailureOnlyRecords():
     after = task(stateAfter(started(1), written(), ranTests(1, **data)))
     assert after["lastTest"] == data
     assert {**after, "lastTest": None} == before
+
+
+def test_writtenWithTestingWaitsForTestRunBeforeReview():
+  testing = task(stateAfter(started(1), written(testing=True)))
+  assert testing["status"] == TaskStatus.testing
+  for verdict in ("passed", "preexisting"):
+    after = task(stateAfter(started(1), written(testing=True), ranTests(1, passed=verdict == "passed", tail="x",
+                                                                      verdict=verdict, newFailures=[])))
+    assert after["status"] == TaskStatus.toReview
+  failed = task(stateAfter(started(1), written(testing=True),
+                           ranTests(1, passed=False, tail="1 failed", verdict="newFailure", newFailures=["t::new"])))
+  assert (failed["status"], failed["round"]) == (TaskStatus.queued, 2)
+
+
+def test_writtenWithoutTestingFieldStillGoesToReview():
+  assert task(stateAfter(started(1), written()))["status"] == TaskStatus.toReview
+  assert task(stateAfter(started(1), written(testing=False)))["status"] == TaskStatus.toReview
 
 
 def test_agentFailedRetriesOnceThenNeedsYou():
