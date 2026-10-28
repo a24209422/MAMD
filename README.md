@@ -144,7 +144,7 @@ python <agent-board>\install_skill.py
 2. 在專案資料夾開 `codex` 說你的需求；或開 `claude`，打 `/agent-board-plan 你的需求`。寫完 plan 會自己送出。
 3. 看線路圖：`python <agent-board>\board.py --project <專案資料夾> index`，打開 `plans/_review/index.html`
 4. 核准：`python <agent-board>\board.py --project <專案資料夾> approve P0007`，或在儀表板上按「核准」
-5. 之後看 Alfred 的終端機，或跑 `status`。完成後 `plan/P0007` 分支裡就是所有任務的成果，要不要合併到你的分支由你決定。
+5. 之後看 Alfred 的終端機，或跑 `status`。完成後 `plan/P0007` 分支裡就是所有任務的成果，要不要合併到你的分支由你決定。跑 `stats P0007` 可以看這份 plan 的平均輪數、第一次審查就通過的比例等成效（見「指令」）。
 
 ### 測試把關
 
@@ -195,6 +195,7 @@ python <agent-board>\install_skill.py
 | 指令 | 做什麼 |
 |---|---|
 | `status [P0007]` | 看進度 |
+| `stats [P0007]` | 看成效：不帶 plan 時每份核准過的 plan 一列加上總計，帶 plan 時列出全部指標和每個任務的輪數 |
 | `index` | 產生總覽頁與線路圖 |
 | `init [--test-command "指令" / --skip-tests / --tdd]` | 在專案啟用 agent-board 並明確選擇測試方式；TDD 可搭配 --source、--tests |
 | `approve P0007` | 核准（有橘、黃問題時會先問你） |
@@ -207,6 +208,25 @@ python <agent-board>\install_skill.py
 | `cleanup P0007` | 刪除結束的 plan 的 worktree 與任務分支（`plan/P0007` 保留） |
 
 `approve`、`reject`、`abandon`、`decide`、`stop`、`resume`、`cleanup` 只能由你在終端機執行，agent 執行會被拒絕。
+
+`stats` 只讀 `.board/events.jsonl` 和推導出的狀態，不另外記錄資料，舊的 plan 也算得出來：
+
+| 指標 | 算法 |
+|---|---|
+| 任務 | 完成、放棄、全部 |
+| 平均輪數 | 每個任務事件裡最大輪數的平均；還沒開始的任務不算 |
+| 寫完次數 | 寫程式的 agent 寫完的次數 |
+| 審查 | 審查通過、不通過的次數 |
+| 第一次審查就通過 | 第一個審查結果是通過的任務 ÷ 有審查結果的任務 |
+| 測試 | 跑測試的次數、失敗次數、因新增的失敗退回的次數（見「測試把關」） |
+| 寫完後被退回 | （審查不通過＋測試退回）÷ 寫完次數 |
+| 你的決定 | `decide` 的次數，依 retry、done、abandon 分開 |
+| 還在等你 | 目前「等你處理」的任務數 |
+| 等你的時間 | 每次 `decide` 距離同一任務前一個事件的時間加總 |
+| agent 失敗、合併衝突 | agent 失敗、合併衝突的次數 |
+| plan 退回 | `reject` 的次數 |
+| 耗時 | 核准到完成；還沒完成（含放棄）時算到現在，並標「進行中」 |
+| 模型 | 寫程式和審查用過的 CLI、模型、推理強度 |
 
 `decide ... retry` 的實際效果，依任務停下來的原因而不同：
 

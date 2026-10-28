@@ -14,6 +14,7 @@ from board_core import (PlanStatus, TaskStatus, appendEvent, boardDir, deriveSta
                         planTasks, readEvents, taskKey, testConfigProblems)
 from board_index import buildIndex
 from board_prompts import tddCrapDir
+from board_stats import approvedPlanIds, boardStats, planStats, taskRounds
 
 humanOnlyCommands = {"approve", "reject", "abandon", "decide", "stop", "resume", "cleanup"}
 # board_api 要從暫停事件的原因分辨是不是你按的 stop，兩邊共用同一個字串
@@ -136,6 +137,100 @@ def cmdStatus(projectDir, planIdValue=None):
       if task["needs"]:
         detail += f"｜{task['needs']['reason']}"
       print(detail)
+  return 0
+
+
+def durationText(seconds):
+  hours, rest = divmod(int(seconds), 3600)
+  minutes, seconds = divmod(rest, 60)
+  parts = [f"{hours} 小時"] if hours else []
+  parts += [f"{minutes} 分"] if hours or minutes else []
+  return " ".join(parts + [f"{seconds} 秒"])
+
+
+def elapsedText(duration):
+  return durationText(duration["seconds"]) + ("（進行中）" if duration["inProgress"] else "")
+
+
+def averageText(value):
+  return "-" if value is None else f"{value:g}"
+
+
+def decisionsText(decisions):
+  counts = "、".join(f"{action} {decisions[action]}" for action in ("retry", "done", "abandon") if decisions[action])
+  return f"{decisions['total']}（{counts}）" if counts else str(decisions["total"])
+
+
+def modelsText(models):
+  def combos(items):
+    names = [" ".join(str(value) for value in combo.values() if value) for combo in items]
+    return "、".join(name for name in names if name) or "-"
+  return f"writer：{combos(models['writer'])}；reviewer：{combos(models['reviewer'])}"
+
+
+def statsSummary(stats):
+  tasks = stats["tasks"]
+  return "｜".join([
+    f"任務 {tasks['done']}／{tasks['abandoned']}／{tasks['total']}",
+    f"平均輪數 {averageText(stats['averageRounds'])}",
+    f"第一次審查就通過 {stats['firstReviewPassed']['passed']}/{stats['firstReviewPassed']['reviewed']}",
+    f"寫完後被退回 {stats['returnedAfterWrite']['returned']}/{stats['returnedAfterWrite']['written']}",
+    f"你的決定 {stats['decisions']['total']}",
+    f"耗時 {elapsedText(stats['duration'])}",
+  ])
+
+
+def statsDetail(stats):
+  tasks, reviews, tests = stats["tasks"], stats["reviews"], stats["tests"]
+  return [
+    f"任務：完成 {tasks['done']}／放棄 {tasks['abandoned']}／全部 {tasks['total']}",
+    f"平均輪數：{averageText(stats['averageRounds'])}",
+    f"寫完次數：{stats['written']}",
+    f"審查：{reviews['total']} 次（通過 {reviews['passed']}、不通過 {reviews['failed']}）",
+    f"第一次審查就通過：{stats['firstReviewPassed']['passed']}/{stats['firstReviewPassed']['reviewed']}",
+    f"測試：{tests['runs']} 次，失敗 {tests['failed']}，退回 {tests['returned']}",
+    f"寫完後被退回：{stats['returnedAfterWrite']['returned']}/{stats['returnedAfterWrite']['written']}",
+    f"你的決定：{decisionsText(stats['decisions'])}",
+    f"還在等你：{stats['waiting']}",
+    f"等你的時間：{durationText(stats['waitSeconds'])}",
+    f"agent 失敗、合併衝突：{stats['agentFailed']}、{stats['conflicts']}",
+    f"plan 退回：{stats['planRejected']}",
+    f"耗時：{elapsedText(stats['duration'])}",
+    f"模型：{modelsText(stats['models'])}",
+  ]
+
+
+def cmdStats(projectDir, planIdValue=None):
+  loadErrors = []
+  plans = loadPlans(projectDir, loadErrors)
+  printLoadWarnings(loadErrors)
+  events = readEvents(projectDir)
+  state = deriveState(events, plans, loadConfig(projectDir))
+
+  def heading(planId):
+    planState = state["plans"].get(planId)
+    return f"{planId} {planState['title']}｜{planState['status']}" if planState else planId
+
+  if planIdValue:
+    if planIdValue not in approvedPlanIds(events):
+      print(f"{planIdValue} 還沒核准過，沒有成效可以算")
+      return 1
+    print(heading(planIdValue))
+    for line in statsDetail(planStats(events, state, planIdValue)):
+      print("  " + line)
+    rounds = taskRounds([event for event in events if event.get("plan") == planIdValue])
+    print("  每個任務的輪數：")
+    for task in planTasks(state, planIdValue):
+      roundNumber = rounds.get(taskKey(planIdValue, task["task"]))
+      print(f"    {task['task']} {f'{roundNumber} 輪' if roundNumber else '還沒開始'}｜{task['status']}")
+    return 0
+  stats = boardStats(events, state)
+  if not stats["plans"]:
+    print("還沒有核准過的 plan")
+    return 0
+  for planId, planStatsValue in stats["plans"].items():
+    print(f"{heading(planId)}｜{statsSummary(planStatsValue)}")
+  print(f"總計（{len(stats['plans'])} 份）｜{statsSummary(stats['total'])}")
   return 0
 
 
@@ -477,6 +572,7 @@ def buildParser():
   sub = parser.add_subparsers(dest="command", required=True)
   sub.add_parser("submit").add_argument("plan")
   sub.add_parser("status").add_argument("plan", nargs="?")
+  sub.add_parser("stats").add_argument("plan", nargs="?")
   sub.add_parser("approve").add_argument("plan")
   reject = sub.add_parser("reject")
   reject.add_argument("plan")
@@ -516,6 +612,7 @@ def main(argv=None):
   commands = {
     "submit": lambda: cmdSubmit(projectDir, args.plan),
     "status": lambda: cmdStatus(projectDir, args.plan),
+    "stats": lambda: cmdStats(projectDir, args.plan),
     "approve": lambda: cmdApprove(projectDir, args.plan),
     "reject": lambda: cmdReject(projectDir, args.plan, args.reason),
     "abandon": lambda: cmdAbandon(projectDir, args.plan),
