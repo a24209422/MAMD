@@ -298,6 +298,27 @@ def test_renderUntilRedrawsWhenStateIsNotReadyYet(tmp_path, monkeypatch):
     warnings.warn_explicit(item.message, item.category, item.filename, item.lineno)
 
 
+@needsBrowser
+def test_renderUntilRedrawsDashboardAfterStateUnavailable(dashboard, tmp_path, monkeypatch):
+  # 整合驗證：真的 server 在前兩次載入頁面時 /api/state 都回 503，頁面自己每 2 秒重讀也拿不到，第 3 次載入才有資料
+  realRouteGet = server.DashboardHandler.routeGet
+  pageLoads = []
+  def flakyRouteGet(handler, path):
+    if path == "/":
+      pageLoads.append(path)
+    if path == "/api/state" and len(pageLoads) <= 2:
+      handler.sendJson(503, {"ok": False, "message": "替身：暫時無法回應"})
+      return
+    realRouteGet(handler, path)
+  monkeypatch.setattr(server.DashboardHandler, "routeGet", flakyRouteGet)
+  with pytest.warns(UserWarning, match=r"test_renderUntilRedrawsDashboardAfterStateUnavailable .*重畫 3 次") as caught:
+    dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "開始寫程式" in dom)
+  assert "開始寫程式" in dom and len(pageLoads) == 3
+  assert servedRequest("/api/state", 503) in serverRequests[dashboard]
+  for item in caught:
+    warnings.warn_explicit(item.message, item.category, item.filename, item.lineno)
+
+
 def test_renderUntilFailsWithDiagnosticsWhenNeverReady(tmp_path, monkeypatch):
   broken = ("<main></main>", [servedRequest("/", 200), servedRequest("/api/state", 500, "RuntimeError: 替身：讀狀態失敗")])
   fakeDashboardRuns(monkeypatch, [broken] * renderAttempts)
