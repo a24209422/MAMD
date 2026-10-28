@@ -375,7 +375,8 @@ class Conductor:
           prompt = buildWritePrompt(plan, info["task"], info["round"], self.readReview(taskState["lastReviewNotes"]),
                                     taskState["userNote"],
                                     self.config["testCommand"] if self.config.get("tddCrap") else "", cli,
-                                    self.config["testCommand"], self.config.get("skipTests", False))
+                                    self.config["testCommand"], self.config.get("skipTests", False),
+                                    taskState["lastTest"])
         argv, stdinText, lineParser = self.writeLaunch(info, worktree, prompt, resume)
         info["job"] = board_agents.AgentJob(argv, worktree, stdinText, self.logPath(info, "write"), lineParser,
                                             self.timeoutSeconds()).start()
@@ -535,7 +536,8 @@ class Conductor:
       diff = board_git.taskDiff(self.projectDir, info["plan"], info["task"])
       resolvedConflicts = taskState["conflictFiles"] if taskState["lastWriteMode"] == "resolve" else None
       prompt = buildReviewPrompt(plan, info["task"], info["round"], diff, taskState["lastTest"], previousErrors,
-                                 resolvedConflicts, bool(self.config.get("tddCrap")))
+                                 resolvedConflicts, bool(self.config.get("tddCrap")),
+                                 self.preexistingFailures(taskState))
       argv, stdinText, lineParser = self.reviewLaunch(info, worktree, prompt)
       info["job"] = board_agents.AgentJob(argv, worktree, stdinText, self.logPath(info, f"review{attempt}"),
                                           lineParser, self.timeoutSeconds()).start()
@@ -552,6 +554,12 @@ class Conductor:
       self.jobs.pop(key, None)
       info["job"].kill()
       raise
+
+  def preexistingFailures(self, taskState):
+    if (taskState["lastTest"] or {}).get("verdict") != "preexisting":
+      return []
+    baseline = self.currentState()[1]["plans"][taskState["plan"]]["testBaseline"]
+    return (baseline or {}).get("failures") or []
 
   def reviewLaunch(self, info, worktree, prompt):
     command = info["launch"]["command"]

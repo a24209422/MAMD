@@ -25,6 +25,40 @@ def test_writePromptWithReviewAndNote(writePlan):
   assert "使用者補充：提示用中文" in prompt
 
 
+def test_writePromptAfterTestReturnShowsNewFailuresInsteadOfReview(writePlan):
+  lastTest = {"passed": False, "tail": "FAILED t.py::test_new - boom\n1 failed", "verdict": "newFailure",
+              "newFailures": ["t.py::test_new"]}
+  prompt = buildWritePrompt(samplePlan(writePlan), "T1", 3, reviewMarkdown="## 必改\n- [R1] 舊意見", lastTest=lastTest)
+  assert "基準沒有的失敗" in prompt and "- t.py::test_new" in prompt
+  assert "FAILED t.py::test_new - boom\n1 failed" in prompt
+  assert "舊意見" not in prompt and "上一輪審查沒有通過" not in prompt
+
+
+def test_writePromptAfterTestReturnWithoutNamesPointsToOutput(writePlan):
+  lastTest = {"passed": False, "tail": "測試超時", "verdict": "newFailure", "newFailures": []}
+  prompt = buildWritePrompt(samplePlan(writePlan), "T1", 2, lastTest=lastTest)
+  assert "分不出測試名稱" in prompt and "測試超時" in prompt
+
+
+def test_writePromptKeepsReviewWhenLastTestWasNotReturned(writePlan):
+  for lastTest in ({"passed": True, "tail": "ok", "verdict": "passed", "newFailures": []},
+                   {"passed": False, "tail": "1 failed"}):
+    prompt = buildWritePrompt(samplePlan(writePlan), "T1", 2, reviewMarkdown="## 必改\n- [R1] 意見", lastTest=lastTest)
+    assert "- [R1] 意見" in prompt and "基準沒有的失敗" not in prompt
+
+
+def test_reviewPromptExplainsPreexistingAndUnknownFailures(writePlan):
+  preexisting = {"passed": False, "tail": "1 failed", "verdict": "preexisting", "newFailures": []}
+  prompt = buildReviewPrompt(samplePlan(writePlan), "T1", 1, "+x", testRun=preexisting,
+                             baselineFailures=["t.py::test_old"])
+  assert "基準就有" in prompt and "- t.py::test_old" in prompt and "不必因為" in prompt
+  unknown = {"passed": False, "tail": "1 failed", "verdict": "unknown", "newFailures": []}
+  prompt = buildReviewPrompt(samplePlan(writePlan), "T1", 1, "+x", testRun=unknown)
+  assert "基準就有" in prompt and "無法比對" in prompt and "不必因為" in prompt
+  for testRun in ({"passed": True, "tail": "ok", "verdict": "passed"}, {"passed": False, "tail": "1 failed"}):
+    assert "基準就有" not in buildReviewPrompt(samplePlan(writePlan), "T1", 1, "+x", testRun=testRun)
+
+
 def test_reviewPromptIncludesDiffTestAndErrors(writePlan):
   prompt = buildReviewPrompt(samplePlan(writePlan), "T1", 1, "+print('hi')",
                              testRun={"passed": False, "tail": "1 failed"}, previousErrors=["不通過時至少要有一條必改"])

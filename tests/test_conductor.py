@@ -183,7 +183,26 @@ def test_newFailureGoesBackToWriterWithoutReview(startBoard, tmp_path):
   assert "reviewStarted" not in [event["type"] for event in events[:firstRun + 1]]
   assert [event["data"]["verdict"] for event in eventsOf(conductor, "testRun")] == ["newFailure", "passed"]
   assert len(eventsOf(conductor, "reviewStarted")) == 1
-  assert len(readCalls(scenarioDir, "write")) == 2
+  calls = readCalls(scenarioDir, "write")
+  assert len(calls) == 2
+  assert "（第 2 輪）" in calls[1]["prompt"]
+  assert "- tests/test_new.py::test_new" in calls[1]["prompt"]
+  assert "FAILED tests/test_new.py::test_new - AssertionError" in calls[1]["prompt"]
+
+
+def test_testReturnAfterFailedReviewDropsEarlierReview(startBoard, tmp_path):
+  # 第 1 輪審查不通過，第 2 輪寫出的內容測試有新增的失敗，第 3 輪只附測試的失敗
+  body = "if written.exists() and '第 2 次' in written.read_text(encoding='utf-8'):\n  " + failNewTest.replace("\n", "\n  ")
+  conductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["fail", "pass"]}},
+                                      testCommand=pythonTestCommand(tmp_path, body))
+  runUntil(conductor, planDone)
+  assert [event["data"]["verdict"] for event in eventsOf(conductor, "testRun")] == ["passed", "newFailure", "passed"]
+  calls = readCalls(scenarioDir, "write")
+  assert "還沒達成需求" in calls[1]["prompt"]
+  assert "（第 3 輪）" in calls[2]["prompt"]
+  assert "- tests/test_new.py::test_new" in calls[2]["prompt"]
+  assert "FAILED tests/test_new.py::test_new - AssertionError" in calls[2]["prompt"]
+  assert "還沒達成需求" not in calls[2]["prompt"]
 
 
 def test_newFailureEveryRoundNeedsYouThenRetryRunsAnotherRound(startBoard, tmp_path):
@@ -212,6 +231,16 @@ def test_sameFailuresAsBaselineStillGoToReview(startBoard, tmp_path):
   assert (testRun["data"]["verdict"], testRun["data"]["newFailures"]) == ("preexisting", [])
   assert len(eventsOf(conductor, "reviewStarted")) == 1
   assert len(readCalls(scenarioDir, "write")) == 1
+  reviewPrompt = readCalls(scenarioDir, "review")[0]["prompt"]
+  assert "基準就有" in reviewPrompt and "- tests/test_old.py::test_old" in reviewPrompt
+
+
+def test_unnamedBaselineFailureIsExplainedToReviewer(startBoard, tmp_path):
+  conductor, scenarioDir = startBoard(oneTask, testCommand=pythonTestCommand(tmp_path, "print('boom')\nsys.exit(1)\n"))
+  runUntil(conductor, planDone)
+  assert eventsOf(conductor, "testRun")[0]["data"]["verdict"] == "unknown"
+  reviewPrompt = readCalls(scenarioDir, "review")[0]["prompt"]
+  assert "基準就有" in reviewPrompt and "無法比對" in reviewPrompt
 
 
 def test_changedTestCommandRerunsBaselineAfterRestart(startBoard):

@@ -93,14 +93,35 @@ def testExecutionLines(testCommand, skipTests):
   return []
 
 
+def testFailureLines(lastTest):
+  names = lastTest.get("newFailures") or []
+  return ["上一輪的自動測試出現基準沒有的失敗，沒有送審；請修正到這些測試通過：",
+          *([f"- {name}" for name in names] or ["- （輸出裡分不出測試名稱，請看下面的測試輸出）"]),
+          "測試輸出最後 50 行：", "```", lastTest.get("tail", ""), "```"]
+
+
+def baselineFailureLines(testRun, baselineFailures):
+  # 基準就有的失敗不是這個任務造成的，不說清楚的話審查者會因為「測試失敗」退回
+  if testRun.get("verdict") == "preexisting":
+    return ["這些失敗基準就有（plan 開始時在 baseCommit 跑測試就失敗），不是這個任務造成的，不必因為它們退回：",
+            *[f"- {name}" for name in baselineFailures]]
+  if testRun.get("verdict") == "unknown":
+    return ["基準就有失敗（plan 開始時在 baseCommit 跑測試就失敗），但輸出分不出測試名稱，無法比對哪些失敗是這個任務新增的；"
+            "不必因為測試失敗本身退回，請依 diff 判斷這個任務有沒有弄壞東西。"]
+  return []
+
+
 def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", qualityCommand="", cli="claude",
-                     testCommand="", skipTests=False):
+                     testCommand="", skipTests=False, lastTest=None):
   parts = [
     taskHeadline(plan, taskId, roundNumber), "",
     "這個任務要滿足的需求：", *requirementLines(plan, taskId), "",
     "plan 裡和這個任務有關的列：", formatRows(taskRows(plan, taskId)),
   ]
-  if reviewMarkdown:
+  if lastTest and lastTest.get("verdict") == "newFailure":
+    # 被測試退回的這一輪沒有審查；更早的審查意見針對的是舊的改動，附上反而會讓 writer 改錯方向
+    parts += ["", *testFailureLines(lastTest)]
+  elif reviewMarkdown:
     parts += ["", "上一輪審查沒有通過，請修正「必改」的每一條（「建議」可以參考，不強制）：", reviewMarkdown]
   if userNote:
     parts += ["", "使用者補充：" + userNote]
@@ -131,7 +152,7 @@ def buildResolvePrompt(plan, taskId, roundNumber, conflicts, userNote="", testCo
 
 
 def buildReviewPrompt(plan, taskId, roundNumber, diff, testRun=None, previousErrors=None, resolvedConflicts=None,
-                      tddCrap=False):
+                      tddCrap=False, baselineFailures=None):
   parts = [
     "審查 " + taskHeadline(plan, taskId, roundNumber), "",
     "這個任務要滿足的需求（必改的 ref 只能用這些編號或「驗證」）：", *requirementLines(plan, taskId), "",
@@ -144,6 +165,7 @@ def buildReviewPrompt(plan, taskId, roundNumber, diff, testRun=None, previousErr
               "也沒有刪掉或改壞其他任務已經合併的內容。下面的 diff 是這個任務相對於最新 plan 分支的改動。"]
   if testRun:
     parts += ["", f"自動測試結果：{'通過' if testRun['passed'] else '失敗'}", "```", testRun.get("tail", ""), "```"]
+    parts += baselineFailureLines(testRun, baselineFailures or [])
   if tddCrap:
     parts += ["", *tddReviewLines]
   if len(diff) > maxDiffChars:
