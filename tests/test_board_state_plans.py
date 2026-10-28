@@ -31,6 +31,19 @@ def test_approveCreatesQueuedTasksFromSnapshot():
   assert all(task["status"] == TaskStatus.queued and task["round"] == 1 and task["maxRounds"] == 3 for task in tasks)
 
 
+def test_testBaselineIsRecordedOnPlanAndLatestWins():
+  approved = approvedEvent("P0001", [("T1", [])])
+  assert deriveState([approved], makePlans("P0001"), testConfig)["plans"]["P0001"]["testBaseline"] is None
+  first = makeEvent("testBaseline", plan="P0001", command="pytest -q", commit="abc123", passed=False, tail="1 failed")
+  rerun = makeEvent("testBaseline", plan="P0001", command="python -m pytest", commit="abc123", passed=True, tail="ok")
+  state = deriveState([approved, first], makePlans("P0001"), testConfig)
+  assert state["plans"]["P0001"]["testBaseline"] == {"command": "pytest -q", "commit": "abc123", "passed": False,
+                                                     "tail": "1 failed"}
+  assert state["plans"]["P0001"]["status"] == PlanStatus.active
+  state = deriveState([approved, first, rerun], makePlans("P0001"), testConfig)
+  assert state["plans"]["P0001"]["testBaseline"]["command"] == "python -m pytest"
+
+
 def test_abandonPlanAbandonsUnfinishedTasks():
   events = [approvedEvent("P0001", [("T1", [])]), makeEvent("planAbandoned", plan="P0001")]
   state = deriveState(events, makePlans("P0001"), testConfig)
