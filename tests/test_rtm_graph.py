@@ -73,6 +73,37 @@ def test_planRemembersWhetherItHasTitle(writePlan, tmp_path):
   assert plan["title"] == "0002-untitled"
 
 
+rtmTable = ("| 需求 | AI 理解 | 做法（ADR） | 不採用 | 任務 | 前置 | 驗證 |\n|---|---|---|---|---|---|---|\n"
+            "| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |\n"
+            "| R1 | | D1 | | T2 任務二 | T1 | 驗證二 |\n")
+
+
+def writeRawPlan(tmp_path, body):
+  path = tmp_path / "0001-demo.md"
+  path.write_text("---\nid: P0001\n---\n\n" + body, encoding="utf-8")
+  return path
+
+
+def test_extraTextKeepsTextBeforeAndAfterTable(tmp_path):
+  plan = analyzePlan(writeRawPlan(tmp_path, "# 測試 plan\n\n表格前的說明\n\n" + rtmTable + "\n## 契約\n\n- 回傳值是 0\n"))
+  assert plan["extraText"] == "表格前的說明\n\n## 契約\n\n- 回傳值是 0"
+  assert "測試 plan" not in plan["extraText"]
+  assert "需求" not in plan["extraText"]
+  assert "|" not in plan["extraText"]
+  assert plan["graph"].tasks["T2"]["dependsOn"] == ["T1"]
+
+
+def test_extraTextEmptyWhenOnlyTable(tmp_path):
+  assert analyzePlan(writeRawPlan(tmp_path, "# 測試 plan\n\n" + rtmTable))["extraText"] == ""
+
+
+def test_extraTextKeepsOtherTables(tmp_path):
+  ruleTable = "| 輸入 | 輸出 |\n|---|---|\n| a | 1 |\n| b | 2 |"
+  plan = analyzePlan(writeRawPlan(tmp_path, "# 測試 plan\n\n" + rtmTable + "\n## 規則表\n\n" + ruleTable + "\n"))
+  assert plan["extraText"] == "## 規則表\n\n" + ruleTable
+  assert plan["rowCount"] == 2
+
+
 def test_parseAreaSplitsSideAndModule():
   assert parseArea(["前端/縮圖顯示", "後端"]) == [
     {"side": "前端", "module": "縮圖顯示"}, {"side": "後端", "module": ""}]
