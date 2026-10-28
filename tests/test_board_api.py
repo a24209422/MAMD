@@ -9,6 +9,7 @@ import board
 import board_api
 import board_core
 import board_git
+import board_stats
 from board_core import appendEvent
 
 twoTasks = ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |",
@@ -180,6 +181,29 @@ def test_planViewUsesRtmGraph(approvedProject, writePlan):
   assert view["approveWarnings"] and view["approveWarnings"][0].startswith("橘｜")
   assert board_api.planView(approvedProject, "P0001")["approveWarnings"] == []
   assert board_api.planView(approvedProject, "P0099") is None
+
+
+def test_planViewHasStatsOnlyAfterApproval(approvedProject, writePlan):
+  appendEvent(approvedProject, "taskStarted", plan="P0001", task="T1", agent="writer", roundNumber=1,
+              data={"mode": "write"})
+  appendEvent(approvedProject, "taskWritten", plan="P0001", task="T1", agent="writer", roundNumber=1,
+              data={"commit": "abc", "mode": "write"})
+  appendEvent(approvedProject, "reviewFailed", plan="P0001", task="T1", agent="reviewer", roundNumber=1)
+  stats = board_api.planView(approvedProject, "P0001")["stats"]
+  events = board_core.readEvents(approvedProject)
+  state = board_core.deriveState(events, board_core.loadPlans(approvedProject), board_core.loadConfig(approvedProject))
+  expected = board_stats.planStats(events, state, "P0001")
+  # 和 board.py stats 同一份算法；耗時算到現在，只比進行中
+  assert {key: value for key, value in stats.items() if key not in ("duration", "taskRounds")} == \
+         {key: value for key, value in expected.items() if key != "duration"}
+  assert stats["duration"]["inProgress"] is True
+  assert stats["returnedAfterWrite"] == {"returned": 1, "written": 1}
+  assert stats["taskRounds"] == [{"task": "T1", "rounds": 1, "status": state["tasks"]["P0001/T1"]["status"]},
+                                 {"task": "T2", "rounds": None, "status": board_core.TaskStatus.queued}]
+  writePlan("0002-next.md", twoTasks, planId="P0002", title="下一版", projectDir=approvedProject)
+  assert board_api.planView(approvedProject, "P0002")["stats"] is None
+  assert board.cmdSubmit(approvedProject, "P0002") == 0
+  assert board_api.planView(approvedProject, "P0002")["stats"] is None
 
 
 def test_planViewWithoutTable(approvedProject):

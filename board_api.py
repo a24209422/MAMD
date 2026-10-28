@@ -8,6 +8,7 @@ from board import approveWarnings, planBlockers, stopReason
 from board_core import (PlanStatus, TaskStatus, agentLanes, boardDir, configProblems, defaultContextWindows,
                         deriveState, loadConfig, loadPlans, planTasks, readEvents, readUserConfig, roleNames,
                         roleSpec, taskKey, tasksWithStatus)
+from board_stats import approvedPlanIds, planStats, taskRounds
 from conductor import formatEvent, processAlive, readLockPid
 from rtm_graph import asList, formatList, parseArea
 
@@ -191,6 +192,17 @@ def graphView(graph):
   return {"nodes": nodes, "edges": edges}
 
 
+def planStatsView(snapshot, planIdValue):
+  # 和 board.py stats 一樣：沒核准過的 plan 沒有成效可以算
+  events, state = snapshot["events"], snapshot["state"]
+  if planIdValue not in approvedPlanIds(events):
+    return None
+  rounds = taskRounds([event for event in events if event.get("plan") == planIdValue])
+  return {**planStats(events, state, planIdValue),
+          "taskRounds": [{"task": task["task"], "rounds": rounds.get(taskKey(planIdValue, task["task"])),
+                          "status": task["status"]} for task in planTasks(state, planIdValue)]}
+
+
 def planView(projectDir, planIdValue):
   snapshot = loadSnapshot(projectDir)
   plan = snapshot["plans"].get(planIdValue)
@@ -202,7 +214,8 @@ def planView(projectDir, planIdValue):
   view.update(meta=plan["meta"], graph=graphView(graph) if graph else None,
               problems={severity: list(messages) for severity, messages in problems.items()},
               blockers=planBlockers(plan),
-              approveWarnings=approveWarnings(projectDir, plan) if graph and view["status"] == PlanStatus.pending else [])
+              approveWarnings=approveWarnings(projectDir, plan) if graph and view["status"] == PlanStatus.pending else [],
+              stats=planStatsView(snapshot, planIdValue))
   return view
 
 
