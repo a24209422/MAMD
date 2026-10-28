@@ -179,6 +179,21 @@ def test_approveWithoutWarningsAndBusinessError(running, writePlan):
   assert status == 200 and again["ok"] is False and "不是「待核准」" in again["message"]
 
 
+def test_approveRefusesPlanChangedAfterSubmit(running, writePlan, capsys):
+  projectDir, port = running
+  writePlan("0001-ok.md", warningRows, planId="P0001", projectDir=projectDir)
+  assert board.cmdSubmit(projectDir, "P0001") == 0
+  writePlan("0001-ok.md", warningRows, planId="P0001", title="改過的標題", projectDir=projectDir)
+  # 有警告也不先問確認，直接顯示和終端機核准同一段訊息
+  status, refused = post(port, "/api/plans/P0001/approve")
+  assert status == 200 and refused["ok"] is False and "needsConfirm" not in refused
+  assert "重新執行 submit" in refused["message"]
+  capsys.readouterr()
+  assert board.cmdApprove(projectDir, "P0001", confirm=lambda prompt: "y") == 1
+  assert refused["message"] == capsys.readouterr().out.strip()
+  assert "planApproved" not in eventTypes(projectDir)
+
+
 def test_rejectNeedsReason(running, writePlan):
   projectDir, port = running
   writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=projectDir)

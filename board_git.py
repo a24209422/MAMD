@@ -13,7 +13,9 @@ def runGit(cwd, *args, check=True):
   completed = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
                              encoding="utf-8", errors="replace")
   if check and completed.returncode != 0:
-    raise GitError(f"git {' '.join(args)} 失敗：{completed.stderr.strip()}")
+    # git hook 可能把擋下的原因印在 stdout，只看 stderr 會漏掉
+    output = "\n".join(text for text in (completed.stderr.strip(), completed.stdout.strip()) if text)
+    raise GitError(f"git {' '.join(args)} 失敗：{output}")
   return completed.stdout.strip()
 
 
@@ -118,6 +120,28 @@ def cleanWorktree(path):
     raise GitError(f"拒絕清理非 worktree 的路徑：{path}")
   runGit(path, "reset", "--hard", "HEAD")
   runGit(path, "clean", "-fd")
+
+
+def gitSucceeds(cwd, *args):
+  return subprocess.run(["git", *args], cwd=cwd, capture_output=True).returncode == 0
+
+
+# 路徑預設是 pathspec，`--` 也不會停用萬用字元：plans/0001-[ab].md 會匹配到 plans/0001-a.md
+literalPathspecs = "--literal-pathspecs"
+
+
+def fileMatchesHead(projectDir, relativePath):
+  # 沒被追蹤的檔案 git diff 看不到差異，要先確認 git 認得它
+  return (gitSucceeds(projectDir, literalPathspecs, "ls-files", "--error-unmatch", "--", relativePath)
+          and gitSucceeds(projectDir, literalPathspecs, "diff", "--quiet", "--no-ext-diff", "--no-textconv",
+                          "HEAD", "--", relativePath))
+
+
+def commitFile(projectDir, relativePath, message):
+  # commit 後面接路徑只 commit 這個檔案，主資料夾其他已暫存的改動照樣留在暫存區
+  runGit(projectDir, literalPathspecs, "add", "--", relativePath)
+  runGit(projectDir, literalPathspecs, "commit", "-q", "-m", message, "--", relativePath)
+  return runGit(projectDir, "rev-parse", "HEAD")
 
 
 def commitAll(path, message):
