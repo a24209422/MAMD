@@ -1,7 +1,7 @@
 """從事件紀錄和推導出的狀態算出每份 plan 的成效；只讀事件，不讀 log 或 git。"""
 from datetime import datetime
 
-from board_core import PlanStatus, TaskStatus, planTasks, taskKey
+from board_core import TaskStatus, planTasks, taskKey
 
 decisionActions = ("retry", "done", "abandon")
 
@@ -83,20 +83,14 @@ def roleModels(events, eventType, defaultCli=None):
   return models
 
 
-def durationStats(events, planStatus, now):
+def durationStats(events, now):
   approved = next((event for event in events if event.get("type") == "planApproved"), None)
   if not approved:
     return {"seconds": 0, "inProgress": False}
   completed = next((event for event in events if event.get("type") == "planCompleted"), None)
-  inProgress = not completed and planStatus == PlanStatus.active
-  if completed:
-    end = parseTime(completed["time"])
-  elif inProgress:
-    end = now or datetime.now().astimezone()
-  else:
-    # 放棄或被取代的 plan 不會有 planCompleted，算到它最後一個事件
-    end = parseTime(events[-1]["time"])
-  return {"seconds": int((end - parseTime(approved["time"])).total_seconds()), "inProgress": inProgress}
+  # 指標定義：沒有 planCompleted 就算到現在並標進行中，放棄或被取代的 plan 也一樣
+  end = parseTime(completed["time"]) if completed else (now or datetime.now().astimezone())
+  return {"seconds": int((end - parseTime(approved["time"])).total_seconds()), "inProgress": not completed}
 
 
 def collectStats(events, tasks, durations):
@@ -132,8 +126,7 @@ def collectStats(events, tasks, durations):
 
 def planStats(events, state, planIdValue, now=None):
   planEvents = [event for event in events if event.get("plan") == planIdValue]
-  planState = state["plans"].get(planIdValue) or {}
-  duration = durationStats(planEvents, planState.get("status"), now)
+  duration = durationStats(planEvents, now)
   return collectStats(planEvents, planTasks(state, planIdValue), [duration])
 
 

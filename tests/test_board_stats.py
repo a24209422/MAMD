@@ -179,8 +179,8 @@ def test_abandonedTasksAndPlan():
   assert stats["waitSeconds"] == 300
   # 沒開始的 T2 沒有輪數，不算進平均
   assert stats["averageRounds"] == 1
-  # 放棄的 plan 不算進行中，耗時算到最後一個事件
-  assert stats["duration"] == {"seconds": 60 * 4 + 300, "inProgress": False}
+  # 放棄的 plan 沒有 planCompleted，依定義算到現在並標進行中
+  assert stats["duration"] == {"seconds": 60 * 4 + 300 + 5 * 3600, "inProgress": True}
 
 
 def test_taskWaitingForYouAndPlanInProgress():
