@@ -15,18 +15,18 @@ tableHeader = (
 )
 
 
-def planText(planId, title, rows, extraMeta=""):
+def planText(planId, title, rows, extraMeta="", after=""):
   return (f"---\nid: {planId}\ncreated: 2026-10-25\n{extraMeta}---\n\n# {title}\n\n## 追溯矩陣\n\n"
-          + tableHeader + "\n".join(rows) + "\n")
+          + tableHeader + "\n".join(rows) + "\n" + (f"\n{after}\n" if after else ""))
 
 
 @pytest.fixture
 def writePlan(tmp_path):
-  def write(fileName, rows, planId=None, title="測試 plan", extraMeta="", projectDir=None):
+  def write(fileName, rows, planId=None, title="測試 plan", extraMeta="", projectDir=None, after=""):
     plansDir = (projectDir or tmp_path) / "plans"
     plansDir.mkdir(parents=True, exist_ok=True)
     path = plansDir / fileName
-    path.write_text(planText(planId or "P" + fileName[:4], title, rows, extraMeta), encoding="utf-8")
+    path.write_text(planText(planId or "P" + fileName[:4], title, rows, extraMeta, after), encoding="utf-8")
     return path
   return write
 
@@ -59,12 +59,12 @@ def startBoard(gitProject, writePlan, tmp_path, monkeypatch):
 
   conductors = []
 
-  def start(rows, scenario=None, **configOverrides):
+  def start(rows, scenario=None, planAfter="", **configOverrides):
     scenarioDir = tmp_path / "scenario"
     scenarioDir.mkdir(exist_ok=True)
     (scenarioDir / "scenario.json").write_text(json.dumps(scenario or {}), encoding="utf-8")
     monkeypatch.setenv("FAKE_SCENARIO", str(scenarioDir / "scenario.json"))
-    writePlan("0001-demo.md", rows, planId="P0001", projectDir=gitProject)
+    writePlan("0001-demo.md", rows, planId="P0001", projectDir=gitProject, after=planAfter)
     assert boardCli.cmdSubmit(gitProject, "P0001") == 0
     assert boardCli.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y") == 0
     conductor = Conductor(gitProject, config=fakeConfig(**configOverrides), out=lambda line: None)

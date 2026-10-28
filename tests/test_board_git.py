@@ -94,6 +94,55 @@ def test_removePlanWorktreesKeepsPlanBranch(gitProject):
   assert board_git.runGit(gitProject, "branch", "--list", "plan/P0001") != ""
 
 
+def registeredWorktrees(projectDir):
+  return board_git.runGit(projectDir, "worktree", "list", "--porcelain")
+
+
+def test_baselineWorktreeChecksOutBaseCommitDetachedThenIsRemoved(gitProject):
+  baseCommit = board_git.headCommit(gitProject)
+  writeAndCommit(startPlan(gitProject), "later.txt", "plan 分支之後的改動\n")
+  path = board_git.addBaselineWorktree(gitProject, "P0001", baseCommit)
+  assert path == board_git.worktreesRoot(gitProject) / "P0001-baseline"
+  assert board_git.headCommit(path) == baseCommit
+  assert not (path / "later.txt").exists()
+  assert board_git.runGit(path, "branch", "--show-current") == ""
+  board_git.removeBaselineWorktree(gitProject, "P0001")
+  assert not path.exists()
+  assert "P0001-baseline" not in registeredWorktrees(gitProject)
+  assert board_git.runGit(gitProject, "branch", "--list", "*baseline*") == ""
+
+
+def test_addBaselineWorktreeReplacesLeftovers(gitProject):
+  baseCommit = board_git.headCommit(gitProject)
+  path = board_git.addBaselineWorktree(gitProject, "P0001", baseCommit)
+  (path / "產物.txt").write_text("上次測試留下的\n", encoding="utf-8")
+  assert board_git.addBaselineWorktree(gitProject, "P0001", baseCommit) == path
+  assert not (path / "產物.txt").exists()
+  # 資料夾還在、卻已經不是登記中的 worktree 時，git 不肯移除，也要能重建
+  board_git.runGit(gitProject, "worktree", "remove", "--force", str(path))
+  path.mkdir()
+  (path / "stray.txt").write_text("殘留\n", encoding="utf-8")
+  board_git.addBaselineWorktree(gitProject, "P0001", baseCommit)
+  assert not (path / "stray.txt").exists()
+  assert board_git.headCommit(path) == baseCommit
+  board_git.removeBaselineWorktree(gitProject, "P0001")
+  assert not path.exists()
+
+
+def test_removeBaselineWorktreeWithoutOneDoesNothing(gitProject):
+  board_git.removeBaselineWorktree(gitProject, "P0001")
+  assert not board_git.baselineWorktreePath(gitProject, "P0001").exists()
+
+
+def test_removePlanWorktreesAlsoRemovesLeftoverBaseline(gitProject):
+  startPlan(gitProject)
+  board_git.addBaselineWorktree(gitProject, "P0001", board_git.headCommit(gitProject))
+  removed = board_git.removePlanWorktrees(gitProject, "P0001")
+  assert "P0001-baseline" in removed
+  assert not board_git.baselineWorktreePath(gitProject, "P0001").exists()
+  assert "P0001-baseline" not in registeredWorktrees(gitProject)
+
+
 def test_cleanWorktreeRefusesMainProject(gitProject):
   (gitProject / "README.md").write_text("changed\n", encoding="utf-8")
   with pytest.raises(board_git.GitError):

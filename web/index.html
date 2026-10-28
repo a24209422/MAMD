@@ -921,6 +921,11 @@ button, input, select { font: inherit; color: inherit; }
   font: 12.5px/1.5 var(--font-cjk);
 }
 .plan-ok { margin: 0; color: var(--green); font: 12.5px/1.5 var(--font-cjk); }
+/* 成效：和 board.py stats P0007 同一組指標，一列一項 */
+.plan-stats { --c: var(--line-2); }
+.plan-stats-list { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font: 12.5px/1.5 var(--font-cjk); }
+.plan-stats-list dt { color: var(--fg-3); }
+.plan-stats-list dd { margin: 0; color: var(--fg); font-variant-numeric: tabular-nums; white-space: pre-line; }
 .plan-box { --c: var(--line-2); container: plantree / inline-size; }
 .plan-scroll { overflow-x: auto; padding: 6px 2px 8px; scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
 
@@ -1304,6 +1309,10 @@ button, input, select { font: inherit; color: inherit; }
             <dl class="plan-meta" id="planMeta"></dl>
             <div class="plan-actions" id="planActions"></div>
           </div>
+          <section class="boxed plan-stats" id="planStats" aria-label="成效" hidden>
+            <span class="box-label">成效</span>
+            <dl class="plan-stats-list" id="planStatsList"></dl>
+          </section>
           <div class="plan-legend" aria-label="顏色說明">
             <span><i style="--k: var(--blue)"></i>需求</span>
             <span><i style="--k: var(--violet)"></i>做法</span>

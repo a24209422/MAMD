@@ -6,6 +6,8 @@ import argparse
 import importlib.util
 import json
 import os
+import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from board_core import (PlanStatus, TaskStatus, appendEvent, boardDir, deriveSta
                         planTasks, readEvents, taskKey, testConfigProblems)
 from board_index import buildIndex
 from board_prompts import tddCrapDir
+from board_stats import approvedPlanIds, boardStats, planStats, taskRounds
 
 humanOnlyCommands = {"approve", "reject", "abandon", "decide", "stop", "resume", "cleanup"}
 # board_api 要從暫停事件的原因分辨是不是你按的 stop，兩邊共用同一個字串
@@ -86,6 +89,53 @@ def approveWarnings(projectDir, plan):
   return warnings
 
 
+def planFilePath(plan):
+  # loadPlans 只讀 plans/ 底下的檔案；給 git 用相對路徑，印出來的指令使用者也能直接照打
+  return f"plans/{plan['path'].name}"
+
+
+def shellQuote(text, windows=os.name == "nt"):
+  # Windows 印 PowerShell 的寫法，其他系統印 sh 的寫法
+  if not windows:
+    return shlex.quote(text)
+  if re.fullmatch(r"[\w./-]+", text):
+    return text
+  # PowerShell 的單引號字串裡只有單引號（含彎引號）有特殊意義，重複一次就是字面上的單引號
+  return "'" + re.sub(r"(['‘’‚‛])", r"\1\1", text) + "'"
+
+
+def planFileCommitted(projectDir, plan):
+  return board_git.fileMatchesHead(projectDir, planFilePath(plan))
+
+
+def commitPlanFile(projectDir, planIdValue, plan):
+  # plan 分支從核准時的 HEAD 開出來，plan 檔沒 commit 的話寫程式的 agent 在 worktree 裡看不到它
+  if planFileCommitted(projectDir, plan):
+    return True
+  path, message = planFilePath(plan), f"{planIdValue} 送出 plan：{plan['title']}"
+  try:
+    board_git.commitFile(projectDir, path, message)
+  except board_git.GitError as error:
+    print(f"{planIdValue} 的 plan 檔 commit 失敗，沒有送出：")
+    print("  " + str(error))
+    # 標題可能有引號，各種 shell 的跳脫規則不同（PowerShell 5.1 傳給 git 時還會弄丟雙引號），
+    # 訊息寫進檔案用 -F 讀，指令裡就不必放標題
+    messageName = f"commit-message-{planIdValue}.txt"
+    try:
+      boardDir(projectDir).mkdir(parents=True, exist_ok=True)
+      (boardDir(projectDir) / messageName).write_bytes(message.encode("utf-8"))
+      messageArgs = f"-F {shellQuote('.board/' + messageName)}"
+    except OSError:
+      messageArgs = f"-m {shellQuote(message)}"
+    # 檔名可能有 [ ] * 這類 pathspec 萬用字元，指令也要照字面比對，才不會 commit 到別的檔案
+    print(f"請在專案資料夾自己 commit 這個 plan 檔，再重新送出（{'PowerShell' if os.name == 'nt' else 'sh'} 指令）：")
+    print(f"  git {board_git.literalPathspecs} add -- {shellQuote(path)}")
+    print(f"  git {board_git.literalPathspecs} commit {messageArgs} -- {shellQuote(path)}")
+    return False
+  print(f"已 commit {path}")
+  return True
+
+
 def cmdSubmit(projectDir, planIdValue):
   loadErrors = []
   plans, state = currentState(projectDir, loadErrors)
@@ -104,6 +154,8 @@ def cmdSubmit(projectDir, planIdValue):
     print(f"{planIdValue} 有問題，沒有送出：")
     for message in blockers:
       print("  紅｜" + message)
+    return 1
+  if not commitPlanFile(projectDir, planIdValue, plan):
     return 1
   appendEvent(projectDir, "planSubmitted", plan=planIdValue,
               data={"red": 0, "orange": len(problems["orange"]), "yellow": len(problems["yellow"])})
@@ -139,6 +191,100 @@ def cmdStatus(projectDir, planIdValue=None):
   return 0
 
 
+def durationText(seconds):
+  hours, rest = divmod(int(seconds), 3600)
+  minutes, seconds = divmod(rest, 60)
+  parts = [f"{hours} 小時"] if hours else []
+  parts += [f"{minutes} 分"] if hours or minutes else []
+  return " ".join(parts + [f"{seconds} 秒"])
+
+
+def elapsedText(duration):
+  return durationText(duration["seconds"]) + ("（進行中）" if duration["inProgress"] else "")
+
+
+def averageText(value):
+  return "-" if value is None else f"{value:g}"
+
+
+def decisionsText(decisions):
+  counts = "、".join(f"{action} {decisions[action]}" for action in ("retry", "done", "abandon") if decisions[action])
+  return f"{decisions['total']}（{counts}）" if counts else str(decisions["total"])
+
+
+def modelsText(models):
+  def combos(items):
+    names = [" ".join(str(value) for value in combo.values() if value) for combo in items]
+    return "、".join(name for name in names if name) or "-"
+  return f"writer：{combos(models['writer'])}；reviewer：{combos(models['reviewer'])}"
+
+
+def statsSummary(stats):
+  tasks = stats["tasks"]
+  return "｜".join([
+    f"任務 {tasks['done']}／{tasks['abandoned']}／{tasks['total']}",
+    f"平均輪數 {averageText(stats['averageRounds'])}",
+    f"第一次審查就通過 {stats['firstReviewPassed']['passed']}/{stats['firstReviewPassed']['reviewed']}",
+    f"寫完後被退回 {stats['returnedAfterWrite']['returned']}/{stats['returnedAfterWrite']['written']}",
+    f"你的決定 {stats['decisions']['total']}",
+    f"耗時 {elapsedText(stats['duration'])}",
+  ])
+
+
+def statsDetail(stats):
+  tasks, reviews, tests = stats["tasks"], stats["reviews"], stats["tests"]
+  return [
+    f"任務：完成 {tasks['done']}／放棄 {tasks['abandoned']}／全部 {tasks['total']}",
+    f"平均輪數：{averageText(stats['averageRounds'])}",
+    f"寫完次數：{stats['written']}",
+    f"審查：{reviews['total']} 次（通過 {reviews['passed']}、不通過 {reviews['failed']}）",
+    f"第一次審查就通過：{stats['firstReviewPassed']['passed']}/{stats['firstReviewPassed']['reviewed']}",
+    f"測試：{tests['runs']} 次，失敗 {tests['failed']}，退回 {tests['returned']}",
+    f"寫完後被退回：{stats['returnedAfterWrite']['returned']}/{stats['returnedAfterWrite']['written']}",
+    f"你的決定：{decisionsText(stats['decisions'])}",
+    f"還在等你：{stats['waiting']}",
+    f"等你的時間：{durationText(stats['waitSeconds'])}",
+    f"agent 失敗、合併衝突：{stats['agentFailed']}、{stats['conflicts']}",
+    f"plan 退回：{stats['planRejected']}",
+    f"耗時：{elapsedText(stats['duration'])}",
+    f"模型：{modelsText(stats['models'])}",
+  ]
+
+
+def cmdStats(projectDir, planIdValue=None):
+  loadErrors = []
+  plans = loadPlans(projectDir, loadErrors)
+  printLoadWarnings(loadErrors)
+  events = readEvents(projectDir)
+  state = deriveState(events, plans, loadConfig(projectDir))
+
+  def heading(planId):
+    planState = state["plans"].get(planId)
+    return f"{planId} {planState['title']}｜{planState['status']}" if planState else planId
+
+  if planIdValue:
+    if planIdValue not in approvedPlanIds(events):
+      print(f"{planIdValue} 還沒核准過，沒有成效可以算")
+      return 1
+    print(heading(planIdValue))
+    for line in statsDetail(planStats(events, state, planIdValue)):
+      print("  " + line)
+    rounds = taskRounds([event for event in events if event.get("plan") == planIdValue])
+    print("  每個任務的輪數：")
+    for task in planTasks(state, planIdValue):
+      roundNumber = rounds.get(taskKey(planIdValue, task["task"]))
+      print(f"    {task['task']} {f'{roundNumber} 輪' if roundNumber else '還沒開始'}｜{task['status']}")
+    return 0
+  stats = boardStats(events, state)
+  if not stats["plans"]:
+    print("還沒有核准過的 plan")
+    return 0
+  for planId, planStatsValue in stats["plans"].items():
+    print(f"{heading(planId)}｜{statsSummary(planStatsValue)}")
+  print(f"總計（{len(stats['plans'])} 份）｜{statsSummary(stats['total'])}")
+  return 0
+
+
 def cmdApprove(projectDir, planIdValue, confirm=input):
   plans, state = currentState(projectDir)
   planState = state["plans"].get(planIdValue)
@@ -151,6 +297,11 @@ def cmdApprove(projectDir, planIdValue, confirm=input):
     print(f"{planIdValue} 送出後又被改出問題，不能核准，請寫 plan 的 agent 修好再送出：")
     for message in blockers:
       print("  紅｜" + message)
+    return 1
+  # plan 分支從 HEAD 開出來，plan 檔跟 HEAD 不同時分支裡會是舊版
+  if not planFileCommitted(projectDir, plans[planIdValue]):
+    print(f"{planIdValue} 的 plan 檔（{planFilePath(plans[planIdValue])}）送出後又被改過，跟目前的 commit 不同，"
+          "不能核准，請寫 plan 的 agent 重新執行 submit")
     return 1
   graph = plans[planIdValue]["graph"]
   warnings = approveWarnings(projectDir, plans[planIdValue])
@@ -481,6 +632,7 @@ def buildParser():
   sub = parser.add_subparsers(dest="command", required=True)
   sub.add_parser("submit").add_argument("plan")
   sub.add_parser("status").add_argument("plan", nargs="?")
+  sub.add_parser("stats").add_argument("plan", nargs="?")
   sub.add_parser("approve").add_argument("plan")
   reject = sub.add_parser("reject")
   reject.add_argument("plan")
@@ -520,6 +672,7 @@ def main(argv=None):
   commands = {
     "submit": lambda: cmdSubmit(projectDir, args.plan),
     "status": lambda: cmdStatus(projectDir, args.plan),
+    "stats": lambda: cmdStats(projectDir, args.plan),
     "approve": lambda: cmdApprove(projectDir, args.plan),
     "reject": lambda: cmdReject(projectDir, args.plan, args.reason),
     "abandon": lambda: cmdAbandon(projectDir, args.plan),

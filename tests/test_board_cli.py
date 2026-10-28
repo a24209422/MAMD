@@ -78,6 +78,155 @@ def test_approveWarnsAboutTrackedChanges(gitProject, writePlan, capsys):
   assert "還沒 commit 的改動" in capsys.readouterr().out
 
 
+def test_submitCommitsOnlyThePlanFile(gitProject, writePlan, capsys):
+  (gitProject / "staged.txt").write_text("staged\n", encoding="utf-8")
+  board_git.runGit(gitProject, "add", "staged.txt")
+  (gitProject / "README.md").write_text("changed\n", encoding="utf-8")
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="批次上傳", projectDir=gitProject)
+  before = board_git.headCommit(gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert "已 commit plans/0001-ok.md" in capsys.readouterr().out
+  assert board_git.runGit(gitProject, "rev-parse", "HEAD~1") == before
+  assert board_git.runGit(gitProject, "show", "--name-only", "--format=", "HEAD") == "plans/0001-ok.md"
+  assert board_git.runGit(gitProject, "log", "-1", "--format=%s") == "P0001 送出 plan：批次上傳"
+  # 其他已暫存和沒暫存的改動都還在，沒有被 commit
+  assert board_git.runGit(gitProject, "diff", "--cached", "--name-only") == "staged.txt"
+  assert board_git.runGit(gitProject, "diff", "--name-only") == "README.md"
+  assert (gitProject / "README.md").read_text(encoding="utf-8") == "changed\n"
+  assert eventTypes(gitProject) == ["planSubmitted"]
+  committed = board_git.headCommit(gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert board_git.headCommit(gitProject) == committed
+  assert "已 commit" not in capsys.readouterr().out
+
+
+def test_submitStopsWhenCommitFails(gitProject, writePlan, capsys):
+  hookPath = gitProject / ".git" / "hooks" / "pre-commit"
+  hookPath.parent.mkdir(parents=True, exist_ok=True)
+  hookPath.write_bytes(b"#!/bin/sh\necho blocked by hook >&2\nexit 1\n")
+  hookPath.chmod(0o755)
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="批次上傳", projectDir=gitProject)
+  before = board_git.headCommit(gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 1
+  output = capsys.readouterr().out
+  assert "commit 失敗，沒有送出" in output and "blocked by hook" in output
+  assert "  git --literal-pathspecs add -- plans/0001-ok.md" in output
+  assert "  git --literal-pathspecs commit -F .board/commit-message-P0001.txt -- plans/0001-ok.md" in output
+  assert board_git.headCommit(gitProject) == before
+  assert "planSubmitted" not in eventTypes(gitProject)
+  # 使用者照印出來的指令自己 commit 之後，再送出就會通過
+  hookPath.unlink()
+  board_git.runGit(gitProject, "--literal-pathspecs", "add", "--", "plans/0001-ok.md")
+  board_git.runGit(gitProject, "--literal-pathspecs", "commit", "-F", ".board/commit-message-P0001.txt", "--",
+                   "plans/0001-ok.md")
+  assert board_git.runGit(gitProject, "log", "-1", "--format=%s") == "P0001 送出 plan：批次上傳"
+  committed = board_git.headCommit(gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert board_git.headCommit(gitProject) == committed
+  assert eventTypes(gitProject) == ["planSubmitted"]
+
+
+def test_shellQuoteForPowerShellAndSh():
+  assert board.shellQuote("plans/0001-ok.md", windows=True) == "plans/0001-ok.md"
+  assert board.shellQuote("plans/0001 a's.md", windows=True) == "'plans/0001 a''s.md'"
+  assert board.shellQuote("a’b $x", windows=True) == "'a’’b $x'"
+  assert board.shellQuote("plans/0001-ok.md", windows=False) == "plans/0001-ok.md"
+  assert board.shellQuote("plans/0001 a's.md", windows=False) == "'plans/0001 a'\"'\"'s.md'"
+
+
+def test_printedCommitCommandsRunInShell(gitProject, capsys):
+  plansDir = gitProject / "plans"
+  plansDir.mkdir()
+  # 檔名的 [ab] 當成萬用字元會匹配到這個已 commit、又被改過的檔案
+  decoyPath = plansDir / "0001-a b's $x a.md"
+  decoyPath.write_text("舊內容\n", encoding="utf-8")
+  board_git.runGit(gitProject, "add", "--", "plans")
+  board_git.runGit(gitProject, "commit", "-q", "-m", "decoy")
+  decoyPath.write_text("改過\n", encoding="utf-8")
+  hookPath = gitProject / ".git" / "hooks" / "pre-commit"
+  hookPath.parent.mkdir(parents=True, exist_ok=True)
+  hookPath.write_bytes(b"#!/bin/sh\nexit 1\n")
+  hookPath.chmod(0o755)
+  title = "新增 \"CSV import\" 和 'x' $HOME `y` & z"
+  planPath = plansDir / "0001-a b's $x [ab].md"
+  planPath.write_text(
+    f"---\nid: P0001\ncreated: 2026-10-25\n---\n\n# {title}\n\n"
+    "| 需求 | AI 理解 | 做法（ADR） | 不採用 | 任務 | 前置 | 驗證 |\n|---|---|---|---|---|---|---|\n"
+    + "\n".join(cleanRows) + "\n", encoding="utf-8")
+  assert board.cmdSubmit(gitProject, "P0001") == 1
+  commands = [line.strip() for line in capsys.readouterr().out.splitlines()[-2:]]
+  assert commands[0].startswith("git --literal-pathspecs add ")
+  assert commands[1].startswith("git --literal-pathspecs commit -F ")
+  hookPath.unlink()
+  for command in commands:
+    # 用印出來時對應的 shell 執行，確認使用者照打就能 commit
+    shell = (["powershell", "-NoProfile", "-NonInteractive", "-Command", command] if os.name == "nt"
+             else ["sh", "-c", command])
+    completed = subprocess.run(shell, cwd=gitProject, capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", timeout=60)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+  assert board_git.runGit(gitProject, "log", "-1", "--format=%s") == f"P0001 送出 plan：{title}"
+  assert board_git.runGit(gitProject, "-c", "core.quotePath=false", "show", "--name-only", "--format=",
+                          "HEAD") == "plans/0001-a b's $x [ab].md"
+  assert board_git.runGit(gitProject, "-c", "core.quotePath=false", "diff", "--name-only") == "plans/0001-a b's $x a.md"
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert eventTypes(gitProject) == ["planSubmitted"]
+
+
+def test_planFileNameWithWildcardsIsMatchedLiterally(gitProject, writePlan, capsys):
+  decoyPath = writePlan("0001-a.md", cleanRows, planId="P0002", projectDir=gitProject)
+  board_git.runGit(gitProject, "add", "--", "plans/0001-a.md")
+  board_git.runGit(gitProject, "commit", "-q", "-m", "decoy")
+  writePlan("0001-[ab].md", cleanRows, planId="P0001", projectDir=gitProject)
+  # 已 commit 而且乾淨的 0001-a.md 不能讓沒被追蹤的 0001-[ab].md 被當成已經 commit
+  assert board_git.fileMatchesHead(gitProject, "plans/0001-[ab].md") is False
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert board_git.runGit(gitProject, "show", "--name-only", "--format=", "HEAD") == "plans/0001-[ab].md"
+  # 送出後改了 plan，又剛好改到匹配得到的 0001-a.md：核准要擋下，重新送出也只 commit 這份 plan
+  writePlan("0001-[ab].md", cleanRows, planId="P0001", title="改過的標題", projectDir=gitProject)
+  decoyPath.write_text("改過\n", encoding="utf-8")
+  capsys.readouterr()
+  assert board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y") == 1
+  assert "重新執行 submit" in capsys.readouterr().out
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert board_git.runGit(gitProject, "show", "--name-only", "--format=", "HEAD") == "plans/0001-[ab].md"
+  assert board_git.runGit(gitProject, "diff", "--name-only") == "plans/0001-a.md"
+  assert board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y") == 0
+
+
+def test_submitShowsCommitFailureReasonPrintedToStdout(gitProject, writePlan, monkeypatch, capsys):
+  realRun = subprocess.run
+
+  def fakeRun(command, *args, **kwargs):
+    # 模擬 git commit 把失敗原因只印在 stdout、stderr 是空的
+    if command[:3] == ["git", board_git.literalPathspecs, "commit"]:
+      return subprocess.CompletedProcess(command, 1, stdout="reason on stdout\n", stderr="")
+    return realRun(command, *args, **kwargs)
+
+  monkeypatch.setattr(board_git.subprocess, "run", fakeRun)
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 1
+  output = capsys.readouterr().out
+  assert "reason on stdout" in output and "git --literal-pathspecs add -- plans/0001-ok.md" in output
+  assert "planSubmitted" not in eventTypes(gitProject)
+
+
+def test_approveRefusesPlanChangedAfterSubmit(gitProject, writePlan, capsys):
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="改過的標題", projectDir=gitProject)
+  capsys.readouterr()
+  asked = []
+  assert board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: asked.append(prompt) or "y") == 1
+  output = capsys.readouterr().out
+  assert "送出後又被改過" in output and "重新執行 submit" in output
+  assert asked == []
+  assert "planApproved" not in eventTypes(gitProject)
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y") == 0
+  assert board_core.readEvents(gitProject)[-1]["data"]["baseCommit"] == board_git.headCommit(gitProject)
+
+
 def test_rejectAndAbandon(gitProject, writePlan):
   writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
   assert board.cmdReject(gitProject, "P0001", "缺驗證") == 1
@@ -129,6 +278,81 @@ def test_statusAndIndex(gitProject, writePlan, capsys):
   assert "T2 排隊中（第 1/3 輪）" in output
   assert board.cmdIndex(gitProject) == 0
   assert (gitProject / "plans" / "_review" / "index.html").exists()
+
+
+def writeEvents(projectDir, events):
+  boardPath = board_core.boardDir(projectDir)
+  boardPath.mkdir(parents=True, exist_ok=True)
+  lines = [json.dumps(event, ensure_ascii=False) + "\n" for event in events]
+  (boardPath / board_core.eventsFileName).write_text("".join(lines), encoding="utf-8")
+
+
+def test_statsOfPlanMatchesReferenceValues(gitProject, writePlan, capsys):
+  from test_board_stats import p0001Events
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="系統監控", projectDir=gitProject)
+  writeEvents(gitProject, p0001Events())
+  assert board.cmdStats(gitProject, "P0001") == 0
+  lines = capsys.readouterr().out.splitlines()
+  assert lines[0] == "P0001 系統監控｜完成"
+  assert [line.strip() for line in lines[1:16]] == [
+    "任務：完成 5／放棄 0／全部 5",
+    "平均輪數：1.2",
+    "寫完次數：6",
+    "審查：6 次（通過 5、不通過 1）",
+    "第一次審查就通過：4/5",
+    "測試：1 次，失敗 0，退回 0",
+    "寫完後被退回：1/6",
+    "你的決定：1（retry 1）",
+    "還在等你：0",
+    "等你的時間：9 分 52 秒",
+    "agent 失敗、合併衝突：0、0",
+    "plan 退回：0",
+    "耗時：1 小時 13 分 29 秒",
+    "模型：writer：claude opus xhigh；reviewer：codex gpt-6.1-sol xhigh",
+    "每個任務的輪數：",
+  ]
+  assert [line.strip() for line in lines[16:]] == ["T1 1 輪｜完成", "T2 1 輪｜完成", "T3 2 輪｜完成",
+                                                   "T4 1 輪｜完成", "T5 1 輪｜完成"]
+
+
+def test_statsListsApprovedPlansAndTotal(gitProject, writePlan, capsys):
+  from test_board_stats import p0001Events
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="系統監控", projectDir=gitProject)
+  writePlan("0002-ok.md", cleanRows, planId="P0002", projectDir=gitProject)
+  writeEvents(gitProject, p0001Events())
+  board.cmdSubmit(gitProject, "P0002")
+  capsys.readouterr()
+  assert board.cmdStats(gitProject) == 0
+  summary = "任務 5／0／5｜平均輪數 1.2｜第一次審查就通過 4/5｜寫完後被退回 1/6｜你的決定 1｜耗時 1 小時 13 分 29 秒"
+  assert capsys.readouterr().out.splitlines() == [f"P0001 系統監控｜完成｜{summary}", f"總計（1 份）｜{summary}"]
+  # 待核准的 plan 不列，也算不出成效
+  assert board.cmdStats(gitProject, "P0002") == 1
+  assert "還沒核准過" in capsys.readouterr().out
+
+
+def test_statsBeforeAnyApprovalAndTaskNotStarted(gitProject, writePlan, capsys):
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
+  assert board.cmdStats(gitProject) == 0
+  assert capsys.readouterr().out.strip() == "還沒有核准過的 plan"
+  board.cmdSubmit(gitProject, "P0001")
+  board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y")
+  capsys.readouterr()
+  assert board.cmdStats(gitProject, "P0001") == 0
+  output = capsys.readouterr().out
+  assert "平均輪數：-" in output
+  assert "秒（進行中）" in output
+  assert "T2 還沒開始｜排隊中" in output
+
+
+def test_statsIsNotHumanOnly(gitProject, writePlan):
+  from test_board_stats import p0001Events
+  writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
+  writeEvents(gitProject, p0001Events())
+  completed = subprocess.run([sys.executable, str(toolDir / "board.py"), "--project", str(gitProject), "stats", "P0001"],
+                             capture_output=True, text=True, encoding="utf-8", stdin=subprocess.PIPE)
+  assert completed.returncode == 0, completed.stderr
+  assert "平均輪數：1.2" in completed.stdout
+  assert "stats" not in board.humanOnlyCommands
 
 
 def test_humanOnlyCommandsRefusedWhenPiped(gitProject):

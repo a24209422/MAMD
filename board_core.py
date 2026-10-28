@@ -299,6 +299,7 @@ class PlanStatus:
 class TaskStatus:
   queued = "排隊中"
   writing = "寫程式中"
+  testing = "測試中"
   toReview = "待審查"
   reviewing = "審查中"
   merging = "合併中"
@@ -346,6 +347,11 @@ def onPlanApproved(state, planState, event, config):
     state["tasks"][taskKey(planState["id"], task["id"])] = newTaskState(planState["id"], task, config)
 
 
+def onTestBaseline(state, planState, event, config):
+  # 只留最新一次：testCommand 改掉後重跑的基準才是之後比對的依據
+  planState["testBaseline"] = event["data"]
+
+
 def onPlanAbandoned(state, planState, event, config):
   planState["status"] = PlanStatus.abandoned
 
@@ -358,6 +364,7 @@ planEventHandlers = {
   "planSubmitted": onPlanSubmitted,
   "planRejected": onPlanRejected,
   "planApproved": onPlanApproved,
+  "testBaseline": onTestBaseline,
   "planAbandoned": onPlanAbandoned,
   "planCompleted": onPlanCompleted,
 }
@@ -393,7 +400,8 @@ def rememberSession(taskState, data):
 
 
 def onTaskWritten(taskState, event):
-  taskState["status"] = TaskStatus.toReview
+  # 測試改在背景跑：帶 testing 的寫完先進測試中，等 testRun 再決定；舊事件沒有這個欄位，照舊直接待審查
+  taskState["status"] = TaskStatus.testing if event["data"].get("testing") else TaskStatus.toReview
   taskState["lastCommit"] = event["data"].get("commit")
   taskState["failStreak"] = 0
   taskState["resumable"] = True
@@ -419,6 +427,20 @@ def onTaskBlocked(taskState, event):
 
 def onTestRun(taskState, event):
   taskState["lastTest"] = event["data"]
+  # verdict 由 conductor 跑完測試時對照當時的基準算好；沒有 verdict 的舊事件照舊只記錄
+  if event["data"].get("verdict") != "newFailure":
+    if taskState["status"] == TaskStatus.testing:
+      taskState["status"] = TaskStatus.toReview
+    return
+  # 有新增的失敗就不送審，和審查不通過一樣退回寫程式的 agent、算一輪
+  if taskState["round"] < taskState["maxRounds"]:
+    taskState["status"] = TaskStatus.queued
+    taskState["round"] += 1
+    return
+  names = event["data"].get("newFailures") or []
+  reason = f"第 {taskState['round']} 輪測試有新增的失敗，輪數用完"
+  taskState["status"] = TaskStatus.needsYou
+  taskState["needs"] = {"kind": "tests", "reason": reason + ("：" + "、".join(names) if names else "")}
 
 
 def onReviewStarted(taskState, event):
@@ -498,6 +520,7 @@ retryTargets = {
   "blocked": TaskStatus.queued,
   "noChanges": TaskStatus.queued,
   "rounds": TaskStatus.queued,
+  "tests": TaskStatus.queued,
   "invalidReview": TaskStatus.toReview,
   "mergeFailed": TaskStatus.merging,
 }
@@ -514,7 +537,7 @@ def onUserDecision(taskState, event):
     taskState["status"] = TaskStatus.merging
     taskState["userDone"] = True
   elif action == "retry":
-    if needs.get("kind") == "rounds":
+    if needs.get("kind") in ("rounds", "tests"):
       taskState["maxRounds"] += 1
       taskState["round"] += 1
     if needs.get("kind") == "agentFailed":
@@ -584,7 +607,8 @@ def deriveState(events, plans, config):
   state = {"paused": False, "pauseReason": "", "plans": {}, "tasks": {}}
   for planIdValue, plan in plans.items():
     state["plans"][planIdValue] = {"id": planIdValue, "title": plan["title"], "status": PlanStatus.draft,
-                                   "baseCommit": None, "rejectReason": "", "meta": plan["meta"]}
+                                   "baseCommit": None, "testBaseline": None, "rejectReason": "",
+                                   "meta": plan["meta"]}
   for event in events:
     eventType = event.get("type")
     if eventType == "paused":

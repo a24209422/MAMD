@@ -273,6 +273,20 @@ def test_overviewShowsConductorGroupsAndAgents(dashboard, tmp_path):
   assert "Claude<span>（寫程式）</span>" in dom and "Codex<span>（審查）</span>" in dom
   assert "Write upload.py" in dom and "75%" in dom and "sonnet" in dom
   assert "唯讀" not in dom
+  assert "測試中：" not in dom
+
+
+@needsBrowser
+def test_overviewLeadCardListsTestingTasks(dashboard, gitProject, tmp_path):
+  # 寫完在背景跑測試時列在 Alfred 卡片；測試跑完轉成待審查就不再列出
+  appendEvent(gitProject, "taskWritten", plan="P0001", task="T1", roundNumber=1,
+              data={"commit": "c1", "summary": "完成", "testing": True})
+  dom = renderDom(tmp_path, dashboard + "#token=" + token)
+  lead = re.search(r'id="leadCard".*?</article>', dom, re.S)
+  assert lead and "測試中：P0001 T1" in lead.group(0)
+  appendEvent(gitProject, "testRun", plan="P0001", task="T1", roundNumber=1,
+              data={"passed": True, "tail": "ok", "verdict": "passed", "newFailures": []})
+  assert "測試中：" not in renderDom(tmp_path, dashboard + "#token=" + token)
 
 
 @needsBrowser
@@ -313,6 +327,36 @@ def test_tasksPageDrawsTreeFromServer(dashboard, tmp_path):
   assert 'data-class="extra"' in dom
   assert "後端・縮圖" in dom
   assert "放棄這份 plan" in dom
+
+
+@needsBrowser
+def test_tasksPageShowsStatsOfApprovedPlan(dashboard, gitProject, tmp_path, monkeypatch, capsys):
+  # 一開始選的是待核准的 P0002，沒有成效；換到進行中的 P0001 才出現，數字和 board.py stats P0001 一樣
+  addProbe(tmp_path, monkeypatch, """
+    const read = () => ({
+      plan: app.selectedPlan, hidden: document.querySelector('#planStats').hidden,
+      items: [...document.querySelectorAll('#planStatsList dt')].map(dt => [dt.textContent, dt.nextElementSibling.textContent]),
+    });
+    const result = {};
+    setTimeout(() => { result.pending = read(); selectPlan('P0001'); }, 1500);
+    setTimeout(() => { result.approved = read(); document.body.dataset.probe = JSON.stringify(result); }, 3500);""")
+  probe = readProbe(renderDom(tmp_path, dashboard + "#tasks"))
+  assert probe["pending"] == {"plan": "P0002", "hidden": True, "items": []}
+  assert probe["approved"]["plan"] == "P0001" and probe["approved"]["hidden"] is False
+  capsys.readouterr()
+  assert board.cmdStats(gitProject, "P0001") == 0
+  cliLines = [line.strip() for line in capsys.readouterr().out.splitlines()[1:]]
+  pageLines = []
+  for label, value in probe["approved"]["items"]:
+    if label == "每個任務的輪數":
+      pageLines += [f"{label}：", *value.split("\n")]
+    else:
+      pageLines.append(f"{label}：{value}")
+  # 耗時算到現在，兩邊讀的時間不同，只比是不是進行中
+  elapsed = [line for line in pageLines if line.startswith("耗時：")]
+  assert len(elapsed) == 1 and elapsed[0].endswith("（進行中）")
+  assert [line for line in pageLines if not line.startswith("耗時：")] == \
+         [line for line in cliLines if not line.startswith("耗時：")]
 
 
 @needsBrowser

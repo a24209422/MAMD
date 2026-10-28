@@ -28,6 +28,10 @@ function renderLead(state) {
   const [stateKey, stateLabel] = leadStatus(state);
   const projectName = state.project.split(/[\\/]/).filter(Boolean).pop();
   const pauseNote = state.paused && state.pauseReason ? `<p class="op-hint">${escapeHtml(state.pauseReason)}</p>` : '';
+  // 測試是 Alfred 在背景跑的，不算在任何 agent 身上，列在這裡才看得出任務沒有卡住
+  const testing = state.tasks.filter(task => task.status === '測試中');
+  const testingNote = testing.length
+    ? `<p>測試中：${testing.map(task => escapeHtml(`${task.plan} ${task.task}`)).join('、')}</p>` : '';
   $('#leadCard').dataset.paused = String(stateKey !== 'run');
   $('#leadCard').innerHTML = `
     <div class="agent-head">
@@ -36,7 +40,7 @@ function renderLead(state) {
       <span class="state" data-state="${stateKey}">${stateLabel}</span>
     </div>
     <div class="lead-body">
-      <div class="task-block"><small>目前任務</small><p>${plans.length ? `進行中 ${plans.length} 份 plan` : '沒有進行中的 plan'}</p>${pauseNote}</div>
+      <div class="task-block"><small>目前任務</small><p>${plans.length ? `進行中 ${plans.length} 份 plan` : '沒有進行中的 plan'}</p>${testingNote}${pauseNote}</div>
       <div class="meters">${meter('任務進度', percent(done, total), 'progress', `${done}/${total}`)}</div>
     </div>`;
   $('#focusList').innerHTML = plans.length

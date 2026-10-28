@@ -1,5 +1,6 @@
 """plan／任務分支與 worktree 的 git 操作。"""
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -12,7 +13,9 @@ def runGit(cwd, *args, check=True):
   completed = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True,
                              encoding="utf-8", errors="replace")
   if check and completed.returncode != 0:
-    raise GitError(f"git {' '.join(args)} 失敗：{completed.stderr.strip()}")
+    # git hook 可能把擋下的原因印在 stdout，只看 stderr 會漏掉
+    output = "\n".join(text for text in (completed.stderr.strip(), completed.stdout.strip()) if text)
+    raise GitError(f"git {' '.join(args)} 失敗：{output}")
   return completed.stdout.strip()
 
 
@@ -36,6 +39,10 @@ def planWorktreePath(projectDir, planIdValue):
 
 def taskWorktreePath(projectDir, planIdValue, taskId):
   return worktreesRoot(projectDir) / f"{planIdValue}-{taskId}"
+
+
+def baselineWorktreePath(projectDir, planIdValue):
+  return worktreesRoot(projectDir) / f"{planIdValue}-baseline"
 
 
 def headCommit(projectDir):
@@ -83,6 +90,26 @@ def ensureTaskWorktree(projectDir, planIdValue, taskId):
   return path
 
 
+def addBaselineWorktree(projectDir, planIdValue, baseCommit):
+  # 上次沒移除乾淨的基準 worktree 可能留著舊的測試產物，先整個移除再重建
+  removeBaselineWorktree(projectDir, planIdValue)
+  path = baselineWorktreePath(projectDir, planIdValue)
+  path.parent.mkdir(parents=True, exist_ok=True)
+  # detached：基準只是暫時跑測試，不需要分支，也不會留下要清的分支
+  runGit(projectDir, "worktree", "add", "--detach", str(path), baseCommit)
+  return path
+
+
+def removeBaselineWorktree(projectDir, planIdValue):
+  path = baselineWorktreePath(projectDir, planIdValue)
+  if path.exists():
+    runGit(projectDir, "worktree", "remove", "--force", str(path), check=False)
+  if path.exists():
+    # 資料夾還在但已經不是登記中的 worktree（例如被 prune 過），git 不肯移除，只能直接刪
+    shutil.rmtree(path)
+  runGit(projectDir, "worktree", "prune")
+
+
 def cleanWorktree(path):
   # 這個函式會丟掉未提交的改動，只能用在 worktree 上，絕不能碰使用者的主資料夾
   resolved = Path(path).resolve()
@@ -93,6 +120,28 @@ def cleanWorktree(path):
     raise GitError(f"拒絕清理非 worktree 的路徑：{path}")
   runGit(path, "reset", "--hard", "HEAD")
   runGit(path, "clean", "-fd")
+
+
+def gitSucceeds(cwd, *args):
+  return subprocess.run(["git", *args], cwd=cwd, capture_output=True).returncode == 0
+
+
+# 路徑預設是 pathspec，`--` 也不會停用萬用字元：plans/0001-[ab].md 會匹配到 plans/0001-a.md
+literalPathspecs = "--literal-pathspecs"
+
+
+def fileMatchesHead(projectDir, relativePath):
+  # 沒被追蹤的檔案 git diff 看不到差異，要先確認 git 認得它
+  return (gitSucceeds(projectDir, literalPathspecs, "ls-files", "--error-unmatch", "--", relativePath)
+          and gitSucceeds(projectDir, literalPathspecs, "diff", "--quiet", "--no-ext-diff", "--no-textconv",
+                          "HEAD", "--", relativePath))
+
+
+def commitFile(projectDir, relativePath, message):
+  # commit 後面接路徑只 commit 這個檔案，主資料夾其他已暫存的改動照樣留在暫存區
+  runGit(projectDir, literalPathspecs, "add", "--", relativePath)
+  runGit(projectDir, literalPathspecs, "commit", "-q", "-m", message, "--", relativePath)
+  return runGit(projectDir, "rev-parse", "HEAD")
 
 
 def commitAll(path, message):
@@ -175,7 +224,11 @@ def removePlanWorktrees(projectDir, planIdValue):
   root = worktreesRoot(projectDir)
   if root.exists():
     for path in sorted(root.iterdir()):
-      if path.name == planIdValue or path.name.startswith(f"{planIdValue}-"):
+      if path == baselineWorktreePath(projectDir, planIdValue):
+        # Alfred 跑基準測試到一半被關掉時會留下來
+        removeBaselineWorktree(projectDir, planIdValue)
+        removed.append(path.name)
+      elif path.name == planIdValue or path.name.startswith(f"{planIdValue}-"):
         runGit(projectDir, "worktree", "remove", "--force", str(path))
         removed.append(path.name)
   branches = runGit(projectDir, "branch", "--list", f"task/{planIdValue}-*", "--format=%(refname:short)")

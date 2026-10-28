@@ -33,6 +33,7 @@ eventLabels = {
   "planRejected": "plan 被退回",
   "planAbandoned": "plan 已放棄",
   "planCompleted": "plan 完成",
+  "testBaseline": "跑基準測試",
   "taskStarted": "開始寫程式",
   "taskWritten": "寫完並 commit",
   "taskBlocked": "回報卡住",
@@ -51,6 +52,78 @@ eventLabels = {
 }
 
 
+def failureNames(output):
+  # pytest short test summary 的「FAILED 名稱 - 原因」；要看完整輸出，失敗多時最後 50 行裝不下
+  names = []
+  for line in output.splitlines():
+    if line.startswith(("FAILED ", "ERROR ")):
+      name = line.split(" ", 1)[1].split(" - ", 1)[0].strip()
+      if name and name not in names:
+        names.append(name)
+  return names
+
+
+def compareWithBaseline(baseline, passed, failures):
+  """依 plan「測試判定」回傳 (verdict, newFailures)。"""
+  if passed:
+    return "passed", []
+  if baseline is None:
+    # 正常不會發生（基準記下來前不派工）；沒有東西可比時不擋，交給審查
+    return "unknown", []
+  if baseline.get("passed"):
+    return "newFailure", list(failures)
+  baseFailures = baseline.get("failures") or []
+  if not baseFailures:
+    return "unknown", []
+  newFailures = [name for name in failures if name not in baseFailures]
+  # 一個名稱都分不出來時，不能確定失敗的就是基準那幾個
+  if newFailures or not failures:
+    return "newFailure", newFailures
+  return "preexisting", []
+
+
+class BackgroundTestJob:
+  """在背景執行緒跑任務的測試；結果留給主執行緒的 collectFinishedJobs 寫事件，事件只由主執行緒寫。"""
+
+  def __init__(self, runTestCommand, cwd):
+    self.runTestCommand = runTestCommand
+    self.cwd = cwd
+    self.lock = threading.Lock()
+    self.process = None
+    self.killed = False
+    self.result = None
+    self.error = None
+    self.thread = threading.Thread(target=self.run, daemon=True)
+
+  def start(self):
+    self.thread.start()
+    return self
+
+  def run(self):
+    try:
+      self.result = self.runTestCommand(self.cwd, self.started)
+    except Exception as error:
+      self.error = error
+
+  def started(self, process):
+    with self.lock:
+      self.process = process
+      killNow = self.killed
+    # 測試程式還沒啟動就被要求結束時，啟動後立刻結束，不留下沒人等結果的測試
+    if killNow:
+      board_agents.killProcessTree(process.pid)
+
+  def poll(self):
+    return not self.thread.is_alive()
+
+  def kill(self):
+    with self.lock:
+      self.killed = True
+      process = self.process
+    if process is not None and process.poll() is None:
+      board_agents.killProcessTree(process.pid)
+
+
 def formatEvent(event):
   timeText = (event.get("time") or "")[11:19]
   who = " ".join(part for part in (event.get("plan"), event.get("task"), event.get("agent")) if part)
@@ -60,7 +133,7 @@ def formatEvent(event):
     details.append(f"第 {event['round']} 輪")
   if event["type"] == "reviewFailed":
     details.append(f"必改 {data.get('mustFix', 0)} 條")
-  if event["type"] == "testRun":
+  if event["type"] in ("testRun", "testBaseline"):
     details.append("通過" if data.get("passed") else "失敗")
   if data.get("mode") == "resolve":
     details.append("解合併衝突")
@@ -161,11 +234,15 @@ class Conductor:
       self.stopJobsOfInactiveTasks(state)
     self.collectFinishedJobs(plans, state)
     plans, state = self.currentState()
+    if not state["paused"]:
+      self.startTests(state)
     self.ensurePlanWorktrees(state)
     self.mergeReadyTasks(state)
     plans, state = self.currentState()
     self.completeFinishedPlans(state)
     if not state["paused"]:
+      self.runTestBaselines(state)
+      plans, state = self.currentState()
       self.startReviews(plans, state)
       self.startWrites(plans, state)
     self.printNewEvents()
@@ -192,13 +269,15 @@ class Conductor:
       info = self.jobs.get(key)
       if info is None:
         continue
-      if recordInterruption and info["job"].process.poll() is not None:
+      finished = info["job"].poll() if info["kind"] == "test" else info["job"].process.poll() is not None
+      if recordInterruption and finished:
         # 已經自己結束的 agent 可能寫好了成果，留給 collectFinishedJobs 照常處理，暫停時才不會丟掉
         continue
       del self.jobs[key]
       info["job"].kill()
       info["job"].poll()
-      if recordInterruption:
+      # 測試不記中斷：狀態留在測試中，繼續或重開 Alfred 後 startTests 會重跑
+      if recordInterruption and info["kind"] != "test":
         self.event("taskInterrupted", info, stage=info["kind"])
 
   def stopJobsOfInactiveTasks(self, state):
@@ -237,6 +316,8 @@ class Conductor:
       try:
         if info["kind"] == "write":
           self.finishWrite(info)
+        elif info["kind"] == "test":
+          self.finishTests(state["plans"][info["plan"]], info)
         else:
           self.finishReview(plans[info["plan"]], state["tasks"][key], info)
       except BoardError:
@@ -256,9 +337,46 @@ class Conductor:
           # plan 沒有「等你處理」狀態可以記，只能印出來；下一輪會自動再試
           self.notifyOnce(f"{planState['id']} 的 plan worktree 建立失敗：{error}")
 
+  def needsTestBaseline(self, planState):
+    command = self.config.get("testCommand", "")
+    if not command or self.config.get("skipTests", False):
+      return False
+    baseline = planState["testBaseline"]
+    # 基準要和任務測試用同一個指令才能比；testCommand 改掉後重開 Alfred 就要重跑
+    return baseline is None or baseline.get("command") != command
+
+  def runTestBaselines(self, state):
+    for planState in state["plans"].values():
+      if planState["status"] == PlanStatus.active and self.needsTestBaseline(planState):
+        self.runTestBaseline(planState)
+
+  def runTestBaseline(self, planState):
+    planIdValue, baseCommit = planState["id"], planState["baseCommit"]
+    # 不在 plan worktree 跑：測試產物會留成未追蹤檔案，之後合併任務可能被擋下
+    try:
+      worktree = board_git.addBaselineWorktree(self.projectDir, planIdValue, baseCommit)
+    except Exception as error:
+      # 基準沒記下來前這份 plan 不派工；下一輪會自動再試
+      self.notifyOnce(f"{planIdValue} 的基準測試 worktree 建立失敗：{error}")
+      return
+    try:
+      passed, tail, failures = self.runTestCommand(worktree)
+      appendEvent(self.projectDir, "testBaseline", plan=planIdValue,
+                  data={"command": self.config["testCommand"], "commit": baseCommit, "passed": passed,
+                        "failures": failures, "tail": tail})
+    finally:
+      try:
+        board_git.removeBaselineWorktree(self.projectDir, planIdValue)
+      except Exception as error:
+        # 結果已經記下來，不能因為移除失敗而每一輪重跑整套測試；下次建立前會先移除，cleanup 也會清掉
+        self.notifyOnce(f"{planIdValue} 的基準測試 worktree 移除失敗：{error}")
+
   def startWrites(self, plans, state):
     for taskState in readyTasks(state):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
+        continue
+      if self.needsTestBaseline(state["plans"][taskState["plan"]]):
+        # 基準還沒記下來（例如基準 worktree 建立失敗），之後任務的測試失敗就沒有東西可以比
         continue
       lane = self.freeLane("writer", "write", taskState["agent"])
       if lane is None:
@@ -310,8 +428,7 @@ class Conductor:
       # 最新的 plan 分支合併進來沒有衝突（例如你已經在任務的 worktree 處理過），不必叫寫程式的 agent，直接測試、審查
       info["agent"] = None
       self.event("taskWritten", info, commit=board_git.headCommit(worktree), summary="合併最新的 plan 分支，沒有衝突",
-                 mode="resolve", conflicts=[])
-      self.runTests(info)
+                 mode="resolve", conflicts=[], testing=bool(self.config["testCommand"]))
       return
     # 先登記再寫事件：事件寫入失敗時 agent 不會變成沒人管的孤兒
     key = taskKey(info["plan"], info["task"])
@@ -339,7 +456,8 @@ class Conductor:
                                 testCommand, self.config.get("skipTests", False))
     return buildWritePrompt(plan, info["task"], info["round"], self.readReview(taskState["lastReviewNotes"]),
                             taskState["userNote"], testCommand if self.config.get("tddCrap") else "", info["cli"],
-                            testCommand, self.config.get("skipTests", False), self.config.get("tddSkill"), pythonCommand)
+                            testCommand, self.config.get("skipTests", False), self.config.get("tddSkill"), pythonCommand,
+                            lastTest=taskState["lastTest"])
 
   def writeLaunch(self, info, worktree, prompt, resume):
     launch = info["launch"]
@@ -413,24 +531,51 @@ class Conductor:
       # 例如專案的 pre-commit hook 失敗；不記事件的話任務會永遠停在「寫程式中」
       self.event("needsYou", info, kind="commitFailed", reason=f"commit 失敗：{error}")
       return
+    # 有測試指令時先進測試中，由 startTests 在背景跑，不擋其他任務
     self.event("taskWritten", info, commit=commit, summary=result["summary"], mode=info["mode"],
-               conflicts=info.get("conflicts", []), **session)
-    self.runTests(info)
+               conflicts=info.get("conflicts", []), testing=bool(self.config["testCommand"]), **session)
 
-  def runTests(self, info):
-    command = self.config["testCommand"]
-    if not command:
+  def startTests(self, state):
+    if not self.config["testCommand"]:
       return
-    # 測試在這裡同步執行：跑測試的這段時間 conductor 不排新工作，所以測試指令要夠快
+    # 測試不佔寫程式、審查的名額，也不限同時數量：同時進行的任務數已經被寫程式的名額限制住
+    for taskState in tasksWithStatus(state, TaskStatus.testing):
+      key = taskKey(taskState["plan"], taskState["task"])
+      planState = state["plans"][taskState["plan"]]
+      if key in self.jobs or planState["status"] != PlanStatus.active or self.needsTestBaseline(planState):
+        continue
+      info = {"kind": "test", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
+              "agent": taskState["agent"]}
+      worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
+      info["job"] = BackgroundTestJob(self.runTestCommand, worktree).start()
+      self.jobs[key] = info
+
+  def finishTests(self, planState, info):
+    job = info["job"]
+    if job.error is not None:
+      raise job.error
+    passed, tail, failures = job.result
+    # verdict 在這裡算好寫進事件：之後重播事件時，結果才不會因為基準或輸出不同而改變
+    verdict, newFailures = compareWithBaseline(planState["testBaseline"], passed, failures)
+    self.event("testRun", info, passed=passed, tail=tail, verdict=verdict, newFailures=newFailures)
+
+  def runTestCommand(self, cwd, onStarted=None):
+    command = self.config["testCommand"]
     # 不用 subprocess.run：Windows 上逾時只會結束 cmd.exe，孫行程還握著管線，communicate 會一直等
     options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-    process = subprocess.Popen(command, shell=True, cwd=info["worktree"], stdin=subprocess.DEVNULL,
+    process = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                encoding="utf-8", errors="replace", **options)
+    if onStarted:
+      # 背景測試要拿到程式才能在暫停、放棄時結束整個程式樹
+      onStarted(process)
     try:
       output, _ = process.communicate(timeout=self.timeoutSeconds())
       passed = process.returncode == 0
+      failures = [] if passed else failureNames(output)
     except subprocess.TimeoutExpired:
+      # 超時的輸出只有一部分，裡面的失敗名稱不完整，當成分不出名稱
+      failures = []
       board_agents.killProcessTree(process.pid)
       try:
         output, _ = process.communicate(timeout=outputWaitAfterKillSeconds)
@@ -441,11 +586,14 @@ class Conductor:
         threading.Thread(target=process.communicate, daemon=True).start()
         output = "測試超時（輸出無法取得）"
       passed = False
-    self.event("testRun", info, passed=passed, tail="\n".join(output.splitlines()[-50:]))
+    return passed, "\n".join(output.splitlines()[-50:]), failures
 
   def startReviews(self, plans, state):
     for taskState in tasksWithStatus(state, TaskStatus.toReview):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
+        continue
+      if self.needsTestBaseline(state["plans"][taskState["plan"]]):
+        # 審查也是派工：基準還沒用目前的 testCommand 記下來前不送審
         continue
       lane = self.freeLane("reviewer", "review", taskState["reviewAgent"])
       if lane is None:
@@ -463,7 +611,8 @@ class Conductor:
       diff = board_git.taskDiff(self.projectDir, info["plan"], info["task"])
       resolvedConflicts = taskState["conflictFiles"] if taskState["lastWriteMode"] == "resolve" else None
       prompt = buildReviewPrompt(plan, info["task"], info["round"], diff, taskState["lastTest"], previousErrors,
-                                 resolvedConflicts, bool(self.config.get("tddCrap")))
+                                 resolvedConflicts, bool(self.config.get("tddCrap")),
+                                 self.preexistingFailures(taskState))
       argv, stdinText, lineParser = self.reviewLaunch(info, worktree, prompt)
       info["job"] = board_agents.AgentJob(argv, worktree, stdinText, self.logPath(info, f"review{attempt}"),
                                           lineParser, self.timeoutSeconds(),
@@ -481,6 +630,12 @@ class Conductor:
       self.jobs.pop(key, None)
       info["job"].kill()
       raise
+
+  def preexistingFailures(self, taskState):
+    if (taskState["lastTest"] or {}).get("verdict") != "preexisting":
+      return []
+    baseline = self.currentState()[1]["plans"][taskState["plan"]]["testBaseline"]
+    return (baseline or {}).get("failures") or []
 
   def reviewLaunch(self, info, worktree, prompt):
     command = info["launch"]["command"]

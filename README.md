@@ -137,7 +137,8 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
    - `maxParallel` 是寫程式、審查各自的總上限，包含 1 個主要 agent；預設 3 代表每角色「1 主要 + 最多 2 子」。任務少時優先使用主要 agent，主要忙碌且仍有可執行任務才啟動子 agent，任務完成後結束該次執行。設 1 就只使用主要 agent
    - 總覽第二層的大卡是 `writer`／`reviewer` 主要 agent，直接顯示自己的任務、Context 與狀態；第三層只放子 agent，小卡顯示「未啟動」代表目前沒有執行程序。主要與子卡都能點進各自的控制台
    - `writer`、`reviewer` 兩段（例如任務卡住後才加 `allowedTools`）改了之後，Alfred（指揮程式，檔名是 `conductor.py`）從下一個新啟動的 agent 開始用；其他設定改了要重開 Alfred 才生效
-   - `testCommand` 在 Alfred 裡同步執行，跑測試時 Alfred 不會排新工作，測試要夠快
+   - 任務寫完後的 `testCommand` 在背景執行，不擋派工、合併和審查，多個任務的測試可以同時跑；跑測試的任務狀態是「測試中」，總覽的 Alfred 卡片會列出這些任務（見「測試把關」）
+   - plan 開始時的基準測試仍然同步執行，跑基準時 Alfred 不會排新工作，測試要夠快
    - Alfred 啟動前會檢查測試方式：沒有非空白的 `testCommand`，也沒有 `skipTests: true` 時，會先停止並提示初始化選項，不會等到 writer 執行測試才卡住
    - `testCommand`／`skipTests` 執行中改動時會提示重啟 Alfred；目前執行仍沿用啟動時的指令與權限。每個 writer（含解衝突）都會收到同一份測試指令
    - 寫程式、審查要用哪個 CLI 和模型，見「換模型」
@@ -193,13 +194,45 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
    一個專案同時只能跑一個 Alfred，第二個會拒絕啟動。
 
 2. 在專案資料夾開 `codex` 說你的需求；或開 `claude`，打 `/agent-board-plan 你的需求`。寫完 plan 會自己送出。
+   - 送出通過檢查時會自動 commit 這份 plan 檔，而且只 commit 這一個檔案，主資料夾其他已暫存或沒暫存的改動都不動；plan 檔跟目前的 commit 一樣時不另外 commit
+   - commit 失敗（例如 git hook 擋下）時不會送出，會印出 git 的錯誤和要自己執行的 `git add`、`git commit` 指令（Windows 是 PowerShell 寫法，其他系統是 sh 寫法；commit 訊息寫在 `.board/commit-message-<plan 編號>.txt`，用 `git commit -F` 讀），自己 commit 之後再送出就會通過
+   - 送出後 plan 檔又被改過、跟目前的 commit 不同時不能核准，要重新送出
+   - plan 裡標題和追溯矩陣以外的文字（例如表格下方的規則表、契約、對照值）會整段附給每個任務寫程式、解衝突、審查的 agent，接在這個任務的表格列後面；超過 30000 個字元時只附前 30000 個字元並註明
 3. 看線路圖：`python <agent-board>\board.py --project <專案資料夾> index`，打開 `plans/_review/index.html`
 4. 核准：`python <agent-board>\board.py --project <專案資料夾> approve P0007`，或在儀表板上按「核准」
-5. 之後看 Alfred 的終端機，或跑 `status`。完成後 `plan/P0007` 分支裡就是所有任務的成果，要不要合併到你的分支由你決定。
+5. 之後看 Alfred 的終端機，或跑 `status`。完成後 `plan/P0007` 分支裡就是所有任務的成果，要不要合併到你的分支由你決定。跑 `stats P0007` 可以看這份 plan 的平均輪數、第一次審查就通過的比例等成效（見「指令」）。
+
+### 測試把關
+
+有設定 `testCommand`（而且沒有 `skipTests`）時，測試沒過的任務不會送審：
+
+1. plan 核准後、派出第一個任務前，Alfred 先在 baseCommit 跑一次 `testCommand` 當基準。基準在暫時的 worktree（`<專案>-worktrees/P0007-baseline`）裡跑，跑完就移除；基準記下來之前這份 plan 不派工
+2. 每個任務寫完後，狀態先變成「測試中」，`testCommand` 在背景跑，結果跟基準比（規則見下面「測試判定」）；結果出來才變成待審查或退回。測試中的任務會列在總覽 Alfred 卡片的「測試中」那一行。暫停或重開 Alfred 時，跑到一半的測試會結束，繼續或重開後重跑
+3. 有新增的失敗：不叫審查的 agent，直接退回寫程式的 agent，算一輪。下一輪它會收到新增失敗的測試名稱和測試輸出最後 50 行，不附更早的審查意見。輪數用完時停在「等你處理」，見「指令」的 `decide ... retry` 表
+4. 失敗都是基準本來就有的：照常送審，審查的 agent 會被告知這些失敗基準就有，不必因此退回
+
+- `testCommand` 改掉並重開 Alfred 後，進行中的 plan 會用新指令重跑一次基準
+- 基準 worktree 因故沒移除時，下次建立前會先移除，`cleanup` 也會一併清掉
+- `skipTests` 或沒有 `testCommand` 時不跑基準也不跑任務測試，照常送審
+
+#### 測試判定
+
+失敗名稱取自測試完整輸出裡以 `FAILED ` 或 `ERROR ` 開頭的行（「 - 」之前的部分），也就是 pytest 結尾 short test summary 的格式。
+
+| 基準 | 任務測試 | 接下來 |
+|---|---|---|
+| 任何 | 通過 | 送審 |
+| 通過 | 失敗（含超時） | 退回寫程式的 agent |
+| 失敗，有失敗名稱 | 失敗，有不在基準裡的名稱，或一個名稱都沒有 | 退回寫程式的 agent |
+| 失敗，有失敗名稱 | 失敗，名稱全都在基準裡 | 送審，審查的 agent 會看到基準就有的失敗 |
+| 失敗，沒有失敗名稱（輸出分不出名稱，或超時） | 失敗 | 送審，審查的 agent 會被告知基準就失敗、無法比對 |
+
+- pytest 的 `-r` 要保留 `f`（失敗）和 `E`（錯誤），short test summary 才會列出 `FAILED`／`ERROR` 測試名稱，才分得出新增的失敗。pytest 沒設 `-r` 時預設就是 `fE`；在 `addopts` 自己設了 `-r`（例如只有 `-rs`）就會蓋掉預設，要寫成 `-rfEs` 這種同時含 `f`、`E` 的寫法（本專案的 `pytest.ini` 就是 `-rfEs`）
+- pytest 以外的測試工具分不出名稱：基準通過時，任務測試失敗一律退回；基準失敗時只能送審並說明無法比對
 
 ## 儀表板
 
-在瀏覽器看即時狀態，也可以在網頁上核准、退回、放棄、`decide`、停止和繼續，以及在「模型」分頁換寫程式、審查的 CLI 和模型（見「換模型」）。
+在瀏覽器看即時狀態，也可以在網頁上核准、退回、放棄、`decide`、停止和繼續，以及在「模型」分頁換寫程式、審查的 CLI 和模型（見「換模型」）。「任務」頁選了核准過的 plan 時，底下的「成效」區塊顯示和 `stats P0007` 同一組指標；待核准或草稿的 plan 沒有這個區塊。
 
 1. 在你自己開的終端機執行（不能讓 agent 啟動：網址裡的 token 等於核准權限）：
 
@@ -218,6 +251,7 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 | 指令 | 做什麼 |
 |---|---|
 | `status [P0007]` | 看進度 |
+| `stats [P0007]` | 看成效：不帶 plan 時每份核准過的 plan 一列加上總計，帶 plan 時列出全部指標和每個任務的輪數 |
 | `index` | 產生總覽頁與線路圖 |
 | `init [--test-command "指令" / --skip-tests / --tdd]` | 在專案啟用 agent-board 並明確選擇測試方式；TDD 可搭配 --source、--tests |
 | `approve P0007` | 核准（有橘、黃問題時會先問你） |
@@ -231,11 +265,31 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 
 `approve`、`reject`、`abandon`、`decide`、`stop`、`resume`、`cleanup` 只能由你在終端機執行，agent 執行會被拒絕。
 
+`stats` 只讀 `.board/events.jsonl` 和推導出的狀態，不另外記錄資料，舊的 plan 也算得出來：
+
+| 指標 | 算法 |
+|---|---|
+| 任務 | 完成、放棄、全部 |
+| 平均輪數 | 每個任務事件裡最大輪數的平均；還沒開始的任務不算 |
+| 寫完次數 | 寫程式的 agent 寫完的次數 |
+| 審查 | 審查通過、不通過的次數 |
+| 第一次審查就通過 | 第一個審查結果是通過的任務 ÷ 有審查結果的任務 |
+| 測試 | 跑測試的次數、失敗次數、因新增的失敗退回的次數（見「測試把關」） |
+| 寫完後被退回 | （審查不通過＋測試退回）÷ 寫完次數 |
+| 你的決定 | `decide` 的次數，依 retry、done、abandon 分開 |
+| 還在等你 | 目前「等你處理」的任務數 |
+| 等你的時間 | 每次 `decide` 距離同一任務前一個事件的時間加總 |
+| agent 失敗、合併衝突 | agent 失敗、合併衝突的次數 |
+| plan 退回 | `reject` 的次數 |
+| 耗時 | 核准到完成；還沒完成（含放棄）時算到現在，並標「進行中」 |
+| 模型 | 寫程式和審查用過的 CLI、模型、推理強度 |
+
 `decide ... retry` 的實際效果，依任務停下來的原因而不同：
 
 | 停下來的原因 | `retry` 的效果 |
 |---|---|
 | 審查 3 次不通過 | 輪數上限 +1，寫程式的 agent 帶著最新審查意見與你的 `--note` 再改一輪 |
+| 測試有新增的失敗、輪數用完（見「測試把關」） | 輪數上限 +1，寫程式的 agent 帶著新增失敗的測試名稱、測試輸出最後 50 行與你的 `--note` 再改一輪 |
 | 寫程式的 agent 回報卡住、沒有改動、commit 失敗、處理結果出錯 | 回到排隊，寫程式的 agent 接手（你的 `--note` 會交給它） |
 | agent 連續失敗 | 回到失敗的那個階段重跑 |
 | 審查結果格式不符 | 重新審查（`--note` 不會交給審查的 agent） |

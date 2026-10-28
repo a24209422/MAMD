@@ -154,20 +154,42 @@ def parseFrontMatter(lines):
   return {}, lines
 
 
-def findRtmTable(lines):
-  # plan 裡可能還有其他表格，同時有「需求」「任務」欄的才是追溯矩陣
+def findRtmTableRange(lines):
+  # plan 裡可能還有其他表格，同時有「需求」「任務」欄的才是追溯矩陣；回傳表頭到最後一列的範圍（不含結尾）
   for index, line in enumerate(lines[:-1]):
     if not line.strip().startswith("|") or not separatorPattern.match(lines[index + 1]):
       continue
     header = splitRow(line)
     if any("需求" in cell for cell in header) and any("任務" in cell for cell in header):
-      rows = []
-      for rowLine in lines[index + 2:]:
-        if not rowLine.strip().startswith("|"):
-          break
-        rows.append(splitRow(rowLine))
-      return header, rows
-  return None, []
+      end = index + 2
+      while end < len(lines) and lines[end].strip().startswith("|"):
+        end += 1
+      return index, end
+  return None
+
+
+def findRtmTable(lines):
+  tableRange = findRtmTableRange(lines)
+  if tableRange is None:
+    return None, []
+  start, end = tableRange
+  return splitRow(lines[start]), [splitRow(rowLine) for rowLine in lines[start + 2:end]]
+
+
+def extractExtraText(body):
+  # 標題那行和追溯矩陣以外的文字（規則表、契約、對照值等），整份交給寫程式和審查的 agent
+  lines = list(body)
+  tableRange = findRtmTableRange(lines)
+  if tableRange is not None:
+    start, end = tableRange
+    # 表格前後都是空行時只留一行，避免拿掉表格後中間空出一大段
+    if 0 < start and end < len(lines) and not lines[start - 1].strip() and not lines[end].strip():
+      end += 1
+    del lines[start:end]
+  headingIndex = next((index for index, line in enumerate(lines) if line.startswith("# ")), None)
+  if headingIndex is not None:
+    del lines[headingIndex]
+  return "\n".join(lines).strip()
 
 
 def mapColumns(header):
@@ -406,7 +428,7 @@ def analyzePlan(planPath):
   meta, body = parseFrontMatter(lines)
   heading = next((line[2:].strip() for line in body if line.startswith("# ")), None)
   plan = {"path": planPath, "meta": meta, "title": heading or planPath.stem, "hasTitle": bool(heading),
-          "graph": None, "rowCount": 0}
+          "graph": None, "rowCount": 0, "extraText": extractExtraText(body)}
   header, rows = findRtmTable(body)
   if header is None:
     return plan
