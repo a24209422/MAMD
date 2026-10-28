@@ -1,0 +1,147 @@
+"""從事件紀錄和推導出的狀態算出每份 plan 的成效；只讀事件，不讀 log 或 git。"""
+from datetime import datetime
+
+from board_core import PlanStatus, TaskStatus, planTasks, taskKey
+
+decisionActions = ("retry", "done", "abandon")
+
+
+def parseTime(text):
+  return datetime.fromisoformat(text)
+
+
+def approvedPlanIds(events):
+  planIds = []
+  for event in events:
+    if event.get("type") == "planApproved" and event.get("plan") not in planIds:
+      planIds.append(event.get("plan"))
+  return planIds
+
+
+def countType(events, eventType):
+  return sum(1 for event in events if event.get("type") == eventType)
+
+
+def taskRounds(events):
+  rounds = {}
+  for event in events:
+    if event.get("task") and isinstance(event.get("round"), int):
+      key = taskKey(event.get("plan"), event["task"])
+      rounds[key] = max(rounds.get(key, 0), event["round"])
+  return rounds
+
+
+def firstReviewResults(events):
+  results = {}
+  for event in events:
+    if event.get("type") in ("reviewPassed", "reviewFailed"):
+      results.setdefault(taskKey(event.get("plan"), event.get("task")), event["type"])
+  return results
+
+
+def testStats(events):
+  runs = [event for event in events if event.get("type") == "testRun"]
+  # 舊的 testRun 沒有 verdict，只算次數和失敗，不算退回
+  return {"runs": len(runs), "failed": sum(1 for event in runs if not event["data"].get("passed")),
+          "returned": sum(1 for event in runs if event["data"].get("verdict") == "newFailure")}
+
+
+def decisionStats(events):
+  decisions = [event for event in events if event.get("type") == "userDecision"]
+  counts = {action: 0 for action in decisionActions}
+  for event in decisions:
+    action = event["data"].get("action")
+    if action in counts:
+      counts[action] += 1
+  return {"total": len(decisions), **counts}
+
+
+def waitSeconds(events):
+  total = 0
+  lastTimes = {}
+  for event in events:
+    if not event.get("task"):
+      continue
+    key = taskKey(event.get("plan"), event["task"])
+    if event.get("type") == "userDecision" and key in lastTimes:
+      total += (parseTime(event["time"]) - lastTimes[key]).total_seconds()
+    lastTimes[key] = parseTime(event["time"])
+  return int(total)
+
+
+def roleModels(events, eventType, defaultCli=None):
+  models = []
+  for event in events:
+    if event.get("type") != eventType:
+      continue
+    data = event.get("data") or {}
+    # 和 board_core 一樣：寫程式的舊事件沒記 CLI 就是 Claude
+    combo = {"cli": data.get("cli", defaultCli), "model": data.get("model"),
+             "reasoningEffort": data.get("reasoningEffort")}
+    if combo not in models:
+      models.append(combo)
+  return models
+
+
+def durationStats(events, planStatus, now):
+  approved = next((event for event in events if event.get("type") == "planApproved"), None)
+  if not approved:
+    return {"seconds": 0, "inProgress": False}
+  completed = next((event for event in events if event.get("type") == "planCompleted"), None)
+  inProgress = not completed and planStatus == PlanStatus.active
+  if completed:
+    end = parseTime(completed["time"])
+  elif inProgress:
+    end = now or datetime.now().astimezone()
+  else:
+    # 放棄或被取代的 plan 不會有 planCompleted，算到它最後一個事件
+    end = parseTime(events[-1]["time"])
+  return {"seconds": int((end - parseTime(approved["time"])).total_seconds()), "inProgress": inProgress}
+
+
+def collectStats(events, tasks, durations):
+  rounds = taskRounds(events)
+  taskRoundValues = [rounds[key] for key in (taskKey(task["plan"], task["task"]) for task in tasks) if key in rounds]
+  firstResults = firstReviewResults(events)
+  passed = countType(events, "reviewPassed")
+  failed = countType(events, "reviewFailed")
+  written = countType(events, "taskWritten")
+  tests = testStats(events)
+  return {
+    "tasks": {"done": sum(1 for task in tasks if task["status"] == TaskStatus.done),
+              "abandoned": sum(1 for task in tasks if task["status"] == TaskStatus.abandoned),
+              "total": len(tasks)},
+    "averageRounds": round(sum(taskRoundValues) / len(taskRoundValues), 2) if taskRoundValues else None,
+    "written": written,
+    "reviews": {"total": passed + failed, "passed": passed, "failed": failed},
+    "firstReviewPassed": {"passed": sum(1 for result in firstResults.values() if result == "reviewPassed"),
+                          "reviewed": len(firstResults)},
+    "tests": tests,
+    "returnedAfterWrite": {"returned": failed + tests["returned"], "written": written},
+    "decisions": decisionStats(events),
+    "waiting": sum(1 for task in tasks if task["status"] == TaskStatus.needsYou),
+    "waitSeconds": waitSeconds(events),
+    "agentFailed": countType(events, "agentFailed"),
+    "conflicts": countType(events, "taskConflicted"),
+    "planRejected": countType(events, "planRejected"),
+    "duration": {"seconds": sum(item["seconds"] for item in durations),
+                 "inProgress": any(item["inProgress"] for item in durations)},
+    "models": {"writer": roleModels(events, "taskStarted", "claude"), "reviewer": roleModels(events, "reviewStarted")},
+  }
+
+
+def planStats(events, state, planIdValue, now=None):
+  planEvents = [event for event in events if event.get("plan") == planIdValue]
+  planState = state["plans"].get(planIdValue) or {}
+  duration = durationStats(planEvents, planState.get("status"), now)
+  return collectStats(planEvents, planTasks(state, planIdValue), [duration])
+
+
+def boardStats(events, state, now=None):
+  """回傳核准過的每份 plan 的指標，加上全部 plan 的總計。"""
+  planIds = approvedPlanIds(events)
+  plans = {planIdValue: planStats(events, state, planIdValue, now) for planIdValue in planIds}
+  planEvents = [event for event in events if event.get("plan") in planIds]
+  tasks = [task for planIdValue in planIds for task in planTasks(state, planIdValue)]
+  total = collectStats(planEvents, tasks, [stats["duration"] for stats in plans.values()])
+  return {"plans": plans, "total": total}
