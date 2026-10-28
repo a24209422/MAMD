@@ -1,10 +1,13 @@
 """用 Edge（或 Chrome）無頭模式載入儀表板，檢查畫面真的畫出 API 的資料。找不到瀏覽器就跳過。"""
 import itertools
 import json
+import os
 import re
 import shutil
 import subprocess
 import threading
+import time
+import warnings
 from datetime import datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
@@ -33,6 +36,10 @@ claudeLog = [{"type": "assistant", "message": {
   "content": [{"type": "tool_use", "id": "tu1", "name": "Write", "input": {"file_path": "D:\\w\\upload.py", "content": "x"}}],
   "usage": {"input_tokens": 2, "cache_read_input_tokens": 149000, "cache_creation_input_tokens": 998, "output_tokens": 10}}}]
 gib = 1024 ** 3
+renderAttempts = 3
+stderrTailLines = 5
+# 每個測試 server 的網址 → 它收到的請求，renderUntil 失敗時列出來
+serverRequests = {}
 
 
 def findBrowser():
@@ -84,20 +91,101 @@ def dashboard(gitProject, writePlan):
               data={"kind": "blocked", "reason": "寫程式的 agent 回報卡住：缺少 API 位址"})
   httpServer = server.makeServer(gitProject, 0, token)
   httpServer.RequestHandlerClass.dashboard.systemMonitor.collector = fixedCollector(gitProject)
+  url = f"http://127.0.0.1:{httpServer.server_address[1]}/"
+  serverRequests[url] = recordRequests(httpServer)
   thread = threading.Thread(target=httpServer.serve_forever, daemon=True)
   thread.start()
-  yield f"http://127.0.0.1:{httpServer.server_address[1]}/"
+  yield url
   httpServer.shutdown()
   httpServer.server_close()
+  serverRequests.pop(url)
 
 
-def renderDom(tmp_path, url, *extraArgs):
+def recordRequests(httpServer):
+  # 畫面重畫幾次都沒有資料時，要分得出是瀏覽器沒來要、server 回錯，還是 server 丟出例外
+  requests = []
+  class RecordingHandler(httpServer.RequestHandlerClass):
+    raised = None
+    def dispatch(self, route):
+      self.raised = None
+      def recordedRoute(path):
+        try:
+          route(path)
+        except Exception as error:
+          self.raised = f"{type(error).__name__}: {error}"
+          raise
+      super().dispatch(recordedRoute)
+    def log_request(self, code="-", size="-"):
+      requests.append({"method": self.command, "path": getattr(self, "path", ""), "status": int(code), "error": self.raised})
+  httpServer.RequestHandlerClass = RecordingHandler
+  return requests
+
+
+class RenderedDom(str):
+  # 照舊當成 DOM 文字用；另外帶著瀏覽器的 stderr 與耗時，重畫都失敗時拿來診斷
+  def __new__(cls, dom, stderr, seconds, timedOut=False):
+    rendered = super().__new__(cls, dom)
+    rendered.stderr, rendered.seconds, rendered.timedOut = stderr, seconds, timedOut
+    return rendered
+
+
+def renderDom(tmp_path, url, *extraArgs, profile="browser"):
   # virtual-time-budget 讓頁面的計時器先跑幾輪輪詢，再把畫好的 DOM 印出來
-  completed = subprocess.run(
-    [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-     f"--user-data-dir={tmp_path / 'browser'}", "--virtual-time-budget=6000", *extraArgs, "--dump-dom", url],
-    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-  return completed.stdout
+  started = time.monotonic()
+  try:
+    completed = subprocess.run(
+      [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+       f"--user-data-dir={tmp_path / profile}", "--virtual-time-budget=6000", *extraArgs, "--dump-dom", url],
+      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+  except subprocess.TimeoutExpired as timeout:
+    # 負載高時瀏覽器偶爾卡住，當成這次沒畫好交給 renderUntil 重畫，不讓整個測試直接中斷
+    return RenderedDom(outputText(timeout.stdout), outputText(timeout.stderr), time.monotonic() - started, timedOut=True)
+  return RenderedDom(completed.stdout, completed.stderr, time.monotonic() - started)
+
+
+def outputText(output):
+  # 逾時時已收到的輸出在部分平台是 bytes 或 None
+  if isinstance(output, bytes):
+    return output.decode("utf-8", errors="replace")
+  return output or ""
+
+
+def renderUntil(tmp_path, url, ready, *extraArgs):
+  # 負載高時偶爾拿到還沒有資料的畫面，單獨重跑就過；換新的 user-data-dir 重畫，真的壞掉時每次都不成立仍會失敗
+  requests = next((recorded for base, recorded in serverRequests.items() if url.startswith(base)), [])
+  tries = []
+  for attempt in range(1, renderAttempts + 1):
+    firstRequest = len(requests)
+    dom = renderDom(tmp_path, url, *extraArgs, profile=f"browser-{attempt}")
+    if ready(dom):
+      if attempt > 1:
+        warnings.warn(f"{currentTestName()} 的畫面重畫 {attempt} 次才有資料")
+      return dom
+    tries.append((dom, requests[firstRequest:]))
+  raise AssertionError(renderFailureText(tries))
+
+
+def currentTestName():
+  return os.environ.get("PYTEST_CURRENT_TEST", "").rsplit(" ", 1)[0]
+
+
+def renderFailureText(tries):
+  timedOut = [str(attempt) for attempt, (dom, requests) in enumerate(tries, 1) if dom.timedOut]
+  timedOutText = f"（第 {'、'.join(timedOut)} 次逾時）" if timedOut else ""
+  lines = [f"畫面重畫 {len(tries)} 次都沒有準備好{timedOutText}："]
+  for attempt, (dom, requests) in enumerate(tries, 1):
+    stderrTail = dom.stderr.strip().splitlines()[-stderrTailLines:]
+    lines.append(f"第 {attempt} 次：耗時 {dom.seconds:.1f} 秒" + ("（逾時）" if dom.timedOut else ""))
+    lines.append("  瀏覽器 stderr 最後幾行：" + ("" if stderrTail else "（沒有輸出）"))
+    lines += [f"    {line}" for line in stderrTail]
+    lines.append("  server 收到的請求：" + ("" if requests else "（沒有收到）"))
+    lines += [f"    {requestText(request)}" for request in requests]
+  return "\n".join(lines)
+
+
+def requestText(request):
+  text = f"{request['method']} {request['path']} {request['status']}"
+  return f"{text} {request['error']}" if request["error"] else text
 
 
 def addProbe(tmp_path, monkeypatch, script):
@@ -156,6 +244,79 @@ def test_dashboardLoadsMonitorModuleFromWhitelist():
   assert html.index('src="modules/system-monitor/monitor.js"') < html.index('src="js/main.js"')
   assert 'id="systemMonitorPage"' in html and 'id="systemMonitorSummary"' in html
   assert "「系統資源監控」還沒有接資料" not in html
+
+
+@needsBrowser
+def test_renderUntilRedrawsWhenStateIsNotReadyYet(dashboard, tmp_path, monkeypatch):
+  # 替身：前兩次載入頁面時 /api/state 都回 503，畫面只有骨架；頁面自己每 2 秒重讀也拿不到，第 3 次載入才有資料
+  realRouteGet = server.DashboardHandler.routeGet
+  pageLoads = []
+  def flakyRouteGet(handler, path):
+    if path == "/":
+      pageLoads.append(path)
+    if path == "/api/state" and len(pageLoads) <= 2:
+      handler.sendJson(503, {"ok": False, "message": "替身：暫時無法回應"})
+      return
+    realRouteGet(handler, path)
+  monkeypatch.setattr(server.DashboardHandler, "routeGet", flakyRouteGet)
+  with pytest.warns(UserWarning, match=r"test_renderUntilRedrawsWhenStateIsNotReadyYet .*重畫 3 次") as caught:
+    dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "開始寫程式" in dom)
+  assert "開始寫程式" in dom and len(pageLoads) == 3
+  # 驗證時要在 pytest 結尾的 warnings summary 看到重畫次數，檢查完原樣再發出
+  for item in caught:
+    warnings.warn_explicit(item.message, item.category, item.filename, item.lineno)
+
+
+@needsBrowser
+def test_renderUntilFailsWithDiagnosticsWhenNeverReady(dashboard, tmp_path, monkeypatch):
+  def brokenState(projectDir):
+    raise RuntimeError("替身：讀狀態失敗")
+  monkeypatch.setattr(server, "getRoutes", [(server.getRoutes[0][0], brokenState), *server.getRoutes[1:]])
+  with pytest.raises(AssertionError) as failure:
+    renderUntil(tmp_path, dashboard, lambda dom: False)
+  blocks = re.split(r"\n(?=第 \d 次)", str(failure.value))
+  assert blocks[0] == "畫面重畫 3 次都沒有準備好："
+  assert len(blocks) == 4
+  for attempt, block in enumerate(blocks[1:], 1):
+    assert re.match(rf"第 {attempt} 次：耗時 \d+\.\d 秒\n  瀏覽器 stderr 最後幾行：", block)
+    assert "\n  server 收到的請求：\n" in block
+    assert "    GET / 200\n" in block and "    GET /api/state 500 RuntimeError: 替身：讀狀態失敗" in block
+
+
+def fakeBrowserRuns(monkeypatch, outcomes):
+  # 替身瀏覽器：依序逾時或印出 DOM，不必真的開瀏覽器也能重現負載高時的逾時
+  remaining = iter(outcomes)
+  def run(command, **kwargs):
+    outcome = next(remaining)
+    if outcome == "timeout":
+      raise subprocess.TimeoutExpired(command, kwargs["timeout"], output="", stderr="edge hung\n")
+    return subprocess.CompletedProcess(command, 0, stdout=outcome, stderr="")
+  monkeypatch.setattr(subprocess, "run", run)
+
+
+def test_renderUntilRedrawsAfterBrowserTimeout(tmp_path, monkeypatch):
+  fakeBrowserRuns(monkeypatch, ["timeout", "<p>ready</p>"])
+  with pytest.warns(UserWarning, match="重畫 2 次"):
+    dom = renderUntil(tmp_path, "http://127.0.0.1:1/", lambda dom: "ready" in dom)
+  assert dom == "<p>ready</p>" and not dom.timedOut
+
+
+def test_renderUntilFailureMarksTimedOutAttempts(tmp_path, monkeypatch):
+  fakeBrowserRuns(monkeypatch, ["timeout", "<p>empty</p>", "timeout"])
+  with pytest.raises(AssertionError) as failure:
+    renderUntil(tmp_path, "http://127.0.0.1:1/", lambda dom: False)
+  blocks = re.split(r"\n(?=第 \d 次)", str(failure.value))
+  assert blocks[0] == "畫面重畫 3 次都沒有準備好（第 1、3 次逾時）："
+  assert re.match(r"第 1 次：耗時 \d+\.\d 秒（逾時）\n  瀏覽器 stderr 最後幾行：\n    edge hung\n", blocks[1])
+  assert re.match(r"第 2 次：耗時 \d+\.\d 秒\n", blocks[2])
+  assert re.match(r"第 3 次：耗時 \d+\.\d 秒（逾時）\n", blocks[3])
+
+
+def test_renderFailureTextKeepsLastStderrLines():
+  dom = RenderedDom("<html></html>", "".join(f"line{number}\n" for number in range(1, 8)), 2.04)
+  assert renderFailureText([(dom, [])]) == "\n".join([
+    "畫面重畫 1 次都沒有準備好：", "第 1 次：耗時 2.0 秒", "  瀏覽器 stderr 最後幾行：",
+    *[f"    line{number}" for number in range(3, 8)], "  server 收到的請求：（沒有收到）"])
 
 
 @needsBrowser
