@@ -6,6 +6,8 @@ import argparse
 import importlib.util
 import json
 import os
+import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -87,6 +89,53 @@ def approveWarnings(projectDir, plan):
   return warnings
 
 
+def planFilePath(plan):
+  # loadPlans 只讀 plans/ 底下的檔案；給 git 用相對路徑，印出來的指令使用者也能直接照打
+  return f"plans/{plan['path'].name}"
+
+
+def shellQuote(text, windows=os.name == "nt"):
+  # Windows 印 PowerShell 的寫法，其他系統印 sh 的寫法
+  if not windows:
+    return shlex.quote(text)
+  if re.fullmatch(r"[\w./-]+", text):
+    return text
+  # PowerShell 的單引號字串裡只有單引號（含彎引號）有特殊意義，重複一次就是字面上的單引號
+  return "'" + re.sub(r"(['‘’‚‛])", r"\1\1", text) + "'"
+
+
+def planFileCommitted(projectDir, plan):
+  return board_git.fileMatchesHead(projectDir, planFilePath(plan))
+
+
+def commitPlanFile(projectDir, planIdValue, plan):
+  # plan 分支從核准時的 HEAD 開出來，plan 檔沒 commit 的話寫程式的 agent 在 worktree 裡看不到它
+  if planFileCommitted(projectDir, plan):
+    return True
+  path, message = planFilePath(plan), f"{planIdValue} 送出 plan：{plan['title']}"
+  try:
+    board_git.commitFile(projectDir, path, message)
+  except board_git.GitError as error:
+    print(f"{planIdValue} 的 plan 檔 commit 失敗，沒有送出：")
+    print("  " + str(error))
+    # 標題可能有引號，各種 shell 的跳脫規則不同（PowerShell 5.1 傳給 git 時還會弄丟雙引號），
+    # 訊息寫進檔案用 -F 讀，指令裡就不必放標題
+    messageName = f"commit-message-{planIdValue}.txt"
+    try:
+      boardDir(projectDir).mkdir(parents=True, exist_ok=True)
+      (boardDir(projectDir) / messageName).write_bytes(message.encode("utf-8"))
+      messageArgs = f"-F {shellQuote('.board/' + messageName)}"
+    except OSError:
+      messageArgs = f"-m {shellQuote(message)}"
+    # 檔名可能有 [ ] * 這類 pathspec 萬用字元，指令也要照字面比對，才不會 commit 到別的檔案
+    print(f"請在專案資料夾自己 commit 這個 plan 檔，再重新送出（{'PowerShell' if os.name == 'nt' else 'sh'} 指令）：")
+    print(f"  git {board_git.literalPathspecs} add -- {shellQuote(path)}")
+    print(f"  git {board_git.literalPathspecs} commit {messageArgs} -- {shellQuote(path)}")
+    return False
+  print(f"已 commit {path}")
+  return True
+
+
 def cmdSubmit(projectDir, planIdValue):
   loadErrors = []
   plans, state = currentState(projectDir, loadErrors)
@@ -105,6 +154,8 @@ def cmdSubmit(projectDir, planIdValue):
     print(f"{planIdValue} 有問題，沒有送出：")
     for message in blockers:
       print("  紅｜" + message)
+    return 1
+  if not commitPlanFile(projectDir, planIdValue, plan):
     return 1
   appendEvent(projectDir, "planSubmitted", plan=planIdValue,
               data={"red": 0, "orange": len(problems["orange"]), "yellow": len(problems["yellow"])})
@@ -246,6 +297,11 @@ def cmdApprove(projectDir, planIdValue, confirm=input):
     print(f"{planIdValue} 送出後又被改出問題，不能核准，請寫 plan 的 agent 修好再送出：")
     for message in blockers:
       print("  紅｜" + message)
+    return 1
+  # plan 分支從 HEAD 開出來，plan 檔跟 HEAD 不同時分支裡會是舊版
+  if not planFileCommitted(projectDir, plans[planIdValue]):
+    print(f"{planIdValue} 的 plan 檔（{planFilePath(plans[planIdValue])}）送出後又被改過，跟目前的 commit 不同，"
+          "不能核准，請寫 plan 的 agent 重新執行 submit")
     return 1
   graph = plans[planIdValue]["graph"]
   warnings = approveWarnings(projectDir, plans[planIdValue])
