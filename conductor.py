@@ -116,6 +116,9 @@ class BackgroundTestJob:
   def poll(self):
     return not self.thread.is_alive()
 
+  def wait(self, timeoutSeconds):
+    self.thread.join(timeoutSeconds)
+
   def kill(self):
     with self.lock:
       self.killed = True
@@ -142,6 +145,11 @@ def formatEvent(event):
       details.append(str(data[key]))
   detailText = f"（{'，'.join(details)}）" if details else ""
   return f"{timeText} {who} {eventLabels.get(event['type'], event['type'])}{detailText}".replace("  ", " ")
+
+
+def baselineKey(planIdValue):
+  # 任務的 key 是「plan/T編號」，用 baseline 當後綴不會和任務撞名
+  return f"{planIdValue}/baseline"
 
 
 class Conductor:
@@ -269,21 +277,31 @@ class Conductor:
       info = self.jobs.get(key)
       if info is None:
         continue
-      finished = info["job"].poll() if info["kind"] == "test" else info["job"].process.poll() is not None
+      isTest = info["kind"] in ("test", "baseline")
+      finished = info["job"].poll() if isTest else info["job"].process.poll() is not None
       if recordInterruption and finished:
         # 已經自己結束的 agent 可能寫好了成果，留給 collectFinishedJobs 照常處理，暫停時才不會丟掉
         continue
       del self.jobs[key]
       info["job"].kill()
       info["job"].poll()
-      # 測試不記中斷：狀態留在測試中，繼續或重開 Alfred 後 startTests 會重跑
-      if recordInterruption and info["kind"] != "test":
+      if info["kind"] == "baseline":
+        # Windows 上測試程式還沒完全結束時，它的工作目錄刪不掉；等背景執行緒收完再移除
+        info["job"].wait(outputWaitAfterKillSeconds)
+        self.removeBaselineWorktree(info["plan"])
+      # 測試不記中斷：狀態留在測試中，繼續或重開 Alfred 後 startTests 會重跑；基準沒記下來，之後會從頭重跑
+      elif recordInterruption and not isTest:
         self.event("taskInterrupted", info, stage=info["kind"])
 
   def stopJobsOfInactiveTasks(self, state):
     # 任務或整份 plan 被放棄後，正在跑的 agent 沒有意義了，直接結束、不留中斷紀錄
-    keys = [key for key in self.jobs if state["tasks"].get(key, {}).get("status") == TaskStatus.abandoned]
+    keys = [key for key, info in self.jobs.items() if self.jobInactive(state, key, info)]
     self.stopJobs(keys, recordInterruption=False)
+
+  def jobInactive(self, state, key, info):
+    if info["kind"] == "baseline":
+      return state["plans"].get(info["plan"], {}).get("status") != PlanStatus.active
+    return state["tasks"].get(key, {}).get("status") == TaskStatus.abandoned
 
   def quotaSuspect(self, job, error):
     if job.timedOut:
@@ -313,6 +331,9 @@ class Conductor:
       if not info["job"].poll():
         continue
       del self.jobs[key]
+      if info["kind"] == "baseline":
+        self.finishTestBaseline(info)
+        continue
       try:
         if info["kind"] == "write":
           self.finishWrite(info)
@@ -347,10 +368,11 @@ class Conductor:
 
   def runTestBaselines(self, state):
     for planState in state["plans"].values():
-      if planState["status"] == PlanStatus.active and self.needsTestBaseline(planState):
-        self.runTestBaseline(planState)
+      key = baselineKey(planState["id"])
+      if planState["status"] == PlanStatus.active and key not in self.jobs and self.needsTestBaseline(planState):
+        self.startTestBaseline(planState, key)
 
-  def runTestBaseline(self, planState):
+  def startTestBaseline(self, planState, key):
     planIdValue, baseCommit = planState["id"], planState["baseCommit"]
     # 不在 plan worktree 跑：測試產物會留成未追蹤檔案，之後合併任務可能被擋下
     try:
@@ -359,17 +381,31 @@ class Conductor:
       # 基準沒記下來前這份 plan 不派工；下一輪會自動再試
       self.notifyOnce(f"{planIdValue} 的基準測試 worktree 建立失敗：{error}")
       return
+    # 基準可能跑好幾分鐘，在背景跑，期間才讀得到放棄、暫停的事件
+    self.jobs[key] = {"kind": "baseline", "plan": planIdValue, "task": None, "agent": None, "baseCommit": baseCommit,
+                      "worktree": worktree, "job": BackgroundTestJob(self.runTestCommand, worktree).start()}
+
+  def finishTestBaseline(self, info):
+    job = info["job"]
     try:
-      passed, tail, failures = self.runTestCommand(worktree)
-      appendEvent(self.projectDir, "testBaseline", plan=planIdValue,
-                  data={"command": self.config["testCommand"], "commit": baseCommit, "passed": passed,
+      if job.error is not None:
+        raise job.error
+      passed, tail, failures = job.result
+      appendEvent(self.projectDir, "testBaseline", plan=info["plan"],
+                  data={"command": self.config["testCommand"], "commit": info["baseCommit"], "passed": passed,
                         "failures": failures, "tail": tail})
+    except Exception as error:
+      # plan 沒有「等你處理」狀態可以記；基準沒記下來，下一輪會自動重跑
+      self.notifyOnce(f"{info['plan']} 的基準測試執行失敗：{error}")
     finally:
-      try:
-        board_git.removeBaselineWorktree(self.projectDir, planIdValue)
-      except Exception as error:
-        # 結果已經記下來，不能因為移除失敗而每一輪重跑整套測試；下次建立前會先移除，cleanup 也會清掉
-        self.notifyOnce(f"{planIdValue} 的基準測試 worktree 移除失敗：{error}")
+      self.removeBaselineWorktree(info["plan"])
+
+  def removeBaselineWorktree(self, planIdValue):
+    try:
+      board_git.removeBaselineWorktree(self.projectDir, planIdValue)
+    except Exception as error:
+      # 結果已經記下來，不能因為移除失敗而每一輪重跑整套測試；下次建立前會先移除，cleanup 也會清掉
+      self.notifyOnce(f"{planIdValue} 的基準測試 worktree 移除失敗：{error}")
 
   def startWrites(self, plans, state):
     for taskState in readyTasks(state):

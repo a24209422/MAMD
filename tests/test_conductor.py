@@ -470,6 +470,118 @@ def test_restartWhileTestingRerunsTests(startBoard, tmp_path):
   assert [entry[0] for entry in taskTestLog(logPath)] == ["start", "start", "end"]
 
 
+def baselineStarted(logPath):
+  return lambda state: bool(taskTestLog(logPath, "baseline"))
+
+
+def processEnded(pid):
+  deadline = time.time() + 10
+  while conductorModule.processAlive(pid) and time.time() < deadline:
+    time.sleep(0.1)
+  return not conductorModule.processAlive(pid)
+
+
+def test_abandonWhileBaselineRunsKillsItWithoutDispatch(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-baseline": 5})
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  runUntil(conductor, baselineStarted(logPath))
+  testPid = int(taskTestLog(logPath, "baseline")[0][2])
+  board_core.appendEvent(conductor.projectDir, "planAbandoned", plan="P0001")
+  conductor.tick()
+  assert not conductor.jobs
+  assert processEnded(testPid)
+  assert noBaselineWorktreeLeft(conductor.projectDir)
+  for _ in range(3):
+    conductor.tick()
+  assert eventsOf(conductor, "testBaseline") == [] and eventsOf(conductor, "taskStarted") == []
+  assert [entry[0] for entry in taskTestLog(logPath, "baseline")] == ["start"]
+
+
+def test_pauseWhileBaselineRunsKillsItThenResumeRerunsBaseline(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-baseline": 3})
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  runUntil(conductor, baselineStarted(logPath))
+  testPid = int(taskTestLog(logPath, "baseline")[0][2])
+  board_core.appendEvent(conductor.projectDir, "paused", data={"reason": "測試暫停"})
+  conductor.tick()
+  assert not conductor.jobs
+  assert processEnded(testPid)
+  assert noBaselineWorktreeLeft(conductor.projectDir)
+  assert eventsOf(conductor, "testBaseline") == [] and eventsOf(conductor, "taskInterrupted") == []
+  board_core.appendEvent(conductor.projectDir, "resumed")
+  runUntil(conductor, planDone)
+  types = [event["type"] for event in board_core.readEvents(conductor.projectDir)]
+  assert types.count("testBaseline") == 1
+  assert types.index("testBaseline") < types.index("taskStarted")
+  assert [entry[0] for entry in taskTestLog(logPath, "baseline")] == ["start", "start", "end"]
+
+
+def test_otherPlanDispatchesWhileBaselineRuns(startBoard, writePlan, gitProject, tmp_path):
+  import board as boardCli
+
+  command, logPath = sleepyTestCommand(tmp_path, {"P0002-baseline": 10})
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  writePlan("0002-other.md", oneTask, planId="P0002", projectDir=gitProject)
+  assert boardCli.cmdSubmit(gitProject, "P0002") == 0
+  assert boardCli.cmdApprove(gitProject, "P0002", confirm=lambda prompt: "y") == 0
+  runUntil(conductor, lambda state: eventsOf(conductor, "taskStarted"))
+  assert [event["plan"] for event in eventsOf(conductor, "taskStarted")] == ["P0001"]
+  assert [event["plan"] for event in eventsOf(conductor, "testBaseline")] == ["P0001"]
+  logLines = [line.split()[:2] for line in logPath.read_text(encoding="utf-8").splitlines()]
+  assert ["start", "P0002-baseline"] in logLines and ["end", "P0002-baseline"] not in logLines
+
+
+def test_stopJobsWhileBaselineRunsKillsItAndRemovesWorktree(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-baseline": 5})
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  runUntil(conductor, baselineStarted(logPath))
+  testPid = int(taskTestLog(logPath, "baseline")[0][2])
+  # 和 Ctrl+C 結束 Alfred 時一樣
+  conductor.stopJobs(list(conductor.jobs), recordInterruption=True)
+  assert not conductor.jobs
+  assert processEnded(testPid)
+  assert noBaselineWorktreeLeft(conductor.projectDir)
+  assert eventsOf(conductor, "testBaseline") == [] and eventsOf(conductor, "taskInterrupted") == []
+
+
+def test_baselineErrorIsNotifiedOnceAndRetried(startBoard):
+  conductor, _ = startBoard(oneTask, testCommand="git --version")
+  lines = []
+  conductor.out = lines.append
+  calls = []
+
+  def failingRun(cwd, onStarted=None):
+    calls.append(cwd)
+    raise OSError("模擬測試啟動失敗")
+
+  conductor.runTestCommand = failingRun
+  runUntil(conductor, lambda state: len(calls) >= 3)
+  assert lines.count("P0001 的基準測試執行失敗：模擬測試啟動失敗") == 1
+  assert eventsOf(conductor, "testBaseline") == [] and eventsOf(conductor, "taskStarted") == []
+  del conductor.runTestCommand
+  runUntil(conductor, planDone)
+  types = [event["type"] for event in board_core.readEvents(conductor.projectDir)]
+  assert types.count("testBaseline") == 1
+  assert types.index("testBaseline") < types.index("taskStarted")
+  assert noBaselineWorktreeLeft(conductor.projectDir)
+
+
+def test_baselineWorktreeRemovalFailureKeepsResult(startBoard, tmp_path, monkeypatch):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-baseline": 1})
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  lines = []
+  conductor.out = lines.append
+  runUntil(conductor, baselineStarted(logPath))
+
+  def failingRemove(projectDir, planIdValue):
+    raise board_git.GitError("模擬移除失敗")
+
+  monkeypatch.setattr(board_git, "removeBaselineWorktree", failingRemove)
+  runUntil(conductor, lambda state: eventsOf(conductor, "taskStarted"))
+  assert lines.count("P0001 的基準測試 worktree 移除失敗：模擬移除失敗") == 1
+  assert len(eventsOf(conductor, "testBaseline")) == 1
+
+
 def test_testCommandTimeoutKillsProcessTree(startBoard, tmp_path):
   scriptPath = tmp_path / "slowTest.py"
   scriptPath.write_text(
