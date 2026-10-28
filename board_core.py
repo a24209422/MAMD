@@ -414,6 +414,18 @@ def onTaskBlocked(taskState, event):
 
 def onTestRun(taskState, event):
   taskState["lastTest"] = event["data"]
+  # verdict 由 conductor 跑完測試時對照當時的基準算好；沒有 verdict 的舊事件照舊只記錄
+  if event["data"].get("verdict") != "newFailure":
+    return
+  # 有新增的失敗就不送審，和審查不通過一樣退回寫程式的 agent、算一輪
+  if taskState["round"] < taskState["maxRounds"]:
+    taskState["status"] = TaskStatus.queued
+    taskState["round"] += 1
+    return
+  names = event["data"].get("newFailures") or []
+  reason = f"第 {taskState['round']} 輪測試有新增的失敗，輪數用完"
+  taskState["status"] = TaskStatus.needsYou
+  taskState["needs"] = {"kind": "tests", "reason": reason + ("：" + "、".join(names) if names else "")}
 
 
 def onReviewStarted(taskState, event):
@@ -493,6 +505,7 @@ retryTargets = {
   "blocked": TaskStatus.queued,
   "noChanges": TaskStatus.queued,
   "rounds": TaskStatus.queued,
+  "tests": TaskStatus.queued,
   "invalidReview": TaskStatus.toReview,
   "mergeFailed": TaskStatus.merging,
 }
@@ -509,7 +522,7 @@ def onUserDecision(taskState, event):
     taskState["status"] = TaskStatus.merging
     taskState["userDone"] = True
   elif action == "retry":
-    if needs.get("kind") == "rounds":
+    if needs.get("kind") in ("rounds", "tests"):
       taskState["maxRounds"] += 1
       taskState["round"] += 1
     if needs.get("kind") == "agentFailed":

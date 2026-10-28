@@ -51,6 +51,36 @@ eventLabels = {
 }
 
 
+def failureNames(output):
+  # pytest short test summary 的「FAILED 名稱 - 原因」；要看完整輸出，失敗多時最後 50 行裝不下
+  names = []
+  for line in output.splitlines():
+    if line.startswith(("FAILED ", "ERROR ")):
+      name = line.split(" ", 1)[1].split(" - ", 1)[0].strip()
+      if name and name not in names:
+        names.append(name)
+  return names
+
+
+def compareWithBaseline(baseline, passed, failures):
+  """依 plan「測試判定」回傳 (verdict, newFailures)。"""
+  if passed:
+    return "passed", []
+  if baseline is None:
+    # 正常不會發生（基準記下來前不派工）；沒有東西可比時不擋，交給審查
+    return "unknown", []
+  if baseline.get("passed"):
+    return "newFailure", list(failures)
+  baseFailures = baseline.get("failures") or []
+  if not baseFailures:
+    return "unknown", []
+  newFailures = [name for name in failures if name not in baseFailures]
+  # 一個名稱都分不出來時，不能確定失敗的就是基準那幾個
+  if newFailures or not failures:
+    return "newFailure", newFailures
+  return "preexisting", []
+
+
 def formatEvent(event):
   timeText = (event.get("time") or "")[11:19]
   who = " ".join(part for part in (event.get("plan"), event.get("task"), event.get("agent")) if part)
@@ -283,9 +313,10 @@ class Conductor:
       self.notifyOnce(f"{planIdValue} 的基準測試 worktree 建立失敗：{error}")
       return
     try:
-      passed, tail = self.runTestCommand(worktree)
+      passed, tail, failures = self.runTestCommand(worktree)
       appendEvent(self.projectDir, "testBaseline", plan=planIdValue,
-                  data={"command": self.config["testCommand"], "commit": baseCommit, "passed": passed, "tail": tail})
+                  data={"command": self.config["testCommand"], "commit": baseCommit, "passed": passed,
+                        "failures": failures, "tail": tail})
     finally:
       try:
         board_git.removeBaselineWorktree(self.projectDir, planIdValue)
@@ -448,8 +479,11 @@ class Conductor:
   def runTests(self, info):
     if not self.config["testCommand"]:
       return
-    passed, tail = self.runTestCommand(info["worktree"])
-    self.event("testRun", info, passed=passed, tail=tail)
+    passed, tail, failures = self.runTestCommand(info["worktree"])
+    # verdict 在這裡算好寫進事件：之後重播事件時，結果才不會因為基準或輸出不同而改變
+    baseline = self.currentState()[1]["plans"][info["plan"]]["testBaseline"]
+    verdict, newFailures = compareWithBaseline(baseline, passed, failures)
+    self.event("testRun", info, passed=passed, tail=tail, verdict=verdict, newFailures=newFailures)
 
   def runTestCommand(self, cwd):
     command = self.config["testCommand"]
@@ -462,7 +496,10 @@ class Conductor:
     try:
       output, _ = process.communicate(timeout=self.timeoutSeconds())
       passed = process.returncode == 0
+      failures = [] if passed else failureNames(output)
     except subprocess.TimeoutExpired:
+      # 超時的輸出只有一部分，裡面的失敗名稱不完整，當成分不出名稱
+      failures = []
       board_agents.killProcessTree(process.pid)
       try:
         output, _ = process.communicate(timeout=outputWaitAfterKillSeconds)
@@ -473,7 +510,7 @@ class Conductor:
         threading.Thread(target=process.communicate, daemon=True).start()
         output = "測試超時（輸出無法取得）"
       passed = False
-    return passed, "\n".join(output.splitlines()[-50:])
+    return passed, "\n".join(output.splitlines()[-50:]), failures
 
   def startReviews(self, plans, state):
     for taskState in tasksWithStatus(state, TaskStatus.toReview):
