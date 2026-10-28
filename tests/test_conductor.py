@@ -8,7 +8,7 @@ import board_core
 import board_git
 from board_core import PlanStatus, TaskStatus
 import conductor as conductorModule
-from conductor import Conductor, formatEvent
+from conductor import Conductor, compareWithBaseline, failureNames, formatEvent
 from helpers import fakeConfig, fakeRole, makeEvent, readCalls, runUntil
 
 oneTask = ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |"]
@@ -144,7 +144,8 @@ def test_testBaselineRunsAtBaseCommitBeforeFirstTaskThenIsRemoved(startBoard):
   baseCommit = eventsOf(conductor, "planApproved")[0]["data"]["baseCommit"]
   baseline = eventsOf(conductor, "testBaseline")[0]
   assert baseline["plan"] == "P0001" and baseline["task"] is None
-  assert baseline["data"] == {"command": "git rev-parse HEAD", "commit": baseCommit, "passed": True, "tail": baseCommit}
+  assert baseline["data"] == {"command": "git rev-parse HEAD", "commit": baseCommit, "passed": True, "failures": [],
+                              "tail": baseCommit}
   assert conductor.currentState()[1]["plans"]["P0001"]["testBaseline"] == baseline["data"]
   assert noBaselineWorktreeLeft(conductor.projectDir)
 
@@ -155,7 +156,62 @@ def test_failingBaselineStillDispatches(startBoard):
   runUntil(conductor, planDone)
   assert eventsOf(conductor, "testBaseline")[0]["data"]["passed"] is False
   assert eventsOf(conductor, "testRun")[0]["data"]["passed"] is True
+  assert eventsOf(conductor, "testRun")[0]["data"]["verdict"] == "passed"
   assert noBaselineWorktreeLeft(conductor.projectDir)
+
+
+def pythonTestCommand(tmp_path, body):
+  # 假的測試程式在任務的 worktree 執行；基準的 worktree 在 baseCommit，還沒有 T1.txt
+  scriptPath = tmp_path / "fakeTests.py"
+  scriptPath.write_text("import pathlib, sys\nwritten = pathlib.Path('T1.txt')\n" + body, encoding="utf-8")
+  return f'"{sys.executable}" "{scriptPath}"'
+
+
+failNewTest = "print('FAILED tests/test_new.py::test_new - AssertionError')\nsys.exit(1)\n"
+
+
+def test_newFailureGoesBackToWriterWithoutReview(startBoard, tmp_path):
+  body = "if written.exists() and '第 1 次' in written.read_text(encoding='utf-8'):\n  " + failNewTest.replace("\n", "\n  ")
+  conductor, scenarioDir = startBoard(oneTask, testCommand=pythonTestCommand(tmp_path, body))
+  runUntil(conductor, planDone)
+  events = board_core.readEvents(conductor.projectDir)
+  assert eventsOf(conductor, "testBaseline")[0]["data"]["passed"] is True
+  firstRun = next(index for index, event in enumerate(events) if event["type"] == "testRun")
+  assert events[firstRun]["data"]["verdict"] == "newFailure"
+  assert events[firstRun]["data"]["newFailures"] == ["tests/test_new.py::test_new"]
+  assert (events[firstRun + 1]["type"], events[firstRun + 1]["round"]) == ("taskStarted", 2)
+  assert "reviewStarted" not in [event["type"] for event in events[:firstRun + 1]]
+  assert [event["data"]["verdict"] for event in eventsOf(conductor, "testRun")] == ["newFailure", "passed"]
+  assert len(eventsOf(conductor, "reviewStarted")) == 1
+  assert len(readCalls(scenarioDir, "write")) == 2
+
+
+def test_newFailureEveryRoundNeedsYouThenRetryRunsAnotherRound(startBoard, tmp_path):
+  body = "if written.exists():\n  " + failNewTest.replace("\n", "\n  ")
+  conductor, scenarioDir = startBoard(oneTask, testCommand=pythonTestCommand(tmp_path, body))
+  state = runUntil(conductor, taskIs(TaskStatus.needsYou))
+  needs = state["tasks"]["P0001/T1"]["needs"]
+  assert needs["kind"] == "tests"
+  assert "測試有新增的失敗" in needs["reason"] and "tests/test_new.py::test_new" in needs["reason"]
+  assert len(readCalls(scenarioDir, "write")) == 3
+  assert eventsOf(conductor, "reviewStarted") == []
+  board_core.appendEvent(conductor.projectDir, "userDecision", plan="P0001", task="T1", data={"action": "retry"})
+  state = runUntil(conductor, lambda current: current["tasks"]["P0001/T1"]["round"] == 4
+                   and taskIs(TaskStatus.needsYou)(current))
+  assert state["tasks"]["P0001/T1"]["maxRounds"] == 4
+  assert [event["round"] for event in eventsOf(conductor, "taskStarted")] == [1, 2, 3, 4]
+  assert eventsOf(conductor, "reviewStarted") == []
+
+
+def test_sameFailuresAsBaselineStillGoToReview(startBoard, tmp_path):
+  body = "print('FAILED tests/test_old.py::test_old - AssertionError')\nsys.exit(1)\n"
+  conductor, scenarioDir = startBoard(oneTask, testCommand=pythonTestCommand(tmp_path, body))
+  runUntil(conductor, planDone)
+  assert eventsOf(conductor, "testBaseline")[0]["data"]["failures"] == ["tests/test_old.py::test_old"]
+  testRun = eventsOf(conductor, "testRun")[0]
+  assert (testRun["data"]["verdict"], testRun["data"]["newFailures"]) == ("preexisting", [])
+  assert len(eventsOf(conductor, "reviewStarted")) == 1
+  assert len(readCalls(scenarioDir, "write")) == 1
 
 
 def test_changedTestCommandRerunsBaselineAfterRestart(startBoard):
@@ -378,6 +434,33 @@ def test_formatEvent():
   baseline = makeEvent("testBaseline", plan="P0001", command="pytest -q", passed=False, tail="1 failed")
   baseline["time"] = "2026-10-25T21:42:00+08:00"
   assert formatEvent(baseline) == "21:42:00 P0001 跑基準測試（失敗）"
+
+
+def test_failureNamesReadPytestShortSummary():
+  output = ("tests/test_a.py F.E\n"
+            "=========================== short test summary info ===========================\n"
+            "FAILED tests/test_a.py::test_one - AssertionError: 1 != 2\n"
+            "ERROR tests/test_b.py - ImportError: no module\n"
+            "FAILED tests/test_a.py::test_two\n"
+            "FAILED tests/test_a.py::test_one - AssertionError: again\n"
+            "  FAILED indented line is not a summary\n")
+  assert failureNames(output) == ["tests/test_a.py::test_one", "tests/test_b.py", "tests/test_a.py::test_two"]
+  assert failureNames("1 failed in 0.1s") == []
+
+
+def test_compareWithBaselineFollowsPlanRules():
+  passedBaseline = {"passed": True, "failures": []}
+  namedBaseline = {"passed": False, "failures": ["t::old"]}
+  unnamedBaseline = {"passed": False, "failures": []}
+  assert compareWithBaseline(namedBaseline, True, []) == ("passed", [])
+  assert compareWithBaseline(passedBaseline, False, []) == ("newFailure", [])
+  assert compareWithBaseline(passedBaseline, False, ["t::new"]) == ("newFailure", ["t::new"])
+  assert compareWithBaseline(namedBaseline, False, ["t::old", "t::new"]) == ("newFailure", ["t::new"])
+  assert compareWithBaseline(namedBaseline, False, []) == ("newFailure", [])
+  assert compareWithBaseline(namedBaseline, False, ["t::old"]) == ("preexisting", [])
+  assert compareWithBaseline(unnamedBaseline, False, ["t::new"]) == ("unknown", [])
+  # 沒有 failures 欄位的基準事件當成分不出名稱
+  assert compareWithBaseline({"passed": False}, False, ["t::new"]) == ("unknown", [])
 
 
 def conflictedTask(conductor):
