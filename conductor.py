@@ -479,6 +479,9 @@ class Conductor:
     for taskState in tasksWithStatus(state, TaskStatus.toReview):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
         continue
+      if self.needsTestBaseline(state["plans"][taskState["plan"]]):
+        # 審查也是派工：基準還沒用目前的 testCommand 記下來前不送審
+        continue
       lane = self.freeLane("reviewer", "review", taskState["reviewAgent"])
       if lane is None:
         return

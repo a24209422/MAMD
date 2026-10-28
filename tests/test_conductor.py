@@ -206,6 +206,36 @@ def test_noDispatchUntilBaselineIsRecorded(startBoard, monkeypatch):
   assert types.index("testBaseline") < types.index("taskStarted")
 
 
+def test_noReviewUntilBaselineForChangedCommandIsRecorded(startBoard, monkeypatch):
+  firstConductor, _ = startBoard(oneTask, {"review": {"T1": ["hang", "pass"]}}, testCommand="git --version")
+  runUntil(firstConductor, taskIs(TaskStatus.reviewing))
+  # 暫停會中斷審查，任務回到待審查
+  board_core.appendEvent(firstConductor.projectDir, "paused", data={"reason": "測試暫停"})
+  runUntil(firstConductor, lambda current: not firstConductor.jobs and taskIs(TaskStatus.toReview)(current))
+  board_core.appendEvent(firstConductor.projectDir, "resumed")
+  lines = []
+  restarted = Conductor(firstConductor.projectDir, config=fakeConfig(testCommand="git rev-parse HEAD"), out=lines.append)
+
+  def failingBaseline(projectDir, planIdValue, baseCommit):
+    raise board_git.GitError("模擬基準 worktree 失敗")
+
+  realBaseline = board_git.addBaselineWorktree
+  monkeypatch.setattr(board_git, "addBaselineWorktree", failingBaseline)
+  for _ in range(3):
+    restarted.tick()
+  assert lines.count("P0001 的基準測試 worktree 建立失敗：模擬基準 worktree 失敗") == 1
+  assert len(eventsOf(restarted, "reviewStarted")) == 1
+  assert not restarted.jobs
+  assert restarted.currentState()[1]["tasks"]["P0001/T1"]["status"] == TaskStatus.toReview
+  monkeypatch.setattr(board_git, "addBaselineWorktree", realBaseline)
+  runUntil(restarted, planDone)
+  events = board_core.readEvents(restarted.projectDir)
+  baselines = [index for index, event in enumerate(events) if event["type"] == "testBaseline"]
+  reviews = [index for index, event in enumerate(events) if event["type"] == "reviewStarted"]
+  assert [events[index]["data"]["command"] for index in baselines] == ["git --version", "git rev-parse HEAD"]
+  assert baselines[1] < reviews[1]
+
+
 def test_tddCrapAddsStepsToPromptsAndAllowsPytest(startBoard):
   conductor, scenarioDir = startBoard(oneTask, testCommand="git --version", tddCrap=True)
   runUntil(conductor, planDone)
