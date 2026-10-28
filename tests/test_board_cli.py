@@ -110,14 +110,15 @@ def test_submitStopsWhenCommitFails(gitProject, writePlan, capsys):
   assert board.cmdSubmit(gitProject, "P0001") == 1
   output = capsys.readouterr().out
   assert "commit 失敗，沒有送出" in output and "blocked by hook" in output
-  assert "  git add -- plans/0001-ok.md" in output
-  assert "  git commit -F .board/commit-message-P0001.txt -- plans/0001-ok.md" in output
+  assert "  git --literal-pathspecs add -- plans/0001-ok.md" in output
+  assert "  git --literal-pathspecs commit -F .board/commit-message-P0001.txt -- plans/0001-ok.md" in output
   assert board_git.headCommit(gitProject) == before
   assert "planSubmitted" not in eventTypes(gitProject)
   # 使用者照印出來的指令自己 commit 之後，再送出就會通過
   hookPath.unlink()
-  board_git.runGit(gitProject, "add", "--", "plans/0001-ok.md")
-  board_git.runGit(gitProject, "commit", "-F", ".board/commit-message-P0001.txt", "--", "plans/0001-ok.md")
+  board_git.runGit(gitProject, "--literal-pathspecs", "add", "--", "plans/0001-ok.md")
+  board_git.runGit(gitProject, "--literal-pathspecs", "commit", "-F", ".board/commit-message-P0001.txt", "--",
+                   "plans/0001-ok.md")
   assert board_git.runGit(gitProject, "log", "-1", "--format=%s") == "P0001 送出 plan：批次上傳"
   committed = board_git.headCommit(gitProject)
   assert board.cmdSubmit(gitProject, "P0001") == 0
@@ -134,21 +135,28 @@ def test_shellQuoteForPowerShellAndSh():
 
 
 def test_printedCommitCommandsRunInShell(gitProject, capsys):
+  plansDir = gitProject / "plans"
+  plansDir.mkdir()
+  # 檔名的 [ab] 當成萬用字元會匹配到這個已 commit、又被改過的檔案
+  decoyPath = plansDir / "0001-a b's $x a.md"
+  decoyPath.write_text("舊內容\n", encoding="utf-8")
+  board_git.runGit(gitProject, "add", "--", "plans")
+  board_git.runGit(gitProject, "commit", "-q", "-m", "decoy")
+  decoyPath.write_text("改過\n", encoding="utf-8")
   hookPath = gitProject / ".git" / "hooks" / "pre-commit"
   hookPath.parent.mkdir(parents=True, exist_ok=True)
   hookPath.write_bytes(b"#!/bin/sh\nexit 1\n")
   hookPath.chmod(0o755)
-  plansDir = gitProject / "plans"
-  plansDir.mkdir()
   title = "新增 \"CSV import\" 和 'x' $HOME `y` & z"
-  planPath = plansDir / "0001-a b's $x.md"
+  planPath = plansDir / "0001-a b's $x [ab].md"
   planPath.write_text(
     f"---\nid: P0001\ncreated: 2026-10-25\n---\n\n# {title}\n\n"
     "| 需求 | AI 理解 | 做法（ADR） | 不採用 | 任務 | 前置 | 驗證 |\n|---|---|---|---|---|---|---|\n"
     + "\n".join(cleanRows) + "\n", encoding="utf-8")
   assert board.cmdSubmit(gitProject, "P0001") == 1
   commands = [line.strip() for line in capsys.readouterr().out.splitlines()[-2:]]
-  assert commands[0].startswith("git add ") and commands[1].startswith("git commit -F ")
+  assert commands[0].startswith("git --literal-pathspecs add ")
+  assert commands[1].startswith("git --literal-pathspecs commit -F ")
   hookPath.unlink()
   for command in commands:
     # 用印出來時對應的 shell 執行，確認使用者照打就能 commit
@@ -159,9 +167,31 @@ def test_printedCommitCommandsRunInShell(gitProject, capsys):
     assert completed.returncode == 0, completed.stdout + completed.stderr
   assert board_git.runGit(gitProject, "log", "-1", "--format=%s") == f"P0001 送出 plan：{title}"
   assert board_git.runGit(gitProject, "-c", "core.quotePath=false", "show", "--name-only", "--format=",
-                          "HEAD") == "plans/0001-a b's $x.md"
+                          "HEAD") == "plans/0001-a b's $x [ab].md"
+  assert board_git.runGit(gitProject, "-c", "core.quotePath=false", "diff", "--name-only") == "plans/0001-a b's $x a.md"
   assert board.cmdSubmit(gitProject, "P0001") == 0
   assert eventTypes(gitProject) == ["planSubmitted"]
+
+
+def test_planFileNameWithWildcardsIsMatchedLiterally(gitProject, writePlan, capsys):
+  decoyPath = writePlan("0001-a.md", cleanRows, planId="P0002", projectDir=gitProject)
+  board_git.runGit(gitProject, "add", "--", "plans/0001-a.md")
+  board_git.runGit(gitProject, "commit", "-q", "-m", "decoy")
+  writePlan("0001-[ab].md", cleanRows, planId="P0001", projectDir=gitProject)
+  # 已 commit 而且乾淨的 0001-a.md 不能讓沒被追蹤的 0001-[ab].md 被當成已經 commit
+  assert board_git.fileMatchesHead(gitProject, "plans/0001-[ab].md") is False
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert board_git.runGit(gitProject, "show", "--name-only", "--format=", "HEAD") == "plans/0001-[ab].md"
+  # 送出後改了 plan，又剛好改到匹配得到的 0001-a.md：核准要擋下，重新送出也只 commit 這份 plan
+  writePlan("0001-[ab].md", cleanRows, planId="P0001", title="改過的標題", projectDir=gitProject)
+  decoyPath.write_text("改過\n", encoding="utf-8")
+  capsys.readouterr()
+  assert board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y") == 1
+  assert "重新執行 submit" in capsys.readouterr().out
+  assert board.cmdSubmit(gitProject, "P0001") == 0
+  assert board_git.runGit(gitProject, "show", "--name-only", "--format=", "HEAD") == "plans/0001-[ab].md"
+  assert board_git.runGit(gitProject, "diff", "--name-only") == "plans/0001-a.md"
+  assert board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y") == 0
 
 
 def test_submitShowsCommitFailureReasonPrintedToStdout(gitProject, writePlan, monkeypatch, capsys):
@@ -169,7 +199,7 @@ def test_submitShowsCommitFailureReasonPrintedToStdout(gitProject, writePlan, mo
 
   def fakeRun(command, *args, **kwargs):
     # 模擬 git commit 把失敗原因只印在 stdout、stderr 是空的
-    if command[:2] == ["git", "commit"]:
+    if command[:3] == ["git", board_git.literalPathspecs, "commit"]:
       return subprocess.CompletedProcess(command, 1, stdout="reason on stdout\n", stderr="")
     return realRun(command, *args, **kwargs)
 
@@ -177,7 +207,7 @@ def test_submitShowsCommitFailureReasonPrintedToStdout(gitProject, writePlan, mo
   writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
   assert board.cmdSubmit(gitProject, "P0001") == 1
   output = capsys.readouterr().out
-  assert "reason on stdout" in output and "git add -- plans/0001-ok.md" in output
+  assert "reason on stdout" in output and "git --literal-pathspecs add -- plans/0001-ok.md" in output
   assert "planSubmitted" not in eventTypes(gitProject)
 
 

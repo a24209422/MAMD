@@ -126,16 +126,21 @@ def gitSucceeds(cwd, *args):
   return subprocess.run(["git", *args], cwd=cwd, capture_output=True).returncode == 0
 
 
+# 路徑預設是 pathspec，`--` 也不會停用萬用字元：plans/0001-[ab].md 會匹配到 plans/0001-a.md
+literalPathspecs = "--literal-pathspecs"
+
+
 def fileMatchesHead(projectDir, relativePath):
   # 沒被追蹤的檔案 git diff 看不到差異，要先確認 git 認得它
-  return (gitSucceeds(projectDir, "ls-files", "--error-unmatch", "--", relativePath)
-          and gitSucceeds(projectDir, "diff", "--quiet", "HEAD", "--", relativePath))
+  return (gitSucceeds(projectDir, literalPathspecs, "ls-files", "--error-unmatch", "--", relativePath)
+          and gitSucceeds(projectDir, literalPathspecs, "diff", "--quiet", "--no-ext-diff", "--no-textconv",
+                          "HEAD", "--", relativePath))
 
 
 def commitFile(projectDir, relativePath, message):
   # commit 後面接路徑只 commit 這個檔案，主資料夾其他已暫存的改動照樣留在暫存區
-  runGit(projectDir, "add", "--", relativePath)
-  runGit(projectDir, "commit", "-q", "-m", message, "--", relativePath)
+  runGit(projectDir, literalPathspecs, "add", "--", relativePath)
+  runGit(projectDir, literalPathspecs, "commit", "-q", "-m", message, "--", relativePath)
   return runGit(projectDir, "rev-parse", "HEAD")
 
 

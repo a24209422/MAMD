@@ -121,11 +121,16 @@ def commitPlanFile(projectDir, planIdValue, plan):
     # 標題可能有引號，各種 shell 的跳脫規則不同（PowerShell 5.1 傳給 git 時還會弄丟雙引號），
     # 訊息寫進檔案用 -F 讀，指令裡就不必放標題
     messageName = f"commit-message-{planIdValue}.txt"
-    boardDir(projectDir).mkdir(parents=True, exist_ok=True)
-    (boardDir(projectDir) / messageName).write_bytes(message.encode("utf-8"))
+    try:
+      boardDir(projectDir).mkdir(parents=True, exist_ok=True)
+      (boardDir(projectDir) / messageName).write_bytes(message.encode("utf-8"))
+      messageArgs = f"-F {shellQuote('.board/' + messageName)}"
+    except OSError:
+      messageArgs = f"-m {shellQuote(message)}"
+    # 檔名可能有 [ ] * 這類 pathspec 萬用字元，指令也要照字面比對，才不會 commit 到別的檔案
     print(f"請在專案資料夾自己 commit 這個 plan 檔，再重新送出（{'PowerShell' if os.name == 'nt' else 'sh'} 指令）：")
-    print(f"  git add -- {shellQuote(path)}")
-    print(f"  git commit -F {shellQuote('.board/' + messageName)} -- {shellQuote(path)}")
+    print(f"  git {board_git.literalPathspecs} add -- {shellQuote(path)}")
+    print(f"  git {board_git.literalPathspecs} commit {messageArgs} -- {shellQuote(path)}")
     return False
   print(f"已 commit {path}")
   return True
