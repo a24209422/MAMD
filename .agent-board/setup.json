@@ -1,0 +1,39 @@
+{
+  "mode": "tdd",
+  "sources": [
+    "board.py",
+    "board_agents.py",
+    "board_api.py",
+    "board_core.py",
+    "board_git.py",
+    "board_index.py",
+    "board_logs.py",
+    "board_models.py",
+    "board_prompts.py",
+    "board_review.py",
+    "board_scheduling.py",
+    "board_setup/__init__.py",
+    "board_setup/__main__.py",
+    "board_setup/assets.py",
+    "board_setup/cli.py",
+    "board_setup/environment.py",
+    "board_setup/layout.py",
+    "board_setup/project.py",
+    "board_stats.py",
+    "conductor.py",
+    "install_skill.py",
+    "modules/__init__.py",
+    "modules/system_monitor/__init__.py",
+    "modules/system_monitor/api.py",
+    "modules/system_monitor/metrics.py",
+    "rtm_graph.py",
+    "server.py"
+  ],
+  "tests": [
+    "tests",
+    "modules/system_monitor/tests"
+  ],
+  "managedBy": "agent-board",
+  "version": 1,
+  "runtime": "."
+}

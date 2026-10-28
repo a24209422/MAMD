@@ -63,9 +63,9 @@ description: 照 agent-board 的流程把需求寫成 plan 並送出，只寫 pl
 
 ### 送出與進度
 
-- 寫完執行：`python board.py submit P0007`
+- 寫完執行：`python "./board.py" submit P0007`
   - 有紅色問題會被擋下，照列出的問題修好再送出
-- 使用者問進度時執行：`python board.py status`
+- 使用者問進度時執行：`python "./board.py" status`
 - 被退回時，`status` 會顯示退回原因；照原因修改 plan 後重新 submit
 - 送出之後、核准之前可以修改再 submit；核准後不要再改這份 plan
 
