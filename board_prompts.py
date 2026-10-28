@@ -4,6 +4,7 @@ from pathlib import Path
 from rtm_graph import planId
 
 maxDiffChars = 150000
+maxExtraTextChars = 30000
 rowFields = ["requirement", "understanding", "decision", "rejected", "task", "dependsOn", "verify"]
 # tdd-crap 是使用者自己的 Claude skill，跟著使用者的家目錄走，不在這個 repo 裡
 tddCrapDir = Path.home() / ".claude" / "skills" / "tdd-crap"
@@ -70,6 +71,16 @@ def taskRows(plan, taskId):
   return [row for row in plan["graph"].rows if row["rowNumber"] in rowNumbers]
 
 
+def extraTextLines(plan):
+  # 表格外的規則表、契約、對照值不附的話，writer 在 worktree 裡不一定讀得到 plan 檔；沒有就不加這一段
+  extraText = plan.get("extraText", "")
+  if not extraText:
+    return []
+  if len(extraText) > maxExtraTextChars:
+    extraText = extraText[:maxExtraTextChars] + f"\n（說明太長，只附前 {maxExtraTextChars} 個字元）"
+  return ["", "plan 裡表格以外的說明（整份 plan 共用）：", extraText]
+
+
 def requirementLines(plan, taskId):
   lines = []
   for reqId in plan["graph"].tasks[taskId]["requirementIds"]:
@@ -116,7 +127,7 @@ def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", 
   parts = [
     taskHeadline(plan, taskId, roundNumber), "",
     "這個任務要滿足的需求：", *requirementLines(plan, taskId), "",
-    "plan 裡和這個任務有關的列：", formatRows(taskRows(plan, taskId)),
+    "plan 裡和這個任務有關的列：", formatRows(taskRows(plan, taskId)), *extraTextLines(plan),
   ]
   if lastTest and lastTest.get("verdict") == "newFailure":
     # 被測試退回的這一輪沒有審查；更早的審查意見針對的是舊的改動，附上反而會讓 writer 改錯方向
@@ -142,7 +153,7 @@ def buildResolvePrompt(plan, taskId, roundNumber, conflicts, userNote="", testCo
     "兩邊真的互相矛盾、無法同時保留時，status 填 blocked，blockedReason 說明矛盾在哪裡。",
     "解完後確認檔案裡沒有任何衝突標記，依下方專案測試設定驗證。", "",
     "這個任務要滿足的需求：", *requirementLines(plan, taskId), "",
-    "plan 裡和這個任務有關的列：", formatRows(taskRows(plan, taskId)),
+    "plan 裡和這個任務有關的列：", formatRows(taskRows(plan, taskId)), *extraTextLines(plan),
   ]
   if userNote:
     parts += ["", "使用者補充：" + userNote]
@@ -156,7 +167,7 @@ def buildReviewPrompt(plan, taskId, roundNumber, diff, testRun=None, previousErr
   parts = [
     "審查 " + taskHeadline(plan, taskId, roundNumber), "",
     "這個任務要滿足的需求（必改的 ref 只能用這些編號或「驗證」）：", *requirementLines(plan, taskId), "",
-    "plan 裡和這個任務有關的列：", formatRows(taskRows(plan, taskId)),
+    "plan 裡和這個任務有關的列：", formatRows(taskRows(plan, taskId)), *extraTextLines(plan),
   ]
   if resolvedConflicts:
     # 解衝突時最容易出的錯是把別人的改動蓋掉，審查者要知道這一輪的重點
