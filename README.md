@@ -145,6 +145,7 @@ python <agent-board>\install_skill.py
    - 送出通過檢查時會自動 commit 這份 plan 檔，而且只 commit 這一個檔案，主資料夾其他已暫存或沒暫存的改動都不動；plan 檔跟目前的 commit 一樣時不另外 commit
    - commit 失敗（例如 git hook 擋下）時不會送出，會印出 git 的錯誤和要自己執行的 `git add`、`git commit` 指令（Windows 是 PowerShell 寫法，其他系統是 sh 寫法；commit 訊息寫在 `.board/commit-message-<plan 編號>.txt`，用 `git commit -F` 讀），自己 commit 之後再送出就會通過
    - 送出後 plan 檔又被改過、跟目前的 commit 不同時不能核准，要重新送出
+   - plan 裡標題和追溯矩陣以外的文字（例如表格下方的規則表、契約、對照值）會整段附給每個任務寫程式、解衝突、審查的 agent，接在這個任務的表格列後面；超過 30000 個字元時只附前 30000 個字元並註明
 3. 看線路圖：`python <agent-board>\board.py --project <專案資料夾> index`，打開 `plans/_review/index.html`
 4. 核准：`python <agent-board>\board.py --project <專案資料夾> approve P0007`，或在儀表板上按「核准」
 5. 之後看 Alfred 的終端機，或跑 `status`。完成後 `plan/P0007` 分支裡就是所有任務的成果，要不要合併到你的分支由你決定。跑 `stats P0007` 可以看這份 plan 的平均輪數、第一次審查就通過的比例等成效（見「指令」）。

@@ -519,6 +519,21 @@ def test_conflictIsResolvedByClaudeThenReviewedAgain(startBoard):
   assert (conductor.projectDir / ".board" / "reviews" / f"P0001-{taskId}-r2.md").exists()
 
 
+def test_agentsReceiveTextOutsideTable(startBoard):
+  ruleTable = "## 規則表\n\n| 輸入 | 輸出 |\n|---|---|\n| a | 1 |\n| b | 2 |"
+  conductor, scenarioDir = startBoard(twoTasks, {"write": {"T1": ["conflict", "resolve"], "T2": ["conflict", "resolve"]}},
+                                      planAfter=ruleTable)
+  runUntil(conductor, planDone)
+  taskId = conflictedTask(conductor)
+  writes = readCalls(scenarioDir, "write", taskId=taskId)
+  assert "解合併衝突" not in writes[0]["prompt"] and "解合併衝突" in writes[1]["prompt"]
+  calls = writes + readCalls(scenarioDir, "review", taskId=taskId)
+  assert len(calls) >= 4
+  for call in calls:
+    assert "plan 裡表格以外的說明（整份 plan 共用）：" in call["prompt"]
+    assert ruleTable in call["prompt"]
+
+
 def test_unresolvedMarkersCountAsAgentFailure(startBoard):
   conductor, _ = startBoard(twoTasks, {"write": {"T1": ["conflict", "unresolved"], "T2": ["conflict", "unresolved"]}})
   state = runUntil(conductor, lambda current: any(
