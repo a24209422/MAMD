@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 import warnings
 from datetime import datetime, timedelta, timezone
 from html import unescape
@@ -40,6 +42,7 @@ renderAttempts = 3
 stderrTailLines = 5
 # 每個測試 server 的網址 → 它收到的請求，renderUntil 失敗時列出來
 serverRequests = {}
+fakeDashboard = "http://127.0.0.1:1/"
 
 
 def findBrowser():
@@ -132,15 +135,20 @@ class RenderedDom(str):
 def renderDom(tmp_path, url, *extraArgs, profile="browser"):
   # virtual-time-budget 讓頁面的計時器先跑幾輪輪詢，再把畫好的 DOM 印出來
   started = time.monotonic()
-  try:
-    completed = subprocess.run(
-      [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-       f"--user-data-dir={tmp_path / profile}", "--virtual-time-budget=6000", *extraArgs, "--dump-dom", url],
-      capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-  except subprocess.TimeoutExpired as timeout:
-    # 負載高時瀏覽器偶爾卡住，當成這次沒畫好交給 renderUntil 重畫，不讓整個測試直接中斷
-    return RenderedDom(outputText(timeout.stdout), outputText(timeout.stderr), time.monotonic() - started, timedOut=True)
+  completed = subprocess.run(
+    [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+     f"--user-data-dir={tmp_path / profile}", "--virtual-time-budget=6000", *extraArgs, "--dump-dom", url],
+    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
   return RenderedDom(completed.stdout, completed.stderr, time.monotonic() - started)
+
+
+def renderAttempt(tmp_path, url, extraArgs, profile):
+  # 負載高時瀏覽器偶爾卡住，只有 renderUntil 當成這次沒畫好再重畫；直接呼叫 renderDom 仍要因逾時失敗，免得空白畫面讓斷言誤判通過
+  started = time.monotonic()
+  try:
+    return renderDom(tmp_path, url, *extraArgs, profile=profile)
+  except subprocess.TimeoutExpired as timeout:
+    return RenderedDom(outputText(timeout.stdout), outputText(timeout.stderr), time.monotonic() - started, timedOut=True)
 
 
 def outputText(output):
@@ -156,7 +164,7 @@ def renderUntil(tmp_path, url, ready, *extraArgs):
   tries = []
   for attempt in range(1, renderAttempts + 1):
     firstRequest = len(requests)
-    dom = renderDom(tmp_path, url, *extraArgs, profile=f"browser-{attempt}")
+    dom = renderAttempt(tmp_path, url, extraArgs, f"browser-{attempt}")
     if ready(dom):
       if attempt > 1:
         warnings.warn(f"{currentTestName()} 的畫面重畫 {attempt} 次才有資料")
@@ -246,39 +254,60 @@ def test_dashboardLoadsMonitorModuleFromWhitelist():
   assert "「系統資源監控」還沒有接資料" not in html
 
 
-@needsBrowser
-def test_renderUntilRedrawsWhenStateIsNotReadyYet(dashboard, tmp_path, monkeypatch):
-  # 替身：前兩次載入頁面時 /api/state 都回 503，畫面只有骨架；頁面自己每 2 秒重讀也拿不到，第 3 次載入才有資料
-  realRouteGet = server.DashboardHandler.routeGet
-  pageLoads = []
-  def flakyRouteGet(handler, path):
-    if path == "/":
-      pageLoads.append(path)
-    if path == "/api/state" and len(pageLoads) <= 2:
-      handler.sendJson(503, {"ok": False, "message": "替身：暫時無法回應"})
-      return
-    realRouteGet(handler, path)
-  monkeypatch.setattr(server.DashboardHandler, "routeGet", flakyRouteGet)
+def servedRequest(path, status, error=None):
+  return {"method": "GET", "path": path, "status": status, "error": error}
+
+
+def brokenState(projectDir):
+  raise RuntimeError("替身：讀狀態失敗")
+
+
+def test_dashboardRecordsRequestsAndRaisedErrors(dashboard, monkeypatch):
+  # renderUntil 失敗時列出的請求來自這份紀錄，要分得出 server 回錯還是丟出例外
+  monkeypatch.setattr(server, "getRoutes", [(server.getRoutes[0][0], brokenState), *server.getRoutes[1:]])
+  urllib.request.urlopen(dashboard).close()
+  with pytest.raises(urllib.error.HTTPError):
+    urllib.request.urlopen(dashboard + "api/state")
+  assert serverRequests[dashboard] == [
+    servedRequest("/", 200), servedRequest("/api/state", 500, "RuntimeError: 替身：讀狀態失敗")]
+
+
+def fakeDashboardRuns(monkeypatch, renders):
+  # 替身瀏覽器：每次重畫固定回傳畫面和這次 server 收到的請求，不開真的 Edge，負載高時也不會自己偶發失敗
+  requests = []
+  monkeypatch.setitem(serverRequests, fakeDashboard, requests)
+  remaining = iter(renders)
+  def run(command, **kwargs):
+    dom, received = next(remaining)
+    requests.extend(received)
+    return subprocess.CompletedProcess(command, 0, stdout=dom, stderr="edge started\n")
+  monkeypatch.setattr(subprocess, "run", run)
+
+
+def test_renderUntilRedrawsWhenStateIsNotReadyYet(tmp_path, monkeypatch):
+  # 替身：前兩次載入頁面時 /api/state 都回 503，畫面只有骨架；第 3 次載入才有資料
+  skeleton = ('<main id="overview"></main>', [servedRequest("/", 200), servedRequest("/api/state", 503)])
+  loaded = ('<main id="overview"><button>開始寫程式</button></main>',
+            [servedRequest("/", 200), servedRequest("/api/state", 200)])
+  fakeDashboardRuns(monkeypatch, [skeleton, skeleton, loaded])
   with pytest.warns(UserWarning, match=r"test_renderUntilRedrawsWhenStateIsNotReadyYet .*重畫 3 次") as caught:
-    dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "開始寫程式" in dom)
-  assert "開始寫程式" in dom and len(pageLoads) == 3
+    dom = renderUntil(tmp_path, fakeDashboard + "#token=" + token, lambda dom: "開始寫程式" in dom)
+  assert dom == loaded[0]
   # 驗證時要在 pytest 結尾的 warnings summary 看到重畫次數，檢查完原樣再發出
   for item in caught:
     warnings.warn_explicit(item.message, item.category, item.filename, item.lineno)
 
 
-@needsBrowser
-def test_renderUntilFailsWithDiagnosticsWhenNeverReady(dashboard, tmp_path, monkeypatch):
-  def brokenState(projectDir):
-    raise RuntimeError("替身：讀狀態失敗")
-  monkeypatch.setattr(server, "getRoutes", [(server.getRoutes[0][0], brokenState), *server.getRoutes[1:]])
+def test_renderUntilFailsWithDiagnosticsWhenNeverReady(tmp_path, monkeypatch):
+  broken = ("<main></main>", [servedRequest("/", 200), servedRequest("/api/state", 500, "RuntimeError: 替身：讀狀態失敗")])
+  fakeDashboardRuns(monkeypatch, [broken] * renderAttempts)
   with pytest.raises(AssertionError) as failure:
-    renderUntil(tmp_path, dashboard, lambda dom: False)
+    renderUntil(tmp_path, fakeDashboard, lambda dom: False)
   blocks = re.split(r"\n(?=第 \d 次)", str(failure.value))
   assert blocks[0] == "畫面重畫 3 次都沒有準備好："
   assert len(blocks) == 4
   for attempt, block in enumerate(blocks[1:], 1):
-    assert re.match(rf"第 {attempt} 次：耗時 \d+\.\d 秒\n  瀏覽器 stderr 最後幾行：", block)
+    assert re.match(rf"第 {attempt} 次：耗時 \d+\.\d 秒\n  瀏覽器 stderr 最後幾行：\n    edge started\n", block)
     assert "\n  server 收到的請求：\n" in block
     assert "    GET / 200\n" in block and "    GET /api/state 500 RuntimeError: 替身：讀狀態失敗" in block
 
@@ -292,6 +321,13 @@ def fakeBrowserRuns(monkeypatch, outcomes):
       raise subprocess.TimeoutExpired(command, kwargs["timeout"], output="", stderr="edge hung\n")
     return subprocess.CompletedProcess(command, 0, stdout=outcome, stderr="")
   monkeypatch.setattr(subprocess, "run", run)
+
+
+def test_renderDomStillFailsOnBrowserTimeout(tmp_path, monkeypatch):
+  # 直接呼叫 renderDom 的測試沒有重畫，逾時若變成空白畫面，只檢查文字不存在的斷言會誤判通過
+  fakeBrowserRuns(monkeypatch, ["timeout"])
+  with pytest.raises(subprocess.TimeoutExpired):
+    renderDom(tmp_path, "http://127.0.0.1:1/")
 
 
 def test_renderUntilRedrawsAfterBrowserTimeout(tmp_path, monkeypatch):
