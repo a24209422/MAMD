@@ -279,8 +279,9 @@ class Conductor:
         continue
       isTest = info["kind"] in ("test", "baseline")
       finished = info["job"].poll() if isTest else info["job"].process.poll() is not None
-      if recordInterruption and finished:
+      if recordInterruption and finished and info["kind"] != "baseline":
         # 已經自己結束的 agent 可能寫好了成果，留給 collectFinishedJobs 照常處理，暫停時才不會丟掉
+        # 基準不留：Ctrl+C 退出後沒有下一輪收集，worktree 會留著；丟掉結果只是之後重跑
         continue
       del self.jobs[key]
       info["job"].kill()

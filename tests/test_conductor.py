@@ -544,6 +544,19 @@ def test_stopJobsWhileBaselineRunsKillsItAndRemovesWorktree(startBoard, tmp_path
   assert eventsOf(conductor, "testBaseline") == [] and eventsOf(conductor, "taskInterrupted") == []
 
 
+def test_stopJobsAfterBaselineFinishedBeforeCollectRemovesWorktree(startBoard):
+  conductor, _ = startBoard(oneTask, testCommand="git --version")
+  conductor.tick()
+  job = conductor.jobs["P0001/baseline"]["job"]
+  job.wait(10)
+  assert job.poll()
+  # 測試在兩輪 tick 之間跑完、還沒被收集時按 Ctrl+C，退出後不會再有 tick 清理
+  conductor.stopJobs(list(conductor.jobs), recordInterruption=True)
+  assert not conductor.jobs
+  assert noBaselineWorktreeLeft(conductor.projectDir)
+  assert eventsOf(conductor, "testBaseline") == [] and eventsOf(conductor, "taskInterrupted") == []
+
+
 def test_baselineErrorIsNotifiedOnceAndRetried(startBoard):
   conductor, _ = startBoard(oneTask, testCommand="git --version")
   lines = []
