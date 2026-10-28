@@ -33,6 +33,7 @@ description: 在 Python 專案新增功能、修正錯誤或依 TDD 開發時使
     python <此 skill 目錄>/scripts/quality.py --source src -- tests
 
 依專案調整來源目錄與測試參數，多個來源目錄可重複 --source。
+平鋪專案可逐一指定檔案，例如 --source app.py --source helpers.py；不要用專案根目錄作為來源，避免把測試、虛擬環境與工具副本一併納入。
 --source 底下的所有 .py 都會檢查，包含測試沒有匯入的檔案。
 報告寫在 .quality/report.json，.quality 目錄會自動排除於版控。
 

@@ -528,7 +528,11 @@ button, input, select { font: inherit; color: inherit; }
 .focus li { display: flex; align-items: baseline; gap: 10px; font: 13px/1.5 var(--font-cjk); color: var(--fg-2); }
 .focus li::before { content: ""; flex: none; width: 6px; height: 6px; background: var(--violet); transform: translateY(-2px); }
 
-/* 第二層：專業 Agent */
+/* 第二層：實際接任務的主要 Agent */
+.agent-mid { text-align: left; cursor: pointer; }
+.agent-mid:hover { background: #121726; }
+.agent-mid .sm-state { justify-content: flex-start; }
+.agent-mid .kv { font-size: 13px; }
 .agent-mid[data-accent="blue"] { --a: var(--blue); }
 .agent-mid[data-accent="violet"] { --a: var(--violet); }
 .mid-body { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; }
@@ -1045,12 +1049,13 @@ button, input, select { font: inherit; color: inherit; }
 .meter { grid-template-columns: var(--ml, 7.5em) minmax(0, 1fr) minmax(4ch, max-content); }
 /* 上一行會蓋掉原本 .meter-lg 的單欄設定，大進度條要再設回來 */
 .meter.meter-lg { grid-template-columns: minmax(0, 1fr); }
-/* 第三層卡片數量跟著 maxParallel，虛線的左右端點要依張數算 */
+/* 第三層僅顯示子名額，數量為 maxParallel - 1。 */
 .squad { grid-template-columns: repeat(var(--n, 2), minmax(0, 1fr)); }
 .squad::before {
   left: calc((100% - (var(--n, 2) - 1) * var(--gap-sm)) / var(--n, 2) / 2);
   right: calc((100% - (var(--n, 2) - 1) * var(--gap-sm)) / var(--n, 2) / 2);
 }
+.squad[data-empty="true"]::before, .squad[data-empty="true"]::after { display: none; }
 .agent[data-state="idle"] { --c: var(--line-2); box-shadow: none; }
 .agent[data-state="idle"] .agent-name { color: var(--fg-2); }
 .state[data-state="idle"] { color: var(--fg-3); }
@@ -1273,8 +1278,8 @@ button, input, select { font: inherit; color: inherit; }
             <div class="tier tier-2">
               <header class="tier-tag">
                 <div class="tier-top"><span class="tier-no">02</span><small>第二層</small></div>
-                <h2>專業 Agent</h2>
-                <p>寫程式・審查（各自可選 Claude 或 Codex）</p>
+                <h2>主要 Agent</h2>
+                <p>寫程式・審查各一個，優先接手任務</p>
               </header>
               <div class="tier-body"><div class="pair" id="pair"></div></div>
             </div>
@@ -1282,8 +1287,8 @@ button, input, select { font: inherit; color: inherit; }
             <div class="tier tier-3">
               <header class="tier-tag">
                 <div class="tier-top"><span class="tier-no">03</span><small>第三層</small></div>
-                <h2>agent 身分</h2>
-                <p>同時跑的上限由 maxParallel 決定</p>
+                <h2>子 Agent</h2>
+                <p>主要 Agent 忙碌時，才依任務需要啟動</p>
               </header>
               <div class="tier-body"><div class="squads" id="squads"></div></div>
             </div>

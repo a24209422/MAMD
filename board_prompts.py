@@ -5,7 +5,7 @@ from rtm_graph import planId
 
 maxDiffChars = 150000
 rowFields = ["requirement", "understanding", "decision", "rejected", "task", "dependsOn", "verify"]
-# tdd-crap 是使用者自己的 Claude skill，跟著使用者的家目錄走，不在這個 repo 裡
+# 舊專案的相容位置；新初始化專案由設定傳入專案內的 skill 路徑。
 tddCrapDir = Path.home() / ".claude" / "skills" / "tdd-crap"
 
 # Codex 會自己讀專案的 AGENTS.md，tdd-crap 也會叫 Claude 先讀；那段寫著「不要自己寫程式」，不說清楚會直接回報卡住
@@ -14,7 +14,7 @@ writerBaseRules = """你是自動流程裡負責寫程式的 agent。
 - 不要執行 git commit、push、reset、checkout 等 git 指令，commit 由流程負責。
 - 不要修改 plans/ 和 .board/ 底下的檔案。
 - 只做這個任務要求的事，不要順手重構或加功能。
-- 專案 AGENTS.md 裡 agent-board 那一段是給寫 plan 的 agent 看的，和你無關。
+- AGENTS.md 的 plan 撰寫與送出規則只適用於規劃角色；你直接依已核准任務實作。共通的使用者專屬操作與 .board/ 限制仍有效，不要呼叫 agent-board-init 或 agent-board-plan。
 - 完成後，最後的回覆照指定的 JSON 格式：status 填 done，summary 用一句話說明改了什麼。
 - 缺少資訊或遇到自己無法解決的問題時，status 填 blocked，blockedReason 寫清楚需要人提供什麼。"""
 # Claude 寫程式時只放行測試指令，串接的指令會整串被拒；Codex 在沙箱裡沒有這層限制
@@ -25,7 +25,7 @@ reviewerRules = """你是自動流程裡負責審查的 agent，只能讀不能�
 - 「必改」只放違反需求或驗證、或會讓功能壞掉的問題；每一條的 ref 填它違反的需求編號（例如 R1）或「驗證」。
 - 風格、命名、可以更好但不影響需求的意見，一律放「建議」，不會退回。
 - 有任何必改，verdict 填 fail；沒有必改，verdict 填 pass。
-- 專案 AGENTS.md 裡 agent-board 那一段是給寫 plan 的 agent 看的，和你無關。
+- AGENTS.md 的 plan 撰寫與送出規則只適用於規劃角色；你只審查目前任務。共通的使用者專屬操作與 .board/ 限制仍有效，不要呼叫 agent-board-init 或 agent-board-plan。
 - 最後的回覆照指定的 JSON 格式。"""
 
 
@@ -33,19 +33,21 @@ def writerRules(cli):
   return (writerBaseRules + "\n" + claudeShellRule) if cli == "claude" else writerBaseRules
 
 
-def tddWriteLines(qualityCommand, cli):
+def tddWriteLines(qualityCommand, cli, skillPath=None, pythonCommand="python"):
   if cli == "claude":
     steps = [
       "- 先用 Skill 工具載入 tdd-crap，照它的流程寫：一次一個行為，先寫測試並確認失敗，再寫實作、整理。",
       f"- 品質檢查指令要照原樣執行，換別的寫法會被拒絕：{qualityCommand}",
-      "- 只想快速跑幾個測試時，用 python -m pytest 開頭的指令。",
+      f"- 只想快速跑幾個測試時，用 {pythonCommand} -m pytest 開頭的指令。",
     ]
   else:
     # Codex 沒有 Skill 工具，直接讀 skill 檔照著做
     steps = [
-      f"- 先讀 {tddCrapDir / 'SKILL.md'}，照它的流程寫：一次一個行為，先寫測試並確認失敗，再寫實作、整理。",
+      f"- 先讀 {Path(skillPath or tddCrapDir) / 'SKILL.md'}，照它的流程寫：一次一個行為，先寫測試並確認失敗，再寫實作、整理。",
       f"- 品質檢查指令：{qualityCommand}",
     ]
+  if skillPath:
+    steps[0] = f"- 先讀 {Path(skillPath) / 'SKILL.md'}，照它的流程寫：一次一個行為，先寫測試並確認失敗，再寫實作、整理。"
   return ["這個專案照 tdd-crap 開發：", *steps, "- pytest、coverage、radon 已經裝好，不用檢查或安裝。"]
 
 
@@ -94,7 +96,7 @@ def testExecutionLines(testCommand, skipTests):
 
 
 def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", qualityCommand="", cli="claude",
-                     testCommand="", skipTests=False):
+                     testCommand="", skipTests=False, tddSkill=None, pythonCommand="python"):
   parts = [
     taskHeadline(plan, taskId, roundNumber), "",
     "這個任務要滿足的需求：", *requirementLines(plan, taskId), "",
@@ -106,7 +108,7 @@ def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", 
     parts += ["", "使用者補充：" + userNote]
   parts += ["", *testExecutionLines(testCommand, skipTests)]
   if qualityCommand:
-    parts += ["", *tddWriteLines(qualityCommand, cli)]
+    parts += ["", *tddWriteLines(qualityCommand, cli, tddSkill, pythonCommand)]
   parts += ["", "改完後要能照表格的「驗證」欄驗證。完成後依格式回覆。"]
   return "\n".join(parts)
 

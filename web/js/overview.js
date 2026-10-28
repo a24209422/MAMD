@@ -1,4 +1,4 @@
-// 總覽的三層：conductor、寫程式／審查兩個角色、每個 agent 身分
+// 總覽的三層：Alfred、各角色的主要 agent、按任務需要啟動的子 agent。
 const roleInfo = {
   writer: { role: '寫程式', icon: 'code', accent: 'blue', busyText: '寫程式中',
     duties: ['寫程式', '跑測試', '照審查意見修改', '解合併衝突'] },
@@ -49,33 +49,13 @@ function roleAgents(state, role) {
 }
 
 function renderGroups(state) {
-  $('#pair').innerHTML = Object.entries(roleInfo).map(([role, info]) => {
-    const agents = roleAgents(state, role);
-    const busy = agents.filter(agent => busyStatuses.includes(agent.status));
-    // 標題照設定檔的角色設定；第一個身分可能還在用換設定之前的 CLI 跑
-    const { cli, model } = state.roles[role];
-    const stateKey = state.paused ? 'paused' : busy.length ? 'run' : 'idle';
-    const stateLabel = { paused: '已暫停', run: '運行中', idle: '閒置' }[stateKey];
-    const doing = state.paused ? '已暫停' : busy.length ? `${busy.length} 個${info.busyText}` : '閒置';
-    return `
-      <article class="agent agent-mid" data-state="${stateKey}" data-accent="${info.accent}">
-        <div class="agent-head">
-          <h3 class="agent-name"><span class="agent-icon">${icon(info.icon)}</span>${escapeHtml(cliLabel(cli))}<span>（${info.role}）</span></h3>
-          ${model ? `<span class="tag" data-accent="${info.accent}">${escapeHtml(model)}</span>` : ''}
-          <span class="state" data-state="${stateKey}">${stateLabel}</span>
-        </div>
-        <div class="mid-body">
-          <div class="mid-main">
-            <div class="task-block"><small>目前任務</small><p>${doing}</p></div>
-            ${meter('忙碌', percent(busy.length, agents.length), 'progress', `${busy.length}/${agents.length}`)}
-          </div>
-          <ul class="duties">${info.duties.map(duty => `<li>${duty}</li>`).join('')}</ul>
-        </div>
-      </article>`;
+  $('#pair').innerHTML = Object.keys(roleInfo).map(role => {
+    const main = roleAgents(state, role).find(agent => agent.id === role);
+    return main ? agentCard(state, main, true) : '<p class="muted">主要 agent 資料尚未載入</p>';
   }).join('');
 }
 
-function agentCard(state, agent) {
+function agentCard(state, agent, primary = false) {
   const cardState = agentCardState(agent);
   const busy = busyStatuses.includes(agent.status);
   const task = busy ? state.tasks.find(item => item.plan === agent.plan && item.task === agent.task) : null;
@@ -86,10 +66,17 @@ function agentCard(state, agent) {
   const pct = contextPct(agent.context);
   let context = meter('Context', null, 'ok', '—');
   if (busy) context = pct == null ? meter('Context', null, 'ok', '計算中') : meter('Context', pct, contextLevel(pct));
+  const info = roleInfo[agent.role];
+  const childIndex = agent.id.match(/-sub(\d+)$/)?.[1];
+  const name = primary
+    ? `${escapeHtml(cliLabel(agent.cli))}<span>（${info.role}）</span>`
+    : escapeHtml(childIndex ? `子 Agent ${childIndex}` : agent.id);
+  const status = agent.status === '閒置' ? (primary ? '待命' : '未啟動') : agent.status;
+  const badge = primary ? `<span class="tag">${escapeHtml(agent.model || '預設模型')}</span>` : '';
   return `
-    <button class="agent agent-sm" type="button" data-state="${cardState}" data-agent="${escapeHtml(agent.id)}" title="在控制台查看 ${escapeHtml(agent.id)}">
-      <span class="agent-head"><span class="agent-icon">${icon('robot')}</span><span class="agent-name">${escapeHtml(agent.id)}</span></span>
-      <span class="sm-state"><span class="state" data-state="${cardState}">${escapeHtml(agent.status)}</span></span>
+    <button class="agent ${primary ? 'agent-mid' : 'agent-sm'}" type="button" data-state="${cardState}" data-accent="${info.accent}" data-agent="${escapeHtml(agent.id)}" data-agent-kind="${primary ? 'main' : 'sub'}" title="在控制台查看${primary ? '主要' : '子'} agent ${escapeHtml(agent.id)}">
+      <span class="agent-head"><span class="agent-icon">${icon(primary ? info.icon : 'robot')}</span><span class="agent-name">${name}</span>${badge}</span>
+      <span class="sm-state"><span class="state" data-state="${cardState}">${escapeHtml(status)}</span></span>
       <span class="kv"><span>任務</span><b>${escapeHtml(taskText)}</b></span>
       ${rounds}
       ${context}
@@ -99,10 +86,10 @@ function agentCard(state, agent) {
 
 function renderAgents(state) {
   $('#squads').innerHTML = Object.keys(roleInfo).map(role => {
-    const agents = roleAgents(state, role);
+    const agents = roleAgents(state, role).filter(agent => agent.id !== role);
     return `
-      <div class="squad" style="--n: ${Math.max(1, agents.length)}" aria-label="${roleInfo[role].role}的 agent 身分">
-        ${agents.map(agent => agentCard(state, agent)).join('')}
+      <div class="squad" data-empty="${agents.length === 0}" style="--n: ${Math.max(1, agents.length)}" aria-label="${roleInfo[role].role}的子 agent">
+        ${agents.length ? agents.map(agent => agentCard(state, agent)).join('') : '<p class="muted">無子 agent 名額</p>'}
       </div>`;
   }).join('');
 }
@@ -113,12 +100,13 @@ function renderOverview(state) {
   renderAgents(state);
 }
 
-// 點小卡到控制台看這個身分；控制台發現換了身分會自己重讀資料
-$('#squads').addEventListener('click', event => {
+// 主要與子 agent 都能開啟自己的控制台；按鈕同時支援鍵盤操作。
+function openAgentConsole(event) {
   const card = event.target.closest('[data-agent]');
   if (!card) return;
   app.selectedAgent = card.dataset.agent;
   goToPage('console');
-});
+}
+for (const selector of ['#pair', '#squads']) $(selector).addEventListener('click', openAgentConsole);
 
 onStateChange(renderOverview);

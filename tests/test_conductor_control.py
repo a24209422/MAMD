@@ -29,6 +29,7 @@ def eventTypes(conductor):
 def test_stopInterruptsAndResumeContinues(startBoard):
   conductor, scenarioDir = startBoard(oneTask, {"write": {"T1": ["hang", "done"]}})
   runUntil(conductor, taskIs(TaskStatus.writing))
+  runUntil(conductor, lambda state: (scenarioDir / "call-write-P0001-T1-1.json").exists())
   board_core.appendEvent(conductor.projectDir, "paused", data={"reason": "測試停止"})
   runUntil(conductor, lambda state: not conductor.jobs and taskIs(TaskStatus.queued)(state))
   assert "taskInterrupted" in eventTypes(conductor)
@@ -50,8 +51,9 @@ def test_pauseKeepsResultOfAgentThatAlreadyFinished(startBoard):
 
 
 def test_restartRecoversInterruptedTask(startBoard):
-  conductor, _ = startBoard(oneTask, {"write": {"T1": ["hang", "done"]}})
+  conductor, scenarioDir = startBoard(oneTask, {"write": {"T1": ["hang", "done"]}})
   runUntil(conductor, taskIs(TaskStatus.writing))
+  runUntil(conductor, lambda state: (scenarioDir / "call-write-P0001-T1-1.json").exists())
   for info in conductor.jobs.values():
     # 模擬 conductor 當掉：agent 跟著結束，但沒有留下任何事件
     info["job"].kill()

@@ -51,6 +51,25 @@ def test_parallelTasksUseSeparateLanes(startBoard):
   assert max(starts) < firstWritten
 
 
+def test_singleTaskStartsOnlyMainWriterAndReviewer(startBoard):
+  conductor, _ = startBoard(oneTask)
+  runUntil(conductor, planDone)
+  assert {event["agent"] for event in eventsOf(conductor, "taskStarted")} == {"writer"}
+  assert {event["agent"] for event in eventsOf(conductor, "reviewStarted")} == {"reviewer"}
+
+
+def test_childRetryUsesFreeMainAndKeepsItsConversation(startBoard):
+  conductor, scenarioDir = startBoard(twoTasks, {
+    "write": {"T2": ["slow", "done"]}, "review": {"T2": ["fail", "pass"]},
+  })
+  runUntil(conductor, planDone)
+  starts = [event for event in eventsOf(conductor, "taskStarted") if event["task"] == "T2"]
+  assert [event["agent"] for event in starts] == ["writer-sub1", "writer"]
+  calls = readCalls(scenarioDir, "write", taskId="T2")
+  session = calls[0]["argv"][calls[0]["argv"].index("--session-id") + 1]
+  assert calls[1]["argv"][calls[1]["argv"].index("--resume") + 1] == session
+
+
 def test_failThenPassResumesSessionWithReview(startBoard):
   conductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["fail", "pass"]}})
   runUntil(conductor, planDone)
@@ -135,6 +154,18 @@ def test_tddCrapAddsStepsToPromptsAndAllowsPytest(startBoard):
   assert "tdd-crap" in write["prompt"] and "git --version" in write["prompt"]
   assert "Bash(python -m pytest*)" in write["argv"] and "PowerShell(python -m pytest*)" in write["argv"]
   assert ".quality/report.json" in readCalls(scenarioDir, "review")[0]["prompt"]
+
+
+def test_projectTddCommandsReachWriterWithoutChangingRunner(startBoard):
+  conductor, scenarioDir = startBoard(oneTask, testCommand="git --version", tddCrap=True,
+                                    tddSkill=".agents/skills/tdd-crap", writerTestCommand="git --version --build-options",
+                                    writerPythonCommand='& "project-python"')
+  runUntil(conductor, planDone)
+  write = readCalls(scenarioDir, "write")[0]
+  assert "git --version --build-options" in write["prompt"]
+  assert 'PowerShell(& "project-python" -m pytest*)' in write["argv"]
+  assert "SKILL.md" in write["prompt"] and ".agents" in write["prompt"]
+  assert eventsOf(conductor, "testRun")[0]["data"]["passed"] is True
 
 
 def test_mergeSkipsWhileUserResolvesConflictInPlanWorktree(startBoard, monkeypatch):
@@ -391,10 +422,12 @@ def test_blockedWhileResolvingThenRetryReusesMerge(startBoard):
 
 
 def test_stopWhileResolvingThenResumeFinishes(startBoard):
-  conductor, _ = startBoard(twoTasks, {"write": {"T1": ["conflict", "hang", "resolve"],
+  conductor, scenarioDir = startBoard(twoTasks, {"write": {"T1": ["conflict", "hang", "resolve"],
                                                  "T2": ["conflict", "hang", "resolve"]}})
   runUntil(conductor, lambda current: any(task["status"] == TaskStatus.writing and task["resolving"]
                                           for task in current["tasks"].values()))
+  resolvingTask = next(info["task"] for info in conductor.jobs.values() if info.get("mode") == "resolve")
+  runUntil(conductor, lambda state: (scenarioDir / f"call-write-P0001-{resolvingTask}-2.json").exists())
   board_core.appendEvent(conductor.projectDir, "paused", data={"reason": "測試暫停"})
   runUntil(conductor, lambda current: not conductor.jobs)
   board_core.appendEvent(conductor.projectDir, "resumed")

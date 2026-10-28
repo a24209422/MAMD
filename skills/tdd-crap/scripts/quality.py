@@ -58,11 +58,12 @@ def require_modules():
 def snapshot(root, sources):
     files = {}
     for source in sources:
-        if not source.is_dir() or not source.is_relative_to(root):
+        if not source.exists() or not source.is_relative_to(root):
             raise ValueError(f"Invalid source directory: {source}")
         if source == root:
             raise ValueError("Select source subdirectories, not project root.")
-        for entry in source.rglob("*.py"):
+        entries = [source] if source.is_file() and source.suffix == ".py" else source.rglob("*.py")
+        for entry in entries:
             path = entry.resolve()
             if not path.is_relative_to(root):
                 raise ValueError(f"Source escapes project: {entry}")
@@ -206,7 +207,8 @@ def measure(sources, pytest_args):
     import coverage
     import pytest
 
-    cov = coverage.Coverage(branch=True, data_suffix=True, source=sources)
+    directories = sorted({str(Path(source).parent) if Path(source).is_file() else source for source in sources})
+    cov = coverage.Coverage(branch=True, data_suffix=True, source=directories)
     plugins = cov.get_option("run:plugins")
     cov.set_option("run:plugins", [*plugins, "_quality_entries"])
     cov.start()

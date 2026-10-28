@@ -159,6 +159,111 @@ def test_dashboardLoadsMonitorModuleFromWhitelist():
 
 
 @needsBrowser
+def test_overview_has_main_agents_and_two_children_per_role(dashboard, gitProject, tmp_path, monkeypatch):
+  configPath = gitProject / ".board/config.json"
+  config = json.loads(configPath.read_text(encoding="utf-8"))
+  config["maxParallel"] = 3
+  configPath.write_text(json.dumps(config), encoding="utf-8")
+  addProbe(tmp_path, monkeypatch, """
+    setTimeout(() => {
+      const ids = selector => [...document.querySelectorAll(selector)].map(node => node.dataset.agent);
+      const writer = document.querySelector('#pair [data-agent="writer"]');
+      const result = {
+        main: ids('#pair [data-agent]'), children: ids('#squads [data-agent]'),
+        childNames: [...document.querySelectorAll('#squads .agent-name')].map(node => node.textContent.trim()),
+        mainText: writer?.textContent || '',
+        idleChildren: [...document.querySelectorAll('#squads .sm-state')].map(node => node.textContent.trim()),
+      };
+      if (writer) writer.click();
+      setTimeout(() => {
+        result.selected = app.selectedAgent; result.page = app.page;
+        document.body.dataset.probe = JSON.stringify(result);
+      }, 500);
+    }, 1000);""")
+  dom = renderDom(tmp_path, dashboard, "--window-size=1440,1200")
+  probe = readProbe(dom)
+  assert probe["main"] == ["writer", "reviewer"]
+  assert probe["children"] == ["writer-sub1", "writer-sub2", "reviewer-sub1", "reviewer-sub2"]
+  assert probe["childNames"] == ["子 Agent 1", "子 Agent 2"] * 2
+  assert "P0001 T1 後端批次 API" in probe["mainText"] and "75%" in probe["mainText"]
+  assert probe["idleChildren"] == ["未啟動"] * 4
+  assert probe["selected"] == "writer" and probe["page"] == "console"
+
+
+@needsBrowser
+def test_main_status_is_its_own_task_not_a_child_summary(dashboard, tmp_path, monkeypatch):
+  addProbe(tmp_path, monkeypatch, """
+    setTimeout(() => {
+      const state = structuredClone(app.state);
+      Object.assign(state.agents.find(agent => agent.id === 'writer'), { status: '閒置', context: null });
+      Object.assign(state.agents.find(agent => agent.id === 'writer-sub1'), {
+        status: '寫程式中', plan: 'P0001', task: 'T1', context: { tokens: 150000, window: 200000 },
+      });
+      renderOverview(state);
+      const main = document.querySelector('#pair [data-agent="writer"]');
+      const child = document.querySelector('#squads [data-agent="writer-sub1"]');
+      const result = { mainState: main?.dataset.state, mainText: main?.textContent,
+        childState: child?.dataset.state, childText: child?.textContent };
+      state.agents.forEach(agent => { agent.status = '已暫停'; });
+      state.paused = true;
+      renderOverview(state);
+      result.paused = [...document.querySelectorAll('#pair [data-agent], #squads [data-agent]')]
+        .every(node => node.dataset.state === 'paused');
+      document.body.dataset.probe = JSON.stringify(result);
+    }, 1000);""")
+  probe = readProbe(renderDom(tmp_path, dashboard))
+  assert probe["mainState"] == "idle" and "待命" in probe["mainText"]
+  assert "P0001 T1" not in probe["mainText"]
+  assert probe["childState"] == "warn" and "75%" in probe["childText"]
+  assert probe["paused"] is True
+
+
+@needsBrowser
+def test_single_capacity_shows_only_mains_and_no_child_cards(dashboard, gitProject, tmp_path, monkeypatch):
+  path = gitProject / ".board/config.json"
+  config = json.loads(path.read_text(encoding="utf-8"))
+  config["maxParallel"] = 1
+  path.write_text(json.dumps(config), encoding="utf-8")
+  addProbe(tmp_path, monkeypatch, """
+    setTimeout(() => {
+      document.body.dataset.probe = JSON.stringify({
+        main: [...document.querySelectorAll('#pair [data-agent]')].map(node => node.dataset.agent),
+        children: document.querySelectorAll('#squads [data-agent]').length,
+        text: document.querySelector('#squads').textContent,
+      });
+    }, 1000);""")
+  probe = readProbe(renderDom(tmp_path, dashboard))
+  assert probe["main"] == ["writer", "reviewer"]
+  assert probe["children"] == 0 and "無子 agent 名額" in probe["text"]
+
+
+@needsBrowser
+@pytest.mark.parametrize("width", [1440, 560])
+def test_main_and_child_cards_fit_the_window(dashboard, gitProject, tmp_path, monkeypatch, width):
+  path = gitProject / ".board/config.json"
+  config = json.loads(path.read_text(encoding="utf-8"))
+  config["maxParallel"] = 3
+  path.write_text(json.dumps(config), encoding="utf-8")
+  addProbe(tmp_path, monkeypatch, """
+    setTimeout(() => {
+      const cards = [...document.querySelectorAll('#pair [data-agent], #squads [data-agent]')];
+      document.body.dataset.probe = JSON.stringify({
+        total: cards.length,
+        overflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        right: Math.max(...cards.map(card => card.getBoundingClientRect().right)),
+        viewport: innerWidth,
+      });
+    }, 1500);""")
+  screenshot = tmp_path / f"agent-overview-{width}.png"
+  dom = renderDom(tmp_path, dashboard + "#token=" + token,
+                  f"--window-size={width},1200", f"--screenshot={screenshot}")
+  probe = readProbe(dom)
+  assert probe["total"] == 6
+  assert probe["overflow"] <= 0 and probe["right"] <= probe["viewport"]
+  print(f"Overview screenshot: {screenshot}")
+
+
+@needsBrowser
 def test_overviewShowsConductorGroupsAndAgents(dashboard, tmp_path):
   dom = renderDom(tmp_path, dashboard + "#token=" + token)
   assert "Alfred<span>（指揮程式）</span>" in dom and "沒有啟動" in dom
@@ -171,11 +276,25 @@ def test_overviewShowsConductorGroupsAndAgents(dashboard, tmp_path):
 
 
 @needsBrowser
-def test_overviewShowsChosenCliPerRole(dashboard, gitProject, tmp_path):
+def test_overviewShowsRunningCliUntilMainTaskEnds(dashboard, gitProject, tmp_path):
   (gitProject / ".board" / "config.json").write_text(json.dumps({
     "maxParallel": 2, "writer": {"cli": "codex", "model": "gpt-6.1-sol"}, "reviewer": {"cli": "claude", "model": "opus"},
   }), encoding="utf-8")
   dom = renderDom(tmp_path, dashboard + "#token=" + token)
+  # writer 還在執行舊的 Claude 任務，大卡要呈現真實執行身分；閒置的 reviewer 使用新設定。
+  assert "Claude<span>（寫程式）</span>" in dom and "Claude<span>（審查）</span>" in dom
+  assert "Codex<span>（寫程式）</span>" not in dom and "opus" in dom
+
+
+@needsBrowser
+def test_idleMainShowsTheNewRoleConfiguration(dashboard, gitProject, tmp_path):
+  (gitProject / ".board/config.json").write_text(json.dumps({
+    "maxParallel": 3, "writer": {"cli": "codex", "model": "gpt-6.1-sol"},
+    "reviewer": {"cli": "claude", "model": "opus"},
+  }), encoding="utf-8")
+  appendEvent(gitProject, "taskWritten", plan="P0001", task="T1", agent="writer", roundNumber=1,
+              data={"commit": "abc", "summary": "完成任務"})
+  dom = renderDom(tmp_path, dashboard)
   assert "Codex<span>（寫程式）</span>" in dom and "Claude<span>（審查）</span>" in dom
   assert "gpt-6.1-sol" in dom and "opus" in dom
 

@@ -287,15 +287,15 @@ def agentsProblem(text):
   return None
 
 
-def renderedSnippet():
+def renderedSnippet(boardCommand=None):
   # 每個人 clone 的位置不同，寫 plan 的 agent 要照規則裡的路徑執行 submit，寫入時換成這份 board.py 的實際位置
-  boardPy = f'"{boardPyPath}"' if " " in str(boardPyPath) else str(boardPyPath)
+  boardPy = boardCommand or (f'"{boardPyPath}"' if " " in str(boardPyPath) else str(boardPyPath))
   return snippetPath.read_text(encoding="utf-8").strip("\n").replace("{{boardPy}}", boardPy)
 
 
-def updatedAgents(text):
+def updatedAgents(text, boardCommand=None):
   eol = lineEnding(text)
-  block = eol.join([agentsStartMarker, *renderedSnippet().split("\n"), agentsEndMarker]) + eol
+  block = eol.join([agentsStartMarker, *renderedSnippet(boardCommand).split("\n"), agentsEndMarker]) + eol
   lines = text.splitlines(keepends=True)
   starts, ends = agentsMarkers([line.rstrip("\r\n") for line in lines])
   if starts:
@@ -305,9 +305,13 @@ def updatedAgents(text):
   return withTrailingNewline(text, eol) + eol + block
 
 
-def planSkillText():
-  return "\n".join([planSkillFrontmatter, "", planSkillMarker, "", "使用者在 /agent-board-plan 後面寫的就是需求。", "",
-                    renderedSnippet()]) + "\n"
+def planSkillText(cli="claude", boardCommand=None):
+  frontmatter = planSkillFrontmatter
+  invocation = "/agent-board-plan" if cli == "claude" else "$agent-board-plan"
+  if cli == "codex":
+    frontmatter = frontmatter.replace("disable-model-invocation: true\n", "")
+  return "\n".join([frontmatter, "", planSkillMarker, "", f"使用者在 {invocation} 後面寫的就是需求。", "",
+                    renderedSnippet(boardCommand)]) + "\n"
 
 
 def planSkillProblem(text):

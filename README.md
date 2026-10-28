@@ -9,7 +9,7 @@
 
 ## 需求
 
-- Python 3（在 3.13 測過），只用標準函式庫，不用 `pip install`
+- Python 3.11 以上（在 3.12、3.13 測過）；主程式使用標準函式庫，TDD 初始化會安裝測試套件
 - git
 - [Claude Code](https://claude.com/claude-code) 和 [Codex CLI](https://github.com/openai/codex)，都要先登入
 - 目前只在 Windows 測過
@@ -17,29 +17,75 @@
 ## 安裝
 
 ```
-git clone https://github.com/a24209422/agent-board.git
+git clone https://github.com/a24209422/MAMD.git
 ```
 
 下面的 `<agent-board>` 代表 clone 下來的資料夾，例如 `D:\tools\agent-board`。
 
-要讓寫程式的 agent 照 TDD 寫程式（`init --tdd`，只適用 Python 專案）時，另外安裝附的 tdd-crap skill：
+clone 後，在這個資料夾開啟 Codex 或 Claude Code，即可發現隨 Git 交付的 `agent-board-init` skill。初始化一次完成以下設定，不必另外安裝全域 TDD skill：
 
-```
-python <agent-board>\install_skill.py
-```
+- Codex 的 `.agents/skills/` 與 Claude 的 `.claude/skills/` 都有 `agent-board-init`、`agent-board-plan`、完整的 `tdd-crap`。
+- 更新 `AGENTS.md` 的 agent-board 區塊，保留專案自己的其他規則。
+- Python 專案預設啟用 TDD，使用或建立專案 `.venv`，安裝缺少的 pytest、coverage、radon。
+- 把必要的執行程式、技能資源與初始化偏好帶進目標專案，讓另一台電腦可由 clone 重新初始化。
 
-- 安裝到 `~/.claude/skills/tdd-crap`；已經有同名但不是這裡裝的 skill 時不覆蓋
-- 更新：在 `<agent-board>` 執行 `git pull`，再執行一次 `install_skill.py`
+| 使用工具 | 初始化目前專案 | 將需求寫成 plan |
+|---|---|---|
+| Codex CLI／IDE | `$agent-board-init` | `$agent-board-plan 你的需求` |
+| Claude Code | `/agent-board-init` | `/agent-board-plan 你的需求` |
 
-### 讓 Claude Code 幫你裝
+這些是 AI 對話中的 skill 呼叫，不是預先安裝的 PowerShell 命令。初始化與規劃 skill 均設為明確呼叫，writer／reviewer 不會自動切回規劃或重設專案。若技能清單尚未更新，重新開啟 agent。
 
-在要使用的專案資料夾開 Claude Code，貼上：
+### 在其他專案首次設定
+
+新專案尚未帶有初始化入口時，先在 clone 的 MAMD 資料夾開啟 agent，呼叫初始化 skill 並指定目標。例如在 Codex 輸入：
 
 ```text
-請照 https://github.com/a24209422/agent-board 的 README 安裝 agent-board，並在目前的專案執行 init
+$agent-board-init 請初始化 D:\projects\my-app
 ```
 
-## 在專案裡啟用（每個專案一次）
+目標專案需為 Git repo，且至少有一個 commit。正常的 Python 專案不需要額外指定 `--tdd`；來源優先辨識 `src/`、Python 套件或根目錄的 `.py`，測試讀取 pytest 設定及既有測試位置。無法判定或既有設定衝突時，agent 才會詢問必要資訊。
+
+初始化後，將下列內容一起提交到你自己的專案：
+
+```text
+.agents/skills/                 # Codex 的三個 skill
+.claude/skills/                 # Claude 的三個 skill
+.agent-board/setup.json        # 可攜的來源、測試位置與測試方式
+.agent-board/runtime/          # 目標專案使用的執行程式與資源副本
+AGENTS.md
+.gitignore
+```
+
+MAMD 自己已有完整執行程式，不需要再複製一份 runtime。目標專案的 runtime 副本不包含原 repo 的 `.git`、測試、虛擬環境或私人的設定。
+
+在其他電腦 clone 這份已初始化的專案後，在該專案開 agent，再呼叫同一個 `agent-board-init`。它會從隨專案交付的資源重建 `.venv` 與 `.board/config.json`，不需要原電腦的磁碟路徑或全域 skill。首次安裝套件需要網路；失敗會回報未完成，修正後可重跑。
+
+`.venv/`、`.board/` 與測試快取不進 Git。角色、模型等既有本機設定會保留；初始化不會替你 commit、push、核准 plan 或啟動 Alfred。若 Alfred 已在執行，變更測試設定後須重啟。
+
+### 初始化的進階選項
+
+skill 使用的腳本也可直接執行，以下指令從目標專案根目錄執行：
+
+```powershell
+python .agents/skills/agent-board-init/scripts/init.py
+python .agents/skills/agent-board-init/scripts/init.py --source app --tests tests
+python .agents/skills/agent-board-init/scripts/init.py --python .venv/Scripts/python.exe
+```
+
+`--source` 可重複，也可指向單一 `.py`，支援平鋪專案；不接受把整個專案根目錄當成來源。非 Python 專案仍可設定兩個 skill，但要明確提供自己的測試指令：
+
+```powershell
+python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
+```
+
+只有明確要略過自動測試時使用 `--skip-tests`。既有一般測試設定要改成 Python TDD 時使用 `--tdd`；原設定不會在未明確選擇時被覆蓋。這三個選項互斥。自訂同名 skill 會保留並回報衝突，不會被直接覆蓋。
+
+工具更新時，在 MAMD 執行 `git pull`，再從更新後的 MAMD 呼叫初始化 skill、指定原目標專案，即可更新本工具管理的副本。
+
+## 舊版 board.py init（相容保留）
+
+以下低階指令仍可使用；日常設定建議使用上面的 `agent-board-init`。
 
 1. 專案要是 git repo，而且至少有一個 commit
 2. 在專案資料夾執行：
@@ -70,7 +116,7 @@ python <agent-board>\install_skill.py
    python <agent-board>\board.py init --tdd --source src --tests tests
    ```
 
-   - 要先安裝 tdd-crap skill（見「安裝」）
+   - 此舊版入口仍使用全域 skill，需先執行 `python <agent-board>\install_skill.py`，安裝至 `~/.claude/skills/tdd-crap`；已有同名自訂 skill 時不覆蓋
    - `.board/config.json` 會開啟 `tddCrap`，`testCommand` 設成 tdd-crap 的品質檢查（每個函式的覆蓋率、循環複雜度）
    - 寫程式的 agent 照 tdd-crap 的流程寫（Claude 用 Skill 工具載入，Codex 直接讀 skill 檔），可以執行品質檢查和 `python -m pytest`；審查時另外檢查測試有沒有真的在驗證行為
    - 專案的 Python 要裝好 pytest、coverage、radon；沒裝時 `init` 會印出安裝指令
@@ -88,7 +134,8 @@ python <agent-board>\install_skill.py
    { "testCommand": "python -m pytest -q", "writer": { "cli": "claude", "allowedTools": ["Bash(npm install*)", "PowerShell(npm install*)"] } }
    ```
 
-   - `maxParallel` 是寫程式、審查各自同時跑的上限：設 1 代表同時最多 1 個寫程式加 1 個審查
+   - `maxParallel` 是寫程式、審查各自的總上限，包含 1 個主要 agent；預設 3 代表每角色「1 主要 + 最多 2 子」。任務少時優先使用主要 agent，主要忙碌且仍有可執行任務才啟動子 agent，任務完成後結束該次執行。設 1 就只使用主要 agent
+   - 總覽第二層的大卡是 `writer`／`reviewer` 主要 agent，直接顯示自己的任務、Context 與狀態；第三層只放子 agent，小卡顯示「未啟動」代表目前沒有執行程序。主要與子卡都能點進各自的控制台
    - `writer`、`reviewer` 兩段（例如任務卡住後才加 `allowedTools`）改了之後，Alfred（指揮程式，檔名是 `conductor.py`）從下一個新啟動的 agent 開始用；其他設定改了要重開 Alfred 才生效
    - `testCommand` 在 Alfred 裡同步執行，跑測試時 Alfred 不會排新工作，測試要夠快
    - Alfred 啟動前會檢查測試方式：沒有非空白的 `testCommand`，也沒有 `skipTests: true` 時，會先停止並提示初始化選項，不會等到 writer 執行測試才卡住
@@ -111,12 +158,16 @@ python <agent-board>\install_skill.py
 | `cli` | `claude` 或 `codex` | 寫程式 `claude`、審查 `codex` |
 | `model` | 交給 CLI 的模型名稱（Claude 用 `--model`，Codex 用 `-m`） | 用 CLI 自己的預設模型 |
 | `reasoningEffort` | 模型支援的推理強度（Claude 用 `--effort`，Codex 用 `-c model_reasoning_effort=…`） | 沿用 CLI 設定 |
-| `contextWindow` | 這個模型的 Context 大小（tokens），只影響儀表板的使用率 | Claude 200000、Codex 475000 |
+| `contextWindow` | 這個模型的 Context 大小（正整數 tokens），用於儀表板使用率與自動壓縮門檻 | Claude 200000、Codex 475000 |
 | `allowedTools` | 寫程式的 Claude 可以多跑的指令，見「在專案裡啟用」 | 沒有 |
 | `command` | CLI 不在 PATH 上時寫完整路徑，例如 `["C:/tools/codex.cmd"]` | PATH 上的 `claude`、`codex` |
 
 - 兩個都不寫時：Claude 寫程式、Codex 審查，用各自的預設模型
 - 同時跑的 agent 身分（`writer`、`writer-sub1`…、`reviewer`…）都用所屬角色的設定
+- writer 與 reviewer 都啟用原生自動壓縮，包含 writer 的續接、修正與解衝突，以及 reviewer 的重審。Codex 在角色 `contextWindow` 的 60% tokens 觸發；Claude 設定壓縮視窗並使用 60% 門檻，CLI 會先扣除自身保留空間，因此可能比儀表板的 60% 稍早觸發。壓縮在 CLI 可處理的檢查點進行，完成後繼續原任務，不另開對話、不消耗任務重試輪數。
+- `contextWindow` 須配合實際模型設定，不能把 Claude 200000、Codex 475000 的預設值當成所有模型的大小。Claude 的壓縮視窗支援 100000 到 1000000 tokens；超出範圍會明確回報啟動失敗。Codex 不會透過放大模型實際視窗來達成門檻。
+- 壓縮設定只傳給 MAMD 啟動的程序，會啟用該次 Claude 對話的自動壓縮，並覆寫同名壓縮／停用環境變數，不修改全域 CLI 設定或你另開的終端機。需要支援 `--autocompact` 的 Claude Code 及支援 `model_auto_compact_token_limit`／`model_auto_compact_token_limit_scope` 的 Codex CLI；舊版可能不支援，請先更新。合併這次程式修改後需重啟 Alfred；已在執行的 agent 不會即時變更。
+- 原生設定參考：[Claude 自動壓縮](https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction)、[Codex 設定](https://learn.chatgpt.com/docs/config-file/config-reference)。目前儀表板的 Codex usage 是整輪統計，不能作為即時 context 或壓縮成功的唯一證據。
 - 儀表板的「模型」分頁可選 `cli`、模型與推理強度，選單直接讀本機 CLI：Codex 使用 app-server 的 `model/list`，Claude 使用 SDK 初始化回傳的模型資料。不傳送對話、不產生推理任務，也不需要額外的 API key
 - 模型名稱、版本與順序跟著 CLI；Claude 別名另顯示目前對應的完整模型 ID。只列出該模型支援的推理強度，儲存前也會檢查；切換 CLI 或模型時，推理強度會重設為沿用 CLI 設定
 - 清單快取五分鐘，可按「重新整理模型」立即重讀；CLI 未安裝、未登入、不支援查詢或查詢逾時時會顯示錯誤。清單反映 CLI 提供的選項，實際使用權限仍由 CLI／供應商決定

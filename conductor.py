@@ -18,6 +18,7 @@ from board_core import (BoardError, PlanStatus, TaskStatus, agentLanes, appendEv
                         defaultConfig, deriveState, isPlanFinished, loadConfig, loadPlans, readEvents,
                         readUserConfig, readyTasks, roleChoiceText, roleNames, roleSpec, taskKey, tasksWithStatus)
 from board_prompts import buildResolvePrompt, buildReviewPrompt, buildWritePrompt, reviewerRules, writerRules
+from board_scheduling import availableLane
 from board_review import (renderReviewMarkdown, reviewFileName, reviewResultSchema, validateReview,
                           validateWriteResult, writeResultSchema)
 
@@ -144,10 +145,8 @@ class Conductor:
   def freeLane(self, prefix, kind, preferred=None):
     busy = {info["agent"] for info in self.jobs.values() if info["kind"] == kind}
     lanes = agentLanes(prefix, self.config)
-    # 修正輪優先交給上一輪的同一個身分，儀表板上看起來才連貫
-    if preferred in lanes and preferred not in busy:
-      return preferred
-    return next((lane for lane in lanes if lane not in busy), None)
+    # 主要 agent 優先；主要忙碌時，修正輪才優先沿用先前的子身分。
+    return availableLane(lanes, busy, preferred)
 
   def tick(self):
     self.refreshRoles()
@@ -271,10 +270,13 @@ class Conductor:
     testCommand = self.config.get("testCommand", "")
     if testCommand:
       # 只開放專案的測試指令，Claude 才能自我驗證，又不會拿到其他 shell 權限；Windows 上 shell 工具是 PowerShell
-      allowedTools += [f"Bash({testCommand}*)", f"PowerShell({testCommand}*)"]
+      powershell = self.config.get("writerTestCommand", testCommand)
+      allowedTools += [f"Bash({testCommand}*)", f"PowerShell({powershell}*)"]
     if self.config.get("tddCrap"):
       # tdd-crap 的「先寫測試、確認失敗」要能只跑幾個測試，每次都跑完整品質檢查太慢
-      allowedTools += ["Bash(python -m pytest*)", "PowerShell(python -m pytest*)"]
+      python = self.config.get("pythonCommand", "python")
+      powershell = self.config.get("writerPythonCommand", python)
+      allowedTools += [f"Bash({python} -m pytest*)", f"PowerShell({powershell} -m pytest*)"]
     return allowedTools
 
   def startWrite(self, plan, taskState, lane):
@@ -284,10 +286,7 @@ class Conductor:
             "agent": lane, "text": taskState["text"], "mode": "resolve" if taskState["resolving"] else "write",
             "cli": cli, "model": model, "launch": launch}
     # 換了 CLI，上一輪的對話接不回來；換了模型，不確定接續時能不能換，所以也開新對話
-    resume = bool(taskState["resumable"] and taskState["sessionId"] and taskState["sessionCli"] == cli
-                  and taskState["sessionModel"] == model)
-    # Claude 可以先指定對話編號；Codex 的要等它跑起來，從輸出取得
-    info["sessionId"] = taskState["sessionId"] if resume else (str(uuid.uuid4()) if cli == "claude" else None)
+    resume, info["sessionId"] = self.writerSession(taskState, cli, model)
     cleanRemerge = False
     try:
       worktree = board_git.ensureTaskWorktree(self.projectDir, info["plan"], info["task"])
@@ -298,17 +297,10 @@ class Conductor:
                                                         f"{info['plan']} {info['task']} 合併最新的 plan 分支")
         cleanRemerge = not info["conflicts"]
       if not cleanRemerge:
-        if info["mode"] == "resolve":
-          prompt = buildResolvePrompt(plan, info["task"], info["round"], info["conflicts"], taskState["userNote"],
-                                      self.config["testCommand"], self.config.get("skipTests", False))
-        else:
-          prompt = buildWritePrompt(plan, info["task"], info["round"], self.readReview(taskState["lastReviewNotes"]),
-                                    taskState["userNote"],
-                                    self.config["testCommand"] if self.config.get("tddCrap") else "", cli,
-                                    self.config["testCommand"], self.config.get("skipTests", False))
+        prompt = self.writePrompt(plan, taskState, info)
         argv, stdinText, lineParser = self.writeLaunch(info, worktree, prompt, resume)
         info["job"] = board_agents.AgentJob(argv, worktree, stdinText, self.logPath(info, "write"), lineParser,
-                                            self.timeoutSeconds()).start()
+                                            self.timeoutSeconds(), env=board_agents.compactionEnv(cli, launch["spec"]["contextWindow"])).start()
     except Exception as error:
       # 例如核准後 plan 檔被改掉這個任務；接住所有例外，否則同一個任務每一輪都會擋住其他任務
       self.event("agentFailed", info, stage="write", reason=f"無法啟動：{type(error).__name__}: {error}")
@@ -332,16 +324,35 @@ class Conductor:
       info["job"].kill()
       raise
 
+  def writerSession(self, taskState, cli, model):
+    resume = bool(taskState["resumable"] and taskState["sessionId"] and taskState["sessionCli"] == cli
+                  and taskState["sessionModel"] == model)
+    # Claude 可以先指定對話編號；Codex 的要等它跑起來，從輸出取得。
+    sessionId = taskState["sessionId"] if resume else (str(uuid.uuid4()) if cli == "claude" else None)
+    return resume, sessionId
+
+  def writePrompt(self, plan, taskState, info):
+    testCommand = self.config.get("writerTestCommand", self.config["testCommand"])
+    pythonCommand = self.config.get("writerPythonCommand", self.config.get("pythonCommand", "python"))
+    if info["mode"] == "resolve":
+      return buildResolvePrompt(plan, info["task"], info["round"], info["conflicts"], taskState["userNote"],
+                                testCommand, self.config.get("skipTests", False))
+    return buildWritePrompt(plan, info["task"], info["round"], self.readReview(taskState["lastReviewNotes"]),
+                            taskState["userNote"], testCommand if self.config.get("tddCrap") else "", info["cli"],
+                            testCommand, self.config.get("skipTests", False), self.config.get("tddSkill"), pythonCommand)
+
   def writeLaunch(self, info, worktree, prompt, resume):
     launch = info["launch"]
     if info["cli"] == "claude":
       argv = board_agents.buildClaudeArgv(launch["command"], info["sessionId"], resume, writerRules("claude"),
-                                          self.claudeAllowedTools(launch["spec"]), info["model"], launch["spec"]["reasoningEffort"])
+                                          self.claudeAllowedTools(launch["spec"]), info["model"], launch["spec"]["reasoningEffort"],
+                                          contextWindow=launch["spec"]["contextWindow"])
       return argv, prompt, board_agents.parseClaudeLine
     schemaPath = self.codexFiles(info, "write-schema.json", writeResultSchema,
                                  f"{info['plan']}-{info['task']}-r{info['round']}-write.json")
     argv = board_agents.buildCodexWriteArgv(launch["command"], worktree, schemaPath, info["outPath"],
-                                            info["sessionId"] if resume else None, info["model"], launch["spec"]["reasoningEffort"])
+                                            info["sessionId"] if resume else None, info["model"], launch["spec"]["reasoningEffort"],
+                                            contextWindow=launch["spec"]["contextWindow"])
     # Codex 沒有附加系統提示的參數，規則放在 prompt 最前面
     return argv, writerRules("codex") + "\n\n" + prompt, board_agents.parseCodexLine
 
@@ -455,7 +466,8 @@ class Conductor:
                                  resolvedConflicts, bool(self.config.get("tddCrap")))
       argv, stdinText, lineParser = self.reviewLaunch(info, worktree, prompt)
       info["job"] = board_agents.AgentJob(argv, worktree, stdinText, self.logPath(info, f"review{attempt}"),
-                                          lineParser, self.timeoutSeconds()).start()
+                                          lineParser, self.timeoutSeconds(),
+                                          env=board_agents.compactionEnv(info["cli"], launch["spec"]["contextWindow"])).start()
     except Exception as error:
       self.event("agentFailed", info, stage="review", reason=f"無法啟動：{type(error).__name__}: {error}")
       return
@@ -473,12 +485,13 @@ class Conductor:
   def reviewLaunch(self, info, worktree, prompt):
     command = info["launch"]["command"]
     if info["cli"] == "claude":
-      argv = board_agents.buildClaudeReviewArgv(command, reviewerRules, info["model"], info["launch"]["spec"]["reasoningEffort"])
+      argv = board_agents.buildClaudeReviewArgv(command, reviewerRules, info["model"], info["launch"]["spec"]["reasoningEffort"],
+                                                contextWindow=info["launch"]["spec"]["contextWindow"])
       return argv, prompt, board_agents.parseClaudeLine
     schemaPath = self.codexFiles(info, "review-schema.json", reviewResultSchema,
                                  f"{info['plan']}-{info['task']}-r{info['round']}-review{info['attempt']}.json")
     argv = board_agents.buildCodexArgv(command, worktree, schemaPath, info["outPath"], info["model"],
-                                     info["launch"]["spec"]["reasoningEffort"])
+                                     info["launch"]["spec"]["reasoningEffort"], contextWindow=info["launch"]["spec"]["contextWindow"])
     return argv, reviewerRules + "\n\n" + prompt, board_agents.parseCodexLine
 
   def finishReview(self, plan, taskState, info):

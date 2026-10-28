@@ -41,7 +41,10 @@ def startCall():
   kind = "review" if reviewPattern.search(prompt) else "write"
   action, callNumber, scenarioDir = nextAction(kind, planIdValue, taskId, "pass" if kind == "review" else "done")
   (scenarioDir / f"call-{kind}-{planIdValue}-{taskId}-{callNumber}.json").write_text(
-    json.dumps({"argv": sys.argv[1:], "prompt": prompt}, ensure_ascii=False), encoding="utf-8")
+    json.dumps({"argv": sys.argv[1:], "prompt": prompt,
+                "env": {key: os.environ.get(key) for key in ("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+                                                           "DISABLE_AUTO_COMPACT", "DISABLE_COMPACT")}},
+               ensure_ascii=False), encoding="utf-8")
   return {"kind": kind, "action": action, "callNumber": callNumber, "taskId": taskId}
 
 

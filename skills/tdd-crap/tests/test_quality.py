@@ -45,6 +45,66 @@ def test_passing_function(project):
     assert report["functions"][0]["crap"] == 1
 
 
+def test_explicit_source_file_supports_flat_projects(project):
+    source = project / "app.py"
+    source.write_text("def answer():\n    return 42\n", encoding="utf-8")
+    assert quality.snapshot(project, [source]) == {source: source.read_bytes()}
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_measure_uses_parent_of_source_file_and_always_saves(project, monkeypatch, raises):
+    import coverage
+
+    source = project / "app.py"
+    source.write_text("def answer(): return 42\n", encoding="utf-8")
+    calls = []
+
+    class RecordingCoverage:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def get_option(self, name):
+            return ["existing-plugin"]
+
+        def set_option(self, name, value):
+            calls.append(value)
+
+        def start(self):
+            calls.append("start")
+
+        def stop(self):
+            calls.append("stop")
+
+        def save(self):
+            calls.append("save")
+
+    def tests(arguments):
+        assert arguments == ["tests"]
+        if raises:
+            raise RuntimeError("test runner failed")
+        return 1
+
+    monkeypatch.setattr(coverage, "Coverage", RecordingCoverage)
+    monkeypatch.setattr(pytest, "main", tests)
+    if raises:
+        with pytest.raises(RuntimeError, match="test runner failed"):
+            quality.measure([str(source)], ["tests"])
+    else:
+        assert quality.measure([str(source)], ["tests"]) == 1
+    assert calls[0]["source"] == [str(project)]
+    assert calls[1] == ["existing-plugin", "_quality_entries"]
+    assert calls[-2:] == ["stop", "save"]
+
+
+def test_function_entry_files_are_required_and_combined(project):
+    with pytest.raises(ValueError, match="No function-entry data"):
+        quality.read_entries(project)
+    row = ["app.py", "answer"]
+    (project / "entries-1.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    (project / "entries-2.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    assert quality.read_entries(project) == {tuple(row)}
+
+
 def test_uncalled_function_fails_coverage(project):
     source = (
         "def answer():\n    return 42\n\n"

@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from board_review import reviewResultSchema, writeResultSchema
+from board_core import compactTokenLimit
 
 # 不用 "limit reached"：Claude 的 "Context limit reached" 是對話太長，不是額度用完
 quotaPatterns = ["usage limit", "rate limit", "rate_limit", "quota", "hit your limit", "out of extra usage", "額度"]
@@ -35,13 +36,14 @@ def killProcessTree(pid):
 
 
 class AgentJob:
-  def __init__(self, argv, cwd, stdinText, logPath, lineParser, timeoutSeconds):
+  def __init__(self, argv, cwd, stdinText, logPath, lineParser, timeoutSeconds, env=None):
     self.argv = argv
     self.cwd = cwd
     self.stdinText = stdinText
     self.logPath = Path(logPath)
     self.lineParser = lineParser
     self.timeoutSeconds = timeoutSeconds
+    self.env = dict(env or {})
     self.activity = {"lastActivity": None, "action": ""}
     self.tail = collections.deque(maxlen=200)
     self.exitCode = None
@@ -56,7 +58,7 @@ class AgentJob:
     options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
     # 子程式若是 Python（測試用的假 agent），Windows 管線預設 cp950，中文 stdin／輸出會亂碼；
     # 真正的 claude.exe／codex 不受影響
-    childEnv = {**os.environ, "PYTHONUTF8": "1"}
+    childEnv = {**os.environ, "PYTHONUTF8": "1", **self.env}
     self.process = subprocess.Popen(self.argv, cwd=self.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
                                     env=childEnv, **options)
@@ -128,12 +130,33 @@ def reasoningArgs(cli, effort):
   return ["--effort", effort] if cli == "claude" else ["-c", f'model_reasoning_effort="{effort}"']
 
 
-def buildClaudeArgv(command, sessionId, resume, systemRules, allowedTools=(), model=None, reasoningEffort=None):
+def compactionEnv(cli, contextWindow):
+  if cli != "claude":
+    return {}
+  compactTokenLimit(contextWindow)
+  if not 100000 <= contextWindow <= 1000000:
+    raise ValueError("Claude contextWindow 必須在 100000 到 1000000 tokens 之間，以支援原生自動壓縮視窗")
+  return {"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "60", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": str(contextWindow),
+          "DISABLE_AUTO_COMPACT": "0", "DISABLE_COMPACT": "0"}
+
+
+def compactionArgs(cli, contextWindow):
+  if contextWindow is None:
+    return []
+  if cli == "claude":
+    # --settings 的 env 蓋過專案同名環境設定；只作用於這次啟動，不寫設定檔。
+    return ["--autocompact", str(contextWindow), "--settings",
+            json.dumps({"autoCompactEnabled": True, "env": compactionEnv(cli, contextWindow)})]
+  return ["-c", f"model_auto_compact_token_limit={compactTokenLimit(contextWindow)}",
+          "-c", 'model_auto_compact_token_limit_scope="total"']
+
+
+def buildClaudeArgv(command, sessionId, resume, systemRules, allowedTools=(), model=None, reasoningEffort=None, contextWindow=None):
   argv = list(command) + modelArgs("--model", model) + reasoningArgs("claude", reasoningEffort) + [
     "-p", "--output-format", "stream-json", "--verbose",
     "--json-schema", json.dumps(writeResultSchema, ensure_ascii=False),
     "--permission-mode", "acceptEdits", "--permission-prompts", "none",
-    "--append-system-prompt", systemRules,
+    "--append-system-prompt", systemRules, *compactionArgs("claude", contextWindow),
     "--disallowedTools", *deniedClaudeTools,
   ]
   # acceptEdits 加 prompts none 下，沒列入允許的 shell 指令一律被拒，所以要明確放行
@@ -143,13 +166,13 @@ def buildClaudeArgv(command, sessionId, resume, systemRules, allowedTools=(), mo
   return argv + (["--resume", sessionId] if resume else ["--session-id", sessionId])
 
 
-def buildClaudeReviewArgv(command, systemRules, model=None, reasoningEffort=None):
+def buildClaudeReviewArgv(command, systemRules, model=None, reasoningEffort=None, contextWindow=None):
   # 審查每次都是新的對話，不必指定 session
   return list(command) + modelArgs("--model", model) + reasoningArgs("claude", reasoningEffort) + [
     "-p", "--output-format", "stream-json", "--verbose",
     "--json-schema", json.dumps(reviewResultSchema, ensure_ascii=False),
     "--permission-mode", "manual", "--permission-prompts", "none",
-    "--append-system-prompt", systemRules,
+    "--append-system-prompt", systemRules, *compactionArgs("claude", contextWindow),
     "--disallowedTools", *claudeReviewDeniedTools,
   ]
 
@@ -190,15 +213,15 @@ def claudeFinalResult(activity):
   return (parsed, "") if isinstance(parsed, dict) else (None, "result 不是 JSON 物件")
 
 
-def buildCodexArgv(command, worktree, schemaPath, outPath, model=None, reasoningEffort=None):
+def buildCodexArgv(command, worktree, schemaPath, outPath, model=None, reasoningEffort=None, contextWindow=None):
   return list(command) + ["exec", "-C", str(worktree), "-s", "read-only", "--json",
                           "--output-schema", str(schemaPath), "-o", str(outPath), *modelArgs("-m", model),
-                          *reasoningArgs("codex", reasoningEffort), "-"]
+                          *reasoningArgs("codex", reasoningEffort), *compactionArgs("codex", contextWindow), "-"]
 
 
-def buildCodexWriteArgv(command, worktree, schemaPath, outPath, threadId=None, model=None, reasoningEffort=None):
+def buildCodexWriteArgv(command, worktree, schemaPath, outPath, threadId=None, model=None, reasoningEffort=None, contextWindow=None):
   options = ["--json", "--output-schema", str(schemaPath), "-o", str(outPath), *modelArgs("-m", model),
-             *reasoningArgs("codex", reasoningEffort)]
+             *reasoningArgs("codex", reasoningEffort), *compactionArgs("codex", contextWindow)]
   if threadId:
     # exec resume 沒有 -s、-C：沙箱改用 -c 設定，資料夾由 AgentJob 的 cwd 決定
     return list(command) + ["exec", "resume", "-c", "sandbox_mode=workspace-write", *options, threadId, "-"]

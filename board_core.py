@@ -68,6 +68,12 @@ def loadConfig(projectDir):
   return config
 
 
+def compactTokenLimit(contextWindow):
+  if type(contextWindow) is not int or contextWindow <= 0:
+    raise ValueError("contextWindow 要是正整數 tokens，不能是 bool")
+  return max(1, contextWindow * 60 // 100)
+
+
 def roleSpec(config, role):
   raw = config.get(role)
   # 寫錯格式時 configProblems 會擋下 conductor；這裡只求不當掉，儀表板才看得到警告
@@ -125,6 +131,11 @@ def roleConfigProblems(role, raw):
 
 def roleToolProblems(role, raw):
   problems = []
+  if raw.get("contextWindow") is not None:
+    try:
+      compactTokenLimit(raw["contextWindow"])
+    except ValueError as error:
+      problems.append(f"{role}.{error}")
   examples = {"command": '["C:/tools/claude.exe"]', "allowedTools": '["Bash(npm install*)"]'}
   for key, example in examples.items():
     value = raw.get(key)

@@ -10,7 +10,11 @@ disable-model-invocation: true
 
 ## agent-board 流程（寫 plan 的 agent 遵守）
 
-使用者說需求時，你負責寫 plan，不要自己寫程式。
+接需求並規劃的 agent：使用者說需求時，你負責寫 plan，不要自己寫程式；使用者明確要求直接實作時，依該要求執行。
+
+- 自動流程的 writer 依已核准任務實作與測試；reviewer 依需求、diff 與測試結果唯讀審查。兩者不重新寫或送出 plan，也不自動呼叫 agent-board-init／agent-board-plan。
+- 下方「plan 的寫法」「送出與進度」適用於規劃角色；「不可以做的事」適用於所有角色。
+- 所有指令從目標專案根目錄執行。換電腦 clone 後，先呼叫 agent-board-init 重建本機環境與設定。
 
 ### plan 的寫法
 
@@ -60,9 +64,9 @@ disable-model-invocation: true
 
 ### 送出與進度
 
-- 寫完執行：`python D:\MAMD-stable\board.py submit P0007`
+- 寫完執行：`python board.py submit P0007`
   - 有紅色問題會被擋下，照列出的問題修好再送出
-- 使用者問進度時執行：`python D:\MAMD-stable\board.py status`
+- 使用者問進度時執行：`python board.py status`
 - 被退回時，`status` 會顯示退回原因；照原因修改 plan 後重新 submit
 - 送出之後、核准之前可以修改再 submit；核准後不要再改這份 plan
 
