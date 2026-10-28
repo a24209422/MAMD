@@ -90,7 +90,7 @@ python <agent-board>\install_skill.py
 
    - `maxParallel` 是寫程式、審查各自同時跑的上限：設 1 代表同時最多 1 個寫程式加 1 個審查
    - `writer`、`reviewer` 兩段（例如任務卡住後才加 `allowedTools`）改了之後，Alfred（指揮程式，檔名是 `conductor.py`）從下一個新啟動的 agent 開始用；其他設定改了要重開 Alfred 才生效
-   - `testCommand` 在 Alfred 裡同步執行，跑測試時 Alfred 不會排新工作，測試要夠快
+   - `testCommand` 在 Alfred 裡同步執行（包括 plan 開始時的基準測試，見「測試把關」），跑測試時 Alfred 不會排新工作，測試要夠快
    - Alfred 啟動前會檢查測試方式：沒有非空白的 `testCommand`，也沒有 `skipTests: true` 時，會先停止並提示初始化選項，不會等到 writer 執行測試才卡住
    - `testCommand`／`skipTests` 執行中改動時會提示重啟 Alfred；目前執行仍沿用啟動時的指令與權限。每個 writer（含解衝突）都會收到同一份測試指令
    - 寫程式、審查要用哪個 CLI 和模型，見「換模型」
@@ -146,6 +146,34 @@ python <agent-board>\install_skill.py
 4. 核准：`python <agent-board>\board.py --project <專案資料夾> approve P0007`，或在儀表板上按「核准」
 5. 之後看 Alfred 的終端機，或跑 `status`。完成後 `plan/P0007` 分支裡就是所有任務的成果，要不要合併到你的分支由你決定。
 
+### 測試把關
+
+有設定 `testCommand`（而且沒有 `skipTests`）時，測試沒過的任務不會送審：
+
+1. plan 核准後、派出第一個任務前，Alfred 先在 baseCommit 跑一次 `testCommand` 當基準。基準在暫時的 worktree（`<專案>-worktrees/P0007-baseline`）裡跑，跑完就移除；基準記下來之前這份 plan 不派工
+2. 每個任務寫完後跑 `testCommand`，結果跟基準比（規則見下面「測試判定」）
+3. 有新增的失敗：不叫審查的 agent，直接退回寫程式的 agent，算一輪。下一輪它會收到新增失敗的測試名稱和測試輸出最後 50 行，不附更早的審查意見。輪數用完時停在「等你處理」，見「指令」的 `decide ... retry` 表
+4. 失敗都是基準本來就有的：照常送審，審查的 agent 會被告知這些失敗基準就有，不必因此退回
+
+- `testCommand` 改掉並重開 Alfred 後，進行中的 plan 會用新指令重跑一次基準
+- 基準 worktree 因故沒移除時，下次建立前會先移除，`cleanup` 也會一併清掉
+- `skipTests` 或沒有 `testCommand` 時不跑基準也不跑任務測試，照常送審
+
+#### 測試判定
+
+失敗名稱取自測試完整輸出裡以 `FAILED ` 或 `ERROR ` 開頭的行（「 - 」之前的部分），也就是 pytest 結尾 short test summary 的格式。
+
+| 基準 | 任務測試 | 接下來 |
+|---|---|---|
+| 任何 | 通過 | 送審 |
+| 通過 | 失敗（含超時） | 退回寫程式的 agent |
+| 失敗，有失敗名稱 | 失敗，有不在基準裡的名稱，或一個名稱都沒有 | 退回寫程式的 agent |
+| 失敗，有失敗名稱 | 失敗，名稱全都在基準裡 | 送審，審查的 agent 會看到基準就有的失敗 |
+| 失敗，沒有失敗名稱（輸出分不出名稱，或超時） | 失敗 | 送審，審查的 agent 會被告知基準就失敗、無法比對 |
+
+- pytest 的 `-r` 要保留 `f`（失敗）和 `E`（錯誤），short test summary 才會列出 `FAILED`／`ERROR` 測試名稱，才分得出新增的失敗。pytest 沒設 `-r` 時預設就是 `fE`；在 `addopts` 自己設了 `-r`（例如只有 `-rs`）就會蓋掉預設，要寫成 `-rfEs` 這種同時含 `f`、`E` 的寫法（本專案的 `pytest.ini` 就是 `-rfEs`）
+- pytest 以外的測試工具分不出名稱：基準通過時，任務測試失敗一律退回；基準失敗時只能送審並說明無法比對
+
 ## 儀表板
 
 在瀏覽器看即時狀態，也可以在網頁上核准、退回、放棄、`decide`、停止和繼續，以及在「模型」分頁換寫程式、審查的 CLI 和模型（見「換模型」）。
@@ -185,6 +213,7 @@ python <agent-board>\install_skill.py
 | 停下來的原因 | `retry` 的效果 |
 |---|---|
 | 審查 3 次不通過 | 輪數上限 +1，寫程式的 agent 帶著最新審查意見與你的 `--note` 再改一輪 |
+| 測試有新增的失敗、輪數用完（見「測試把關」） | 輪數上限 +1，寫程式的 agent 帶著新增失敗的測試名稱、測試輸出最後 50 行與你的 `--note` 再改一輪 |
 | 寫程式的 agent 回報卡住、沒有改動、commit 失敗、處理結果出錯 | 回到排隊，寫程式的 agent 接手（你的 `--note` 會交給它） |
 | agent 連續失敗 | 回到失敗的那個階段重跑 |
 | 審查結果格式不符 | 重新審查（`--note` 不會交給審查的 agent） |
