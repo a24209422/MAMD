@@ -281,6 +281,42 @@ def test_pytestFailureWithoutQualityLinesIsNotChecked(startBoard, tmp_path):
     assert (event["data"]["qualityChecked"], event["data"]["qualityFailures"]) == (False, [])
 
 
+baseQualityOutput = ("512 passed in 3.2s\n"
+                     "PASS conductor.py:55 failureNames C=4 coverage=100.0% CRAP=4.00\n"
+                     "FAIL conductor.py:300 Conductor.mergeOneTask C=16 coverage=90.0% CRAP=16.06\n"
+                     "FAIL board.py:20 missingPackages C=2 coverage=0.0% CRAP=6.00\n"
+                     "FAIL board.py:40 main C=8 coverage=0.0% CRAP=72.00\n"
+                     "FAIL: .quality/report.json\n")
+baseQualityNames = ["品質門檻 conductor.py::Conductor.mergeOneTask", "品質門檻 board.py::missingPackages",
+                    "品質門檻 board.py::main"]
+
+
+def test_sameQualityFailuresAsBaselineGoToReviewWithNames(startBoard, tmp_path):
+  body = f"print({baseQualityOutput!r})\nsys.exit(1)\n"
+  conductor, scenarioDir = startBoard(oneTask, testCommand=pythonTestCommand(tmp_path, body))
+  runUntil(conductor, planDone)
+  testRun = eventsOf(conductor, "testRun")[0]
+  assert (testRun["data"]["verdict"], testRun["data"]["newFailures"]) == ("preexisting", [])
+  assert len(eventsOf(conductor, "reviewStarted")) == 1
+  reviewPrompt = readCalls(scenarioDir, "review")[0]["prompt"]
+  assert "基準就有" in reviewPrompt
+  assert all(f"- {name}" in reviewPrompt for name in baseQualityNames)
+
+
+def test_newQualityFailureGoesBackToWriter(startBoard, tmp_path):
+  extraFail = "FAIL board.py:60 newHelper C=3 coverage=0.0% CRAP=12.00\n"
+  body = (f"output = {baseQualityOutput!r}\n"
+          "if written.exists() and '第 1 次' in written.read_text(encoding='utf-8'):\n"
+          f"  output = {extraFail!r} + output\n"
+          "print(output)\nsys.exit(1)\n")
+  conductor, _ = startBoard(oneTask, testCommand=pythonTestCommand(tmp_path, body))
+  runUntil(conductor, planDone)
+  firstRun, secondRun = eventsOf(conductor, "testRun")
+  assert (firstRun["data"]["verdict"], firstRun["data"]["newFailures"]) == ("newFailure", ["品質門檻 board.py::newHelper"])
+  assert secondRun["data"]["verdict"] == "preexisting"
+  assert len(eventsOf(conductor, "reviewStarted")) == 1
+
+
 def test_qualityResultsReadPassFailLinesWithoutLineNumbers():
   assert qualityResults(qualityOutput) == (True, ["品質門檻 conductor.py::Conductor.mergeOneTask",
                                                   "品質門檻 board.py::missingPackages"])
@@ -788,6 +824,33 @@ def test_compareWithBaselineFollowsPlanRules():
   assert compareWithBaseline(unnamedBaseline, False, ["t::new"]) == ("unknown", [])
   # 沒有 failures 欄位的基準事件當成分不出名稱
   assert compareWithBaseline({"passed": False}, False, ["t::new"]) == ("unknown", [])
+
+
+def test_compareWithBaselineComparesQualityFailures():
+  old = ["品質門檻 a.py::one", "品質門檻 a.py::two", "品質門檻 b.py::three"]
+  new = "品質門檻 c.py::four"
+  qualityBaseline = {"passed": False, "failures": [], "qualityChecked": True, "qualityFailures": old}
+  # 基準 pytest 全過、品質 3 個超標，任務一樣：基準就有
+  assert compareWithBaseline(qualityBaseline, False, [], True, old) == ("preexisting", [])
+  assert compareWithBaseline(qualityBaseline, False, [], True, old[:2]) == ("preexisting", [])
+  # 任務多 1 個超標：只列新增的那個
+  assert compareWithBaseline(qualityBaseline, False, [], True, old + [new]) == ("newFailure", [new])
+  # 任務 pytest 有失敗（品質沒算）：基準 pytest 全過，失敗都是新增的
+  assert compareWithBaseline(qualityBaseline, False, ["t::new"], False, []) == ("newFailure", ["t::new"])
+  assert compareWithBaseline(qualityBaseline, False, [], False, []) == ("newFailure", [])
+  # 基準 pytest 有失敗、品質沒算，任務 pytest 全過、品質超標：比不了品質，不是新增也不是通過
+  pytestBaseline = {"passed": False, "failures": ["t::old"], "qualityChecked": False, "qualityFailures": []}
+  assert compareWithBaseline(pytestBaseline, False, [], True, old) == ("unknown", [])
+  assert compareWithBaseline(pytestBaseline, False, ["t::old"], False, []) == ("preexisting", [])
+  assert compareWithBaseline(pytestBaseline, False, ["t::old", "t::new"], False, []) == ("newFailure", ["t::new"])
+  # pytest 無法比對、品質也沒有新增時維持 unknown
+  unnamedBaseline = {"passed": False, "failures": [], "qualityChecked": False, "qualityFailures": []}
+  assert compareWithBaseline(unnamedBaseline, False, ["t::x"], False, []) == ("unknown", [])
+  assert compareWithBaseline(unnamedBaseline, False, [], True, old) == ("unknown", [])
+  # 基準全部通過：品質超標都是新增的
+  passedBaseline = {"passed": True, "failures": [], "qualityChecked": True, "qualityFailures": []}
+  assert compareWithBaseline(passedBaseline, False, [], True, [new]) == ("newFailure", [new])
+  assert compareWithBaseline({"passed": True, "failures": []}, False, [], True, [new]) == ("newFailure", [new])
 
 
 def conflictedTask(conductor):
