@@ -113,8 +113,7 @@ def compareWithBaseline(baseline, passed, failures, qualityChecked=False, qualit
     # 正常不會發生（基準記下來前不派工）；沒有東西可比時不擋，交給審查
     return "unknown", []
   verdict, newFailures = comparePytestPart(baseline, qualityChecked and bool(qualityFailures) and not failures, failures)
-  # 基準全部通過時品質也沒有超標，當成有檢查、沒有超標
-  if not (qualityChecked and (baseline.get("qualityChecked") or baseline.get("passed"))):
+  if not (qualityChecked and baseline.get("qualityChecked")):
     # 有一方沒檢查品質：品質部分不判定為新增，也不能讓整體變成通過
     return ("unknown", []) if verdict == "passed" else (verdict, newFailures)
   baseQualityFailures = baseline.get("qualityFailures") or []

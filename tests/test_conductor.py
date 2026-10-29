@@ -847,10 +847,13 @@ def test_compareWithBaselineComparesQualityFailures():
   unnamedBaseline = {"passed": False, "failures": [], "qualityChecked": False, "qualityFailures": []}
   assert compareWithBaseline(unnamedBaseline, False, ["t::x"], False, []) == ("unknown", [])
   assert compareWithBaseline(unnamedBaseline, False, [], True, old) == ("unknown", [])
-  # 基準全部通過：品質超標都是新增的
+  # 基準全部通過且有檢查品質：品質超標都是新增的
   passedBaseline = {"passed": True, "failures": [], "qualityChecked": True, "qualityFailures": []}
   assert compareWithBaseline(passedBaseline, False, [], True, [new]) == ("newFailure", [new])
-  assert compareWithBaseline({"passed": True, "failures": []}, False, [], True, [new]) == ("newFailure", [new])
+  # 基準通過但沒有檢查品質：品質比不了，不判定為新增，也不是通過
+  assert compareWithBaseline({"passed": True, "failures": [], "qualityChecked": False}, False, [], True, [new]) \
+    == ("unknown", [])
+  assert compareWithBaseline({"passed": True, "failures": []}, False, [], True, [new]) == ("unknown", [])
 
 
 def conflictedTask(conductor):
