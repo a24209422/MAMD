@@ -1,4 +1,4 @@
-"""用 Edge（或 Chrome）無頭模式開真的儀表板 server，在掛好的「系統監控」頁看真實主機資料。找不到瀏覽器就跳過。
+"""用共用的 Edge（或 Chrome）開真的儀表板 server，在掛好的「系統監控」頁看真實主機資料。找不到瀏覽器就跳過。
 
 儀表板的導覽、控制台摘要和窄畫面在 tests/test_web.py 用固定替身資料測；這裡讀真的 CPU、RAM、磁碟，
 確認資料經過 server 一路畫到頁面、每 3 秒持續更新，讀不到資料時不顯示假的 0、恢復後接著更新。
@@ -8,7 +8,7 @@ import itertools
 import json
 import re
 import shutil
-import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta
 from html import unescape
@@ -20,19 +20,38 @@ import server
 from modules.system_monitor import api, metrics
 
 repoDir = Path(__file__).resolve().parents[3]
-browserCandidates = [
-  r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-  r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-  r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-]
+# 共用瀏覽器的工具在 tests/browser.py；和 tests/ 的測試 import 同一份，整段測試才只啟動一次瀏覽器
+if str(repoDir / "tests") not in sys.path:
+  sys.path.append(str(repoDir / "tests"))
+import browser  # noqa: E402
+from browser import browserPages, sharedBrowser  # noqa: E402,F401  測試模組裡要看得到 fixture
+
 gib = 1024 ** 3
-# 接在儀表板 main.js 後面：在兩次輪詢之間記下監控頁的畫面和模組快取，最後寫進 body 的 data-probe，dump-dom 才看得到
+pollMs = metrics.intervalSeconds * 1000
+# 接在儀表板 main.js 前面：監控頁每讀完一次、畫面也更新完，probeLoads 加一，測試等到它才往下快轉；
+# 在兩次輪詢之間記下監控頁的畫面和模組快取，最後寫進 body 的 data-probe
 probeScript = """
 {
-  const page = document.querySelector('#systemMonitorPage');
   const text = node => node ? node.textContent.replace(/\\s+/g, ' ').trim() : '';
+  window.probeLoads = 0;
+  const realFetch = window.fetch;
+  window.fetch = (...args) => {
+    const pending = realFetch.apply(window, args);
+    if (args[0] !== API_PATH) return pending;
+    return pending.then(response => {
+      const read = response.text.bind(response);
+      // 監控模組讀完內容後才接著處理、重畫；MessageChannel 的訊息排在這些都跑完之後，也不受 page.clock 控制
+      response.text = () => read().finally(() => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = () => { window.probeLoads += 1; };
+        channel.port2.postMessage(null);
+      });
+      return response;
+    });
+  };
   const records = [];
   const record = () => {
+    const page = document.querySelector('#systemMonitorPage');
     const cache = SystemMonitor.shared().snapshot();
     records.push({
       error: cache.error, stale: cache.stale, sampledAt: cache.latest && cache.latest.sampledAt,
@@ -57,20 +76,8 @@ probeScript = """
 """
 
 
-def findBrowser():
-  for name in ("msedge", "chrome", "chromium"):
-    found = shutil.which(name)
-    if found:
-      return found
-  return next((path for path in browserCandidates if Path(path).exists()), None)
-
-
-browser = findBrowser()
-pytestmark = pytest.mark.skipif(browser is None, reason="找不到 Edge 或 Chrome，跳過系統監控的瀏覽器測試")
-
-
 def realCollector(projectDir):
-  # CPU、RAM、磁碟都讀真的；只有時間是替身：瀏覽器用虛擬時間快轉，3 秒一次的輪詢實際只隔幾毫秒，
+  # CPU、RAM、磁碟都讀真的；只有時間是替身：瀏覽器用 page.clock 快轉，3 秒一次的輪詢實際只隔幾毫秒，
   # 這裡讓每次讀取都當成隔了 3 秒，每次都是一筆新的真實樣本，取樣時間也依序往後 3 秒
   ticks, stamps = itertools.count(), itertools.count()
   start = datetime.now().astimezone()
@@ -103,20 +110,53 @@ def serving(projectDir, failing=()):
     httpServer.server_close()
 
 
-def measure(tmp_path, monkeypatch, url, times):
+def measure(browserPages, tmp_path, monkeypatch, url, times):
   # 只換掉測試 server 的 main.js；監控頁從第 0 秒起每 3 秒讀一次，times 排在兩次讀取之間
+  probe = probeScript.replace("TIMES", json.dumps(times)).replace("API_PATH", json.dumps(api.apiPath))
   main = tmp_path / "main.js"
-  main.write_text((repoDir / "web/js/main.js").read_text(encoding="utf-8") + probeScript.replace("TIMES", json.dumps(times)),
-                  encoding="utf-8")
+  main.write_text(probe + (repoDir / "web/js/main.js").read_text(encoding="utf-8"), encoding="utf-8")
   monkeypatch.setitem(server.staticFiles, "/js/main.js", (str(main), "text/javascript; charset=utf-8"))
-  completed = subprocess.run(
-    [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-     f"--user-data-dir={tmp_path / 'browser'}", f"--virtual-time-budget={times[-1] + 1000}", "--dump-dom",
-     url + "#system-monitor"],
-    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-  match = re.search(r'data-probe="([^"]*)"', completed.stdout)
+  context = browserPages.newContext()
+  try:
+    page = context.new_page()
+    problems = []
+    page.on("console", lambda message: message.type == "error" and problems.append(message.text))
+    page.on("pageerror", lambda error: problems.append(f"未處理的例外：{error}"))
+    page.on("requestfailed", lambda request: problems.append(f"{request.method} {request.url} {request.failure}"))
+    # 時間停在頁面載入那一刻，之後只照測試快轉：頁面載入再慢，輪詢也不會自己先跑
+    start = datetime.now()
+    page.clock.install(time=start)
+    page.clock.pause_at(start + timedelta(seconds=10))
+    page.goto(url + "#system-monitor", wait_until="commit", timeout=browser.readySeconds * 1000)
+    fastForward(page, times + [times[-1] + 100], problems)
+    waitFor(page, "document.body.dataset.probe !== undefined", "量測結果寫進 data-probe", problems)
+    dom = page.content()
+  finally:
+    browserPages.closeContext(context)
+  match = re.search(r'data-probe="([^"]*)"', dom)
   assert match, "頁面裡的量測沒有跑完"
   return json.loads(unescape(match.group(1)))
+
+
+def fastForward(page, targets, problems):
+  # 每到一次輪詢就等這次讀完、畫面更新完再往下快轉，請求還在路上時不會先跳到下一次輪詢或記錄
+  now, loads = 0, 1
+  waitFor(page, "window.probeLoads >= 1", "第 1 次讀取", problems)
+  for target in targets:
+    while loads * pollMs <= target:
+      page.clock.run_for(loads * pollMs - now)
+      now, loads = loads * pollMs, loads + 1
+      waitFor(page, f"window.probeLoads >= {loads}", f"第 {loads} 次讀取", problems)
+    page.clock.run_for(target - now)
+    now = target
+
+
+def waitFor(page, condition, step, problems):
+  try:
+    page.wait_for_function(condition, timeout=browser.readySeconds * 1000)
+  except browser.PlaywrightError as error:
+    lines = [f"頁面裡的量測沒有跑完：等不到{step}（{str(error).strip().splitlines()[0]}）"]
+    raise AssertionError("\n".join(lines + browser.listing("瀏覽器 console 的錯誤與失敗的請求", problems, "（沒有）"))) from None
 
 
 def gibValues(text):
@@ -136,9 +176,9 @@ def projectDir(tmp_path):
 
 
 @pytest.mark.skipif(not metrics.isWindows, reason="真實的 CPU、RAM 採集只支援 Windows")
-def test_mountedPageShowsRealHostSamplesAndKeepsUpdating(projectDir, tmp_path, monkeypatch):
+def test_mountedPageShowsRealHostSamplesAndKeepsUpdating(browserPages, projectDir, tmp_path, monkeypatch):
   with serving(projectDir) as url:
-    records = measure(tmp_path, monkeypatch, url, [1500, 4500, 7500])
+    records = measure(browserPages, tmp_path, monkeypatch, url, [1500, 4500, 7500])
   # 每 3 秒一筆新樣本接到走勢後面，最後資料時間跟著換成最新一筆
   assert [historyPoints(record) for record in records] == [[(1, True)], [(1, True), (2, False)], [(1, True), (2, False), (3, False)]]
   for record in records:
@@ -171,10 +211,11 @@ def test_mountedPageShowsRealHostSamplesAndKeepsUpdating(projectDir, tmp_path, m
   assert last["lines"]["memory"].startswith("M") and last["lines"]["memory"].count("L") == 2
 
 
-def test_outageShowsNoFakeZeroAndRecovers(projectDir, tmp_path, monkeypatch):
+def test_outageShowsNoFakeZeroAndRecovers(browserPages, projectDir, tmp_path, monkeypatch):
   # 第 1 次讀取就失敗、第 2 次恢復、第 3、4 次又失敗、第 5 次起恢復
   with serving(projectDir, failing={1, 3, 4}) as url:
-    first, loaded, offline, recovered, later = measure(tmp_path, monkeypatch, url, [1500, 4500, 10500, 13500, 16500])
+    first, loaded, offline, recovered, later = measure(browserPages, tmp_path, monkeypatch, url,
+                                                       [1500, 4500, 10500, 13500, 16500])
   failure = "server 回應 HTTP 503：server 暫停服務"
 
   # 還沒拿到任何資料：每一項都是「無法取得」和「—」，不是 0%
