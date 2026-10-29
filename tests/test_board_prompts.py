@@ -97,6 +97,9 @@ def test_reviewPromptExplainsPreexistingAndUnknownFailures(writePlan):
   prompt = buildReviewPrompt(samplePlan(writePlan), "T1", 1, "+x", testRun=preexisting,
                              baselineFailures=["t.py::test_old"])
   assert "基準就有" in prompt and "- t.py::test_old" in prompt and "不必因為" in prompt
+  prompt = buildReviewPrompt(samplePlan(writePlan), "T1", 1, "+x", testRun=preexisting,
+                             baselineFailures=["品質門檻 conductor.py::Conductor.mergeOneTask"])
+  assert "基準就有" in prompt and "- 品質門檻 conductor.py::Conductor.mergeOneTask" in prompt
   unknown = {"passed": False, "tail": "1 failed", "verdict": "unknown", "newFailures": []}
   prompt = buildReviewPrompt(samplePlan(writePlan), "T1", 1, "+x", testRun=unknown)
   assert "基準就有" in prompt and "無法比對" in prompt and "不必因為" in prompt

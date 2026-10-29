@@ -85,14 +85,15 @@ def qualityResults(output):
   return checked, names
 
 
-def compareWithBaseline(baseline, passed, failures):
-  """依 plan「測試判定」回傳 (verdict, newFailures)。"""
-  if passed:
+def baselinePytestPassed(baseline):
+  # 品質檢查只在 pytest 全過時才印 PASS／FAIL 行；有這些行又沒有 pytest 失敗名稱，就是 pytest 全過、只有品質超標
+  return bool(baseline.get("passed") or (baseline.get("qualityChecked") and not baseline.get("failures")))
+
+
+def comparePytestPart(baseline, pytestPassed, failures):
+  if pytestPassed:
     return "passed", []
-  if baseline is None:
-    # 正常不會發生（基準記下來前不派工）；沒有東西可比時不擋，交給審查
-    return "unknown", []
-  if baseline.get("passed"):
+  if baselinePytestPassed(baseline):
     return "newFailure", list(failures)
   baseFailures = baseline.get("failures") or []
   if not baseFailures:
@@ -102,6 +103,25 @@ def compareWithBaseline(baseline, passed, failures):
   if newFailures or not failures:
     return "newFailure", newFailures
   return "preexisting", []
+
+
+def compareWithBaseline(baseline, passed, failures, qualityChecked=False, qualityFailures=()):
+  """依 plan「測試判定」回傳 (verdict, newFailures)；pytest 與品質門檻分開比再合併。"""
+  if passed:
+    return "passed", []
+  if baseline is None:
+    # 正常不會發生（基準記下來前不派工）；沒有東西可比時不擋，交給審查
+    return "unknown", []
+  verdict, newFailures = comparePytestPart(baseline, qualityChecked and bool(qualityFailures) and not failures, failures)
+  if not (qualityChecked and baseline.get("qualityChecked")):
+    # 有一方沒檢查品質：品質部分不判定為新增，也不能讓整體變成通過
+    return ("unknown", []) if verdict == "passed" else (verdict, newFailures)
+  baseQualityFailures = baseline.get("qualityFailures") or []
+  newQualityFailures = [name for name in qualityFailures if name not in baseQualityFailures]
+  if newQualityFailures:
+    return "newFailure", newFailures + newQualityFailures
+  # pytest 部分通過時一定有品質超標（判定 pytest 通過的條件），而且都在基準裡
+  return ("preexisting", []) if verdict == "passed" else (verdict, newFailures)
 
 
 class BackgroundTestJob:
@@ -622,7 +642,7 @@ class Conductor:
       raise job.error
     passed, tail, failures, qualityChecked, qualityFailures = job.result
     # verdict 在這裡算好寫進事件：之後重播事件時，結果才不會因為基準或輸出不同而改變
-    verdict, newFailures = compareWithBaseline(planState["testBaseline"], passed, failures)
+    verdict, newFailures = compareWithBaseline(planState["testBaseline"], passed, failures, qualityChecked, qualityFailures)
     self.event("testRun", info, passed=passed, tail=tail, verdict=verdict, newFailures=newFailures,
                qualityChecked=qualityChecked, qualityFailures=qualityFailures)
 
@@ -703,8 +723,8 @@ class Conductor:
   def preexistingFailures(self, taskState):
     if (taskState["lastTest"] or {}).get("verdict") != "preexisting":
       return []
-    baseline = self.currentState()[1]["plans"][taskState["plan"]]["testBaseline"]
-    return (baseline or {}).get("failures") or []
+    baseline = self.currentState()[1]["plans"][taskState["plan"]]["testBaseline"] or {}
+    return (baseline.get("failures") or []) + (baseline.get("qualityFailures") or [])
 
   def reviewLaunch(self, info, worktree, prompt):
     command = info["launch"]["command"]
