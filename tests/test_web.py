@@ -1,7 +1,6 @@
-"""用 Edge（或 Chrome）無頭模式載入儀表板，檢查畫面真的畫出 API 的資料。找不到瀏覽器就跳過。"""
+"""用 Playwright 控制共用的 Edge（或 Chrome）載入儀表板，等畫面畫出 API 的資料再檢查。找不到 Playwright 或瀏覽器就跳過。"""
 import itertools
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -13,21 +12,19 @@ import warnings
 from datetime import datetime, timedelta, timezone
 from html import unescape
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import board
+import browser
 import server
 from board_core import appendEvent
+from browser import browserPages, sharedBrowser  # noqa: F401  測試模組裡要看得到 fixture
 from modules.system_monitor import api as monitorApi
 from modules.system_monitor import metrics
 
 toolDir = Path(__file__).resolve().parent.parent
-browserCandidates = [
-  r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-  r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-  r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-]
 token = "web-token"
 uploadRows = ["| R1 一次上傳多張 | 單次最多 50 張 | D1 新增批次 API | 逐張呼叫：太慢 | T1 後端批次 API | | 選 50 張都上傳成功 |",
               "| R1 | | D1 | | T2 前端提示上限 | T1 | 選 51 張出現提示 |"]
@@ -38,24 +35,16 @@ claudeLog = [{"type": "assistant", "message": {
   "content": [{"type": "tool_use", "id": "tu1", "name": "Write", "input": {"file_path": "D:\\w\\upload.py", "content": "x"}}],
   "usage": {"input_tokens": 2, "cache_read_input_tokens": 149000, "cache_creation_input_tokens": 998, "output_tokens": 10}}}]
 gib = 1024 ** 3
-renderAttempts = 3
-stderrTailLines = 5
-# 每個測試 server 的網址 → 它收到的請求，renderUntil 失敗時列出來
-serverRequests = {}
+# 每個測試 server 的網址 → 它收到的請求；和共用瀏覽器同一份，renderUntil 失敗時列出來
+serverRequests = browser.serverRequests
 fakeDashboard = "http://127.0.0.1:1/"
-
-
-def findBrowser():
-  for name in ("msedge", "chrome", "chromium"):
-    found = shutil.which(name)
-    if found:
-      return found
-  return next((path for path in browserCandidates if Path(path).exists()), None)
-
-
-browser = findBrowser()
+# 資料讀回來、畫面畫好了：一般頁看 app.state，系統監控頁看監控卡片有數值（資料回來前卡片先畫成空的）
+appDrawn = "typeof app !== 'undefined' && app.state !== null"
+monitorDrawn = "document.querySelector('#systemMonitorPage .smon-card[data-state=\"ok\"]') !== null"
+# 量版面前網頁字型要換好，不然寬度是備用字型的；先讀 offsetWidth 排版，用到的字型才會開始載入
+fontsLoaded = "document.body.offsetWidth > 0 && document.fonts.status === 'loaded'"
+timedOutError = "Page.wait_for_function: Timeout 15000ms exceeded."
 nodePath = shutil.which("node")
-needsBrowser = pytest.mark.skipif(browser is None, reason="找不到 Edge 或 Chrome，跳過網頁畫面測試")
 
 
 def fixedCollector(projectDir):
@@ -124,80 +113,70 @@ def recordRequests(httpServer):
   return requests
 
 
-class RenderedDom(str):
-  # 照舊當成 DOM 文字用；另外帶著瀏覽器的 stderr 與耗時，重畫都失敗時拿來診斷
-  def __new__(cls, dom, stderr, seconds, timedOut=False):
-    rendered = super().__new__(cls, dom)
-    rendered.stderr, rendered.seconds, rendered.timedOut = stderr, seconds, timedOut
-    return rendered
+def domHas(text):
+  # ready：畫面裡已經有這段 HTML，和斷言比對的是同一份序列化結果
+  return f"document.documentElement.outerHTML.includes({json.dumps(text)})"
 
 
-def renderDom(tmp_path, url, *extraArgs, profile="browser"):
-  # virtual-time-budget 讓頁面的計時器先跑幾輪輪詢，再把畫好的 DOM 印出來
-  started = time.monotonic()
-  completed = subprocess.run(
-    [browser, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
-     f"--user-data-dir={tmp_path / profile}", "--virtual-time-budget=6000", *extraArgs, "--dump-dom", url],
-    capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-  return RenderedDom(completed.stdout, completed.stderr, time.monotonic() - started)
+def probeHas(*keys):
+  # ready：量測在計時器到了就寫出，畫面還沒有資料時也會寫；要等第一個斷言要看的值有資料才算畫好，值對不對仍交給斷言
+  path = "".join(f"?.[{json.dumps(key)}]" for key in keys)
+  return ("() => { const text = document.body?.dataset.probe; if (text === undefined) return false;"
+          f" const value = JSON.parse(text){path}; return Array.isArray(value) ? value.length > 0 : Boolean(value); }}")
 
 
-def renderAttempt(tmp_path, url, extraArgs, profile):
-  # 負載高時瀏覽器偶爾卡住，只有 renderUntil 當成這次沒畫好再重畫；直接呼叫 renderDom 仍要因逾時失敗，免得空白畫面讓斷言誤判通過
-  started = time.monotonic()
-  try:
-    return renderDom(tmp_path, url, *extraArgs, profile=profile)
-  except subprocess.TimeoutExpired as timeout:
-    return RenderedDom(outputText(timeout.stdout), outputText(timeout.stderr), time.monotonic() - started, timedOut=True)
+def fastForward(monkeypatch, ms, drawn=appDrawn, step=None, screenshot=None, then=()):
+  # 量測的計時器不用真的等：分頁的時間先停住，計時器不會在資料回來前先跑；等資料畫好（drawn 成立）才快轉 ms 毫秒
+  # then：之後每一段（條件, 毫秒），條件成立才再快轉；全部快轉完才恢復照真實時間走
+  # step：每次只快轉這麼多，中間讓頁面處理 hashchange 這類事件；screenshot：取 DOM 前先截圖
+  stages = [(drawn, ms), *then]
+  realLoadPage = browser.loadPage
+  def loadPage(context, url, ready, viewport):
+    return realLoadPage(ClockContext(context, stages, step, screenshot), url, ready, viewport)
+  monkeypatch.setattr(browser, "loadPage", loadPage)
 
 
-def outputText(output):
-  # 逾時時已收到的輸出在部分平台是 bytes 或 None
-  if isinstance(output, bytes):
-    return output.decode("utf-8", errors="replace")
-  return output or ""
+class ClockContext:
+  # 只換掉 new_page，其他照原本的 context
+  def __init__(self, context, *clockArgs):
+    self.context, self.clockArgs = context, clockArgs
+
+  def new_page(self):
+    page = self.context.new_page()
+    # 載入前就停住時間；之後只有快轉時計時器才會跑
+    now = datetime.now()
+    page.clock.install(time=now)
+    page.clock.pause_at(now + timedelta(seconds=1))
+    return ClockPage(page, *self.clockArgs)
 
 
-def renderUntil(tmp_path, url, ready, *extraArgs):
-  # 負載高時偶爾拿到還沒有資料的畫面，單獨重跑就過；換新的 user-data-dir 重畫，真的壞掉時每次都不成立仍會失敗
-  requests = next((recorded for base, recorded in serverRequests.items() if url.startswith(base)), [])
-  tries = []
-  for attempt in range(1, renderAttempts + 1):
-    firstRequest = len(requests)
-    dom = renderAttempt(tmp_path, url, extraArgs, f"browser-{attempt}")
-    if ready(dom):
-      if attempt > 1:
-        warnings.warn(f"{currentTestName()} 的畫面重畫 {attempt} 次才有資料")
-      return dom
-    tries.append((dom, requests[firstRequest:]))
-  raise AssertionError(renderFailureText(tries))
+class ClockPage:
+  # 等 ready 前先一段一段快轉計時器；其他操作照原本的 page
+  def __init__(self, page, stages, step, screenshot):
+    self.page, self.stages, self.step, self.screenshot = page, stages, step, screenshot
 
+  def __getattr__(self, name):
+    return getattr(self.page, name)
 
-def currentTestName():
-  return os.environ.get("PYTEST_CURRENT_TEST", "").rsplit(" ", 1)[0]
+  def wait_for_function(self, ready, timeout):
+    started = time.monotonic()
+    remaining = lambda: max(timeout - (time.monotonic() - started) * 1000, 1000)
+    for condition, ms in self.stages:
+      self.page.wait_for_function(condition, timeout=remaining())
+      step = self.step or ms
+      for _ in range(0, ms, step):
+        self.page.clock.run_for(step)
+    self.page.clock.resume()
+    self.page.wait_for_function(ready, timeout=remaining())
 
-
-def renderFailureText(tries):
-  timedOut = [str(attempt) for attempt, (dom, requests) in enumerate(tries, 1) if dom.timedOut]
-  timedOutText = f"（第 {'、'.join(timedOut)} 次逾時）" if timedOut else ""
-  lines = [f"畫面重畫 {len(tries)} 次都沒有準備好{timedOutText}："]
-  for attempt, (dom, requests) in enumerate(tries, 1):
-    stderrTail = dom.stderr.strip().splitlines()[-stderrTailLines:]
-    lines.append(f"第 {attempt} 次：耗時 {dom.seconds:.1f} 秒" + ("（逾時）" if dom.timedOut else ""))
-    lines.append("  瀏覽器 stderr 最後幾行：" + ("" if stderrTail else "（沒有輸出）"))
-    lines += [f"    {line}" for line in stderrTail]
-    lines.append("  server 收到的請求：" + ("" if requests else "（沒有收到）"))
-    lines += [f"    {requestText(request)}" for request in requests]
-  return "\n".join(lines)
-
-
-def requestText(request):
-  text = f"{request['method']} {request['path']} {request['status']}"
-  return f"{text} {request['error']}" if request["error"] else text
+  def content(self):
+    if self.screenshot:
+      self.page.screenshot(path=str(self.screenshot))
+    return self.page.content()
 
 
 def addProbe(tmp_path, monkeypatch, script):
-  # 只在測試伺服器的 main.js 後面接一段操作與量測；結果寫進 body 的 data-probe，dump-dom 才看得到
+  # 只在測試伺服器的 main.js 後面接一段操作與量測；結果寫進 body 的 data-probe，取 DOM 時才看得到
   # 包在區塊裡，量測用的變數不會和儀表板的全域名稱撞到
   main = tmp_path / "main.js"
   main.write_text((toolDir / "web/js/main.js").read_text(encoding="utf-8") + "\n{\n" + script + "\n}\n", encoding="utf-8")
@@ -212,11 +191,6 @@ def readProbe(dom):
   match = probeMatch(dom)
   assert match, "頁面裡的量測沒有跑完"
   return json.loads(unescape(match.group(1)))
-
-
-def probeReady(pick):
-  # 量測在計時器到了就寫出，畫面還沒有資料時也會寫；要等第一個斷言要看的值有資料才算畫好，值對不對仍交給斷言
-  return lambda dom: bool(probeMatch(dom)) and bool(pick(readProbe(dom)))
 
 
 def sectionTag(dom, page):
@@ -281,34 +255,47 @@ def test_dashboardRecordsRequestsAndRaisedErrors(dashboard, monkeypatch):
     servedRequest("/", 200), servedRequest("/api/state", 500, "RuntimeError: 替身：讀狀態失敗")]
 
 
-def fakeDashboardRuns(monkeypatch, renders):
-  # 替身瀏覽器：每次重畫固定回傳畫面和這次 server 收到的請求，不開真的 Edge，負載高時也不會自己偶發失敗
+def loadResult(dom="", ready=False, error=None, consoleErrors=(), failedRequests=(), seconds=0.04):
+  attempt = browser.Attempt()
+  attempt.dom, attempt.ready, attempt.error, attempt.seconds = dom, ready, error, seconds
+  attempt.consoleErrors, attempt.failedRequests = list(consoleErrors), list(failedRequests)
+  return attempt
+
+
+def timedOutLoad():
+  # 負載高時等到逾時：畫面還是空的，只有逾時的錯誤
+  return loadResult(error=timedOutError), []
+
+
+def fakeBrowserPages(monkeypatch, loads):
+  # 替身瀏覽器：每次載入依序回傳結果和這次 server 收到的請求，不開真的 Edge，負載高時也不會自己偶發失敗
   requests = []
   monkeypatch.setitem(serverRequests, fakeDashboard, requests)
-  remaining = iter(renders)
-  def run(command, **kwargs):
-    dom, received = next(remaining)
+  remaining = iter(loads)
+  def loadPage(context, url, ready, viewport):
+    attempt, received = next(remaining)
     requests.extend(received)
-    return subprocess.CompletedProcess(command, 0, stdout=dom, stderr="edge started\n")
-  monkeypatch.setattr(subprocess, "run", run)
+    return attempt
+  monkeypatch.setattr(browser, "loadPage", loadPage)
+  return browser.BrowserPages(SimpleNamespace(new_context=lambda: SimpleNamespace(close=lambda: None)))
 
 
-def test_renderUntilRedrawsWhenStateIsNotReadyYet(tmp_path, monkeypatch):
+def test_renderUntilRedrawsWhenStateIsNotReadyYet(monkeypatch):
   # 替身：前兩次載入頁面時 /api/state 都回 503，畫面只有骨架；第 3 次載入才有資料
-  skeleton = ('<main id="overview"></main>', [servedRequest("/", 200), servedRequest("/api/state", 503)])
-  loaded = ('<main id="overview"><button>開始寫程式</button></main>',
+  skeleton = (loadResult('<main id="overview"></main>', error=timedOutError),
+              [servedRequest("/", 200), servedRequest("/api/state", 503)])
+  loaded = (loadResult('<main id="overview"><button>開始寫程式</button></main>', ready=True),
             [servedRequest("/", 200), servedRequest("/api/state", 200)])
-  fakeDashboardRuns(monkeypatch, [skeleton, skeleton, loaded])
+  pages = fakeBrowserPages(monkeypatch, [skeleton, skeleton, loaded])
   with pytest.warns(UserWarning, match=r"test_renderUntilRedrawsWhenStateIsNotReadyYet .*重畫 3 次") as caught:
-    dom = renderUntil(tmp_path, fakeDashboard + "#token=" + token, lambda dom: "開始寫程式" in dom)
-  assert dom == loaded[0]
+    dom = pages.renderUntil(fakeDashboard + "#token=" + token, domHas("開始寫程式"))
+  assert dom == loaded[0].dom
   # 驗證時要在 pytest 結尾的 warnings summary 看到重畫次數，檢查完原樣再發出
   for item in caught:
     warnings.warn_explicit(item.message, item.category, item.filename, item.lineno)
 
 
-@needsBrowser
-def test_renderUntilRedrawsDashboardAfterStateUnavailable(dashboard, tmp_path, monkeypatch):
+def test_renderUntilRedrawsDashboardAfterStateUnavailable(dashboard, browserPages, monkeypatch):
   # 整合驗證：真的 server 在前兩次載入頁面時 /api/state 都回 503，頁面自己每 2 秒重讀也拿不到，第 3 次載入才有資料
   realRouteGet = server.DashboardHandler.routeGet
   pageLoads = []
@@ -320,73 +307,69 @@ def test_renderUntilRedrawsDashboardAfterStateUnavailable(dashboard, tmp_path, m
       return
     realRouteGet(handler, path)
   monkeypatch.setattr(server.DashboardHandler, "routeGet", flakyRouteGet)
+  # 前兩次一定等不到，等到頁面自己重讀過一輪就好，不用等滿；第 3 次照常等
+  realLoadPage, realReadySeconds = browser.loadPage, browser.readySeconds
+  def loadPage(context, url, ready, viewport):
+    monkeypatch.setattr(browser, "readySeconds", 3 if len(pageLoads) < 2 else realReadySeconds)
+    return realLoadPage(context, url, ready, viewport)
+  monkeypatch.setattr(browser, "loadPage", loadPage)
   with pytest.warns(UserWarning, match=r"test_renderUntilRedrawsDashboardAfterStateUnavailable .*重畫 3 次") as caught:
-    dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "開始寫程式" in dom)
+    dom = browserPages.renderUntil(dashboard + "#token=" + token, domHas("開始寫程式"))
   assert "開始寫程式" in dom and len(pageLoads) == 3
   assert servedRequest("/api/state", 503) in serverRequests[dashboard]
   for item in caught:
     warnings.warn_explicit(item.message, item.category, item.filename, item.lineno)
 
 
-def test_renderUntilFailsWithDiagnosticsWhenNeverReady(tmp_path, monkeypatch):
-  broken = ("<main></main>", [servedRequest("/", 200), servedRequest("/api/state", 500, "RuntimeError: 替身：讀狀態失敗")])
-  fakeDashboardRuns(monkeypatch, [broken] * renderAttempts)
+def test_renderUntilFailsWithDiagnosticsWhenNeverReady(monkeypatch):
+  broken = (loadResult("<main></main>", error=timedOutError, failedRequests=[f"GET {fakeDashboard}api/state 500"]),
+            [servedRequest("/", 200), servedRequest("/api/state", 500, "RuntimeError: 替身：讀狀態失敗")])
+  pages = fakeBrowserPages(monkeypatch, [broken] * browser.renderAttempts)
   with pytest.raises(AssertionError) as failure:
-    renderUntil(tmp_path, fakeDashboard, lambda dom: False)
+    pages.renderUntil(fakeDashboard, "false")
   blocks = re.split(r"\n(?=第 \d 次)", str(failure.value))
   assert blocks[0] == "畫面重畫 3 次都沒有準備好："
   assert len(blocks) == 4
   for attempt, block in enumerate(blocks[1:], 1):
-    assert re.match(rf"第 {attempt} 次：耗時 \d+\.\d 秒\n  瀏覽器 stderr 最後幾行：\n    edge started\n", block)
+    assert re.match(rf"第 {attempt} 次：耗時 \d+\.\d 秒（{re.escape(timedOutError)}）\n  瀏覽器 console 的錯誤：（沒有）\n"
+                    rf"  失敗的請求：\n    GET {re.escape(fakeDashboard)}api/state 500\n", block)
     assert "\n  server 收到的請求：\n" in block
     assert "    GET / 200\n" in block and "    GET /api/state 500 RuntimeError: 替身：讀狀態失敗" in block
 
 
-def fakeBrowserRuns(monkeypatch, outcomes):
-  # 替身瀏覽器：依序逾時或印出 DOM，不必真的開瀏覽器也能重現負載高時的逾時
-  remaining = iter(outcomes)
-  def run(command, **kwargs):
-    outcome = next(remaining)
-    if outcome == "timeout":
-      raise subprocess.TimeoutExpired(command, kwargs["timeout"], output="", stderr="edge hung\n")
-    return subprocess.CompletedProcess(command, 0, stdout=outcome, stderr="")
-  monkeypatch.setattr(subprocess, "run", run)
+def test_renderPageStillFailsOnBrowserTimeout(monkeypatch):
+  # 只畫一次的 renderPage 沒有重畫，逾時若回傳空白畫面，只檢查文字不存在的斷言會誤判通過
+  pages = fakeBrowserPages(monkeypatch, [timedOutLoad()])
+  with pytest.raises(AssertionError, match="畫面沒有準備好"):
+    pages.renderPage(fakeDashboard, "true")
 
 
-def test_renderDomStillFailsOnBrowserTimeout(tmp_path, monkeypatch):
-  # 直接呼叫 renderDom 的測試沒有重畫，逾時若變成空白畫面，只檢查文字不存在的斷言會誤判通過
-  fakeBrowserRuns(monkeypatch, ["timeout"])
-  with pytest.raises(subprocess.TimeoutExpired):
-    renderDom(tmp_path, "http://127.0.0.1:1/")
-
-
-def test_renderUntilRedrawsAfterBrowserTimeout(tmp_path, monkeypatch):
-  fakeBrowserRuns(monkeypatch, ["timeout", "<p>ready</p>"])
+def test_renderUntilRedrawsAfterBrowserTimeout(monkeypatch):
+  pages = fakeBrowserPages(monkeypatch, [timedOutLoad(), (loadResult("<p>ready</p>", ready=True), [])])
   with pytest.warns(UserWarning, match="重畫 2 次"):
-    dom = renderUntil(tmp_path, "http://127.0.0.1:1/", lambda dom: "ready" in dom)
-  assert dom == "<p>ready</p>" and not dom.timedOut
+    dom = pages.renderUntil(fakeDashboard, domHas("ready"))
+  assert dom == "<p>ready</p>"
 
 
-def test_renderUntilFailureMarksTimedOutAttempts(tmp_path, monkeypatch):
-  fakeBrowserRuns(monkeypatch, ["timeout", "<p>empty</p>", "timeout"])
+def test_renderUntilFailureMarksTimedOutAttempts(monkeypatch):
+  pages = fakeBrowserPages(monkeypatch, [timedOutLoad(), (loadResult("<p>empty</p>"), []), timedOutLoad()])
   with pytest.raises(AssertionError) as failure:
-    renderUntil(tmp_path, "http://127.0.0.1:1/", lambda dom: False)
+    pages.renderUntil(fakeDashboard, "false")
   blocks = re.split(r"\n(?=第 \d 次)", str(failure.value))
-  assert blocks[0] == "畫面重畫 3 次都沒有準備好（第 1、3 次逾時）："
-  assert re.match(r"第 1 次：耗時 \d+\.\d 秒（逾時）\n  瀏覽器 stderr 最後幾行：\n    edge hung\n", blocks[1])
+  assert blocks[0] == "畫面重畫 3 次都沒有準備好："
+  assert re.match(rf"第 1 次：耗時 \d+\.\d 秒（{re.escape(timedOutError)}）\n  瀏覽器 console 的錯誤：（沒有）\n", blocks[1])
   assert re.match(r"第 2 次：耗時 \d+\.\d 秒\n", blocks[2])
-  assert re.match(r"第 3 次：耗時 \d+\.\d 秒（逾時）\n", blocks[3])
+  assert re.match(rf"第 3 次：耗時 \d+\.\d 秒（{re.escape(timedOutError)}）\n", blocks[3])
 
 
-def test_renderFailureTextKeepsLastStderrLines():
-  dom = RenderedDom("<html></html>", "".join(f"line{number}\n" for number in range(1, 8)), 2.04)
-  assert renderFailureText([(dom, [])]) == "\n".join([
-    "畫面重畫 1 次都沒有準備好：", "第 1 次：耗時 2.0 秒", "  瀏覽器 stderr 最後幾行：",
-    *[f"    line{number}" for number in range(3, 8)], "  server 收到的請求：（沒有收到）"])
+def test_renderFailureTextListsEachAttemptsDiagnostics():
+  attempt = loadResult(consoleErrors=["未處理的例外：替身", "畫面程式壞掉了"], seconds=2.04)
+  assert browser.renderFailureText("畫面重畫 1 次都沒有準備好", [attempt]) == "\n".join([
+    "畫面重畫 1 次都沒有準備好：", "第 1 次：耗時 2.0 秒", "  瀏覽器 console 的錯誤：",
+    "    未處理的例外：替身", "    畫面程式壞掉了", "  失敗的請求：（沒有）", "  server 收到的請求：（沒有收到）"])
 
 
-@needsBrowser
-def test_overview_has_main_agents_and_two_children_per_role(dashboard, gitProject, tmp_path, monkeypatch):
+def test_overview_has_main_agents_and_two_children_per_role(dashboard, gitProject, browserPages, tmp_path, monkeypatch):
   configPath = gitProject / ".board/config.json"
   config = json.loads(configPath.read_text(encoding="utf-8"))
   config["maxParallel"] = 3
@@ -407,7 +390,9 @@ def test_overview_has_main_agents_and_two_children_per_role(dashboard, gitProjec
         document.body.dataset.probe = JSON.stringify(result);
       }, 500);
     }, 1000);""")
-  dom = renderUntil(tmp_path, dashboard, probeReady(lambda probe: probe["main"]), "--window-size=1440,1200")
+  # 點下去之後換頁是 hashchange 事件，一小段一小段快轉，中間讓頁面處理
+  fastForward(monkeypatch, 1500, step=50)
+  dom = browserPages.renderUntil(dashboard, probeHas("main"), viewport={"width": 1440, "height": 1200})
   probe = readProbe(dom)
   assert probe["main"] == ["writer", "reviewer"]
   assert probe["children"] == ["writer-sub1", "writer-sub2", "reviewer-sub1", "reviewer-sub2"]
@@ -417,8 +402,7 @@ def test_overview_has_main_agents_and_two_children_per_role(dashboard, gitProjec
   assert probe["selected"] == "writer" and probe["page"] == "console"
 
 
-@needsBrowser
-def test_main_status_is_its_own_task_not_a_child_summary(dashboard, tmp_path, monkeypatch):
+def test_main_status_is_its_own_task_not_a_child_summary(dashboard, browserPages, tmp_path, monkeypatch):
   addProbe(tmp_path, monkeypatch, """
     setTimeout(() => {
       const state = structuredClone(app.state);
@@ -438,15 +422,15 @@ def test_main_status_is_its_own_task_not_a_child_summary(dashboard, tmp_path, mo
         .every(node => node.dataset.state === 'paused');
       document.body.dataset.probe = JSON.stringify(result);
     }, 1000);""")
-  probe = readProbe(renderUntil(tmp_path, dashboard, probeReady(lambda probe: probe.get("mainState"))))
+  fastForward(monkeypatch, 1000)
+  probe = readProbe(browserPages.renderUntil(dashboard, probeHas("mainState")))
   assert probe["mainState"] == "idle" and "待命" in probe["mainText"]
   assert "P0001 T1" not in probe["mainText"]
   assert probe["childState"] == "warn" and "75%" in probe["childText"]
   assert probe["paused"] is True
 
 
-@needsBrowser
-def test_single_capacity_shows_only_mains_and_no_child_cards(dashboard, gitProject, tmp_path, monkeypatch):
+def test_single_capacity_shows_only_mains_and_no_child_cards(dashboard, gitProject, browserPages, tmp_path, monkeypatch):
   path = gitProject / ".board/config.json"
   config = json.loads(path.read_text(encoding="utf-8"))
   config["maxParallel"] = 1
@@ -459,14 +443,14 @@ def test_single_capacity_shows_only_mains_and_no_child_cards(dashboard, gitProje
         text: document.querySelector('#squads').textContent,
       });
     }, 1000);""")
-  probe = readProbe(renderUntil(tmp_path, dashboard, probeReady(lambda probe: probe["main"])))
+  fastForward(monkeypatch, 1000)
+  probe = readProbe(browserPages.renderUntil(dashboard, probeHas("main")))
   assert probe["main"] == ["writer", "reviewer"]
   assert probe["children"] == 0 and "無子 agent 名額" in probe["text"]
 
 
-@needsBrowser
 @pytest.mark.parametrize("width", [1440, 560])
-def test_main_and_child_cards_fit_the_window(dashboard, gitProject, tmp_path, monkeypatch, width):
+def test_main_and_child_cards_fit_the_window(dashboard, gitProject, browserPages, tmp_path, monkeypatch, width):
   path = gitProject / ".board/config.json"
   config = json.loads(path.read_text(encoding="utf-8"))
   config["maxParallel"] = 3
@@ -482,17 +466,16 @@ def test_main_and_child_cards_fit_the_window(dashboard, gitProject, tmp_path, mo
       });
     }, 1500);""")
   screenshot = tmp_path / f"agent-overview-{width}.png"
-  dom = renderUntil(tmp_path, dashboard + "#token=" + token, probeReady(lambda probe: probe["total"]),
-                    f"--window-size={width},1200", f"--screenshot={screenshot}")
+  fastForward(monkeypatch, 1500, drawn=f"{appDrawn} && {fontsLoaded}", screenshot=screenshot)
+  dom = browserPages.renderUntil(dashboard + "#token=" + token, probeHas("total"), viewport={"width": width, "height": 1200})
   probe = readProbe(dom)
   assert probe["total"] == 6
   assert probe["overflow"] <= 0 and probe["right"] <= probe["viewport"]
   print(f"Overview screenshot: {screenshot}")
 
 
-@needsBrowser
-def test_overviewShowsConductorGroupsAndAgents(dashboard, tmp_path):
-  dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "Alfred<span>（指揮程式）</span>" in dom)
+def test_overviewShowsConductorGroupsAndAgents(dashboard, browserPages):
+  dom = browserPages.renderUntil(dashboard + "#token=" + token, domHas("Alfred<span>（指揮程式）</span>"))
   assert "Alfred<span>（指揮程式）</span>" in dom and "沒有啟動" in dom
   assert "進行中 1 份 plan" in dom and "P0001 批次上傳" in dom
   assert 'data-agent="writer-sub1"' in dom and 'data-agent="reviewer-sub1"' in dom
@@ -503,54 +486,50 @@ def test_overviewShowsConductorGroupsAndAgents(dashboard, tmp_path):
   assert "測試中：" not in dom
 
 
-@needsBrowser
-def test_overviewLeadCardListsTestingTasks(dashboard, gitProject, tmp_path):
+def test_overviewLeadCardListsTestingTasks(dashboard, gitProject, browserPages):
   # 寫完在背景跑測試時列在 Alfred 卡片；測試跑完轉成待審查就不再列出
   appendEvent(gitProject, "taskWritten", plan="P0001", task="T1", roundNumber=1,
               data={"commit": "c1", "summary": "完成", "testing": True})
-  dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "測試中：P0001 T1" in dom)
+  dom = browserPages.renderUntil(dashboard + "#token=" + token, domHas("測試中：P0001 T1"))
   lead = re.search(r'id="leadCard".*?</article>', dom, re.S)
   assert lead and "測試中：P0001 T1" in lead.group(0)
   appendEvent(gitProject, "testRun", plan="P0001", task="T1", roundNumber=1,
               data={"passed": True, "tail": "ok", "verdict": "passed", "newFailures": []})
   # 要看的是「測試中：」不在畫面上，沒有資料的畫面也不在；等 Alfred 卡片畫出來才算有資料
-  dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "Alfred<span>（指揮程式）</span>" in dom)
+  dom = browserPages.renderUntil(dashboard + "#token=" + token, domHas("Alfred<span>（指揮程式）</span>"))
   assert "測試中：" not in dom
 
 
-@needsBrowser
-def test_overviewShowsRunningCliUntilMainTaskEnds(dashboard, gitProject, tmp_path):
+def test_overviewShowsRunningCliUntilMainTaskEnds(dashboard, gitProject, browserPages):
   (gitProject / ".board" / "config.json").write_text(json.dumps({
     "maxParallel": 2, "writer": {"cli": "codex", "model": "gpt-6.1-sol"}, "reviewer": {"cli": "claude", "model": "opus"},
   }), encoding="utf-8")
-  dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "Claude<span>（寫程式）</span>" in dom)
+  dom = browserPages.renderUntil(dashboard + "#token=" + token, domHas("Claude<span>（寫程式）</span>"))
   # writer 還在執行舊的 Claude 任務，大卡要呈現真實執行身分；閒置的 reviewer 使用新設定。
   assert "Claude<span>（寫程式）</span>" in dom and "Claude<span>（審查）</span>" in dom
   assert "Codex<span>（寫程式）</span>" not in dom and "opus" in dom
 
 
-@needsBrowser
-def test_idleMainShowsTheNewRoleConfiguration(dashboard, gitProject, tmp_path):
+def test_idleMainShowsTheNewRoleConfiguration(dashboard, gitProject, browserPages):
   (gitProject / ".board/config.json").write_text(json.dumps({
     "maxParallel": 3, "writer": {"cli": "codex", "model": "gpt-6.1-sol"},
     "reviewer": {"cli": "claude", "model": "opus"},
   }), encoding="utf-8")
   appendEvent(gitProject, "taskWritten", plan="P0001", task="T1", agent="writer", roundNumber=1,
               data={"commit": "abc", "summary": "完成任務"})
-  dom = renderUntil(tmp_path, dashboard, lambda dom: "Codex<span>（寫程式）</span>" in dom)
+  dom = browserPages.renderUntil(dashboard, domHas("Codex<span>（寫程式）</span>"))
   assert "Codex<span>（寫程式）</span>" in dom and "Claude<span>（審查）</span>" in dom
   assert "gpt-6.1-sol" in dom and "opus" in dom
 
 
-@needsBrowser
-def test_withoutTokenPageIsReadOnly(dashboard, tmp_path):
+def test_withoutTokenPageIsReadOnly(dashboard, browserPages):
   readOnly = "唯讀：請用 server.py 印出的網址重新開啟"
-  assert readOnly in renderUntil(tmp_path, dashboard, lambda dom: readOnly in dom)
+  assert readOnly in browserPages.renderUntil(dashboard, domHas(readOnly))
 
 
-@needsBrowser
-def test_tasksPageDrawsTreeFromServer(dashboard, tmp_path):
-  dom = renderUntil(tmp_path, dashboard + "#tasks", lambda dom: 'data-plan-side="前端"' in dom)
+def test_tasksPageDrawsTreeFromServer(dashboard, browserPages):
+  # 樹先畫出來，選到的 plan 細節另外讀；兩邊都畫好才取畫面
+  dom = browserPages.renderUntil(dashboard + "#tasks", domHas('data-plan-side="前端"') + " && " + domHas("橘｜"))
   assert 'data-plan-side="前端"' in dom and 'data-plan-side="後端"' in dom
   assert "P0002 背景縮圖" in dom
   assert "橘｜" in dom and "沒有對應需求" in dom
@@ -559,8 +538,7 @@ def test_tasksPageDrawsTreeFromServer(dashboard, tmp_path):
   assert "放棄這份 plan" in dom
 
 
-@needsBrowser
-def test_tasksPageShowsStatsOfApprovedPlan(dashboard, gitProject, tmp_path, monkeypatch, capsys):
+def test_tasksPageShowsStatsOfApprovedPlan(dashboard, gitProject, browserPages, tmp_path, monkeypatch, capsys):
   # 一開始選的是待核准的 P0002，沒有成效；換到進行中的 P0001 才出現，數字和 board.py stats P0001 一樣
   addProbe(tmp_path, monkeypatch, """
     const read = () => ({
@@ -570,7 +548,10 @@ def test_tasksPageShowsStatsOfApprovedPlan(dashboard, gitProject, tmp_path, monk
     const result = {};
     setTimeout(() => { result.pending = read(); selectPlan('P0001'); }, 1500);
     setTimeout(() => { result.approved = read(); document.body.dataset.probe = JSON.stringify(result); }, 3500);""")
-  probe = readProbe(renderUntil(tmp_path, dashboard + "#tasks", probeReady(lambda probe: probe["pending"]["plan"])))
+  # P0002 的細節讀回來才快轉到第一個計時器；換到 P0001 後等它的成效畫出來，再快轉到第二個
+  fastForward(monkeypatch, 1500, drawn=f"{appDrawn} && {domHas('橘｜')}",
+              then=[("app.selectedPlan === 'P0001' && !document.querySelector('#planStats').hidden", 2000)])
+  probe = readProbe(browserPages.renderUntil(dashboard + "#tasks", probeHas("pending", "plan")))
   assert probe["pending"] == {"plan": "P0002", "hidden": True, "items": []}
   assert probe["approved"]["plan"] == "P0001" and probe["approved"]["hidden"] is False
   capsys.readouterr()
@@ -589,9 +570,8 @@ def test_tasksPageShowsStatsOfApprovedPlan(dashboard, gitProject, tmp_path, monk
          [line for line in cliLines if not line.startswith("耗時：")]
 
 
-@needsBrowser
-def test_opsFeedAndBadges(dashboard, tmp_path):
-  dom = renderUntil(tmp_path, dashboard + "#token=" + token, lambda dom: "開始寫程式" in dom)
+def test_opsFeedAndBadges(dashboard, browserPages):
+  dom = browserPages.renderUntil(dashboard + "#token=" + token, domHas("開始寫程式"))
   assert "開始寫程式" in dom
   # 異常：等你處理（紅）、conductor 沒在跑、Context 偏高 → 3 筆，有紅色所以徽章是紅的
   assert '<b class="badge" data-tone="red">3</b>' in dom
@@ -599,9 +579,11 @@ def test_opsFeedAndBadges(dashboard, tmp_path):
   assert '<b class="badge">2</b>' in dom
 
 
-@needsBrowser
-def test_consoleShowsBusyAgentDetail(dashboard, tmp_path):
-  dom = renderUntil(tmp_path, dashboard + "#console", lambda dom: "（Claude・寫程式）" in dom)
+def test_consoleShowsBusyAgentDetail(dashboard, browserPages):
+  # 任務細節另外讀 log、系統資源摘要另外讀監控資料；身分、細節和摘要都畫好才取畫面
+  # 摘要在監控資料回來前就先畫出空的列，要等數值出現
+  ready = " && ".join(domHas(text) for text in ("（Claude・寫程式）", "第 1/3 輪", "75.0%"))
+  dom = browserPages.renderUntil(dashboard + "#console", ready)
   assert "（Claude・寫程式）" in dom
   assert "P0001 T1 後端批次 API" in dom and "第 1/3 輪" in dom
   assert "「Astra 對話窗」還沒有接資料" in dom and "「系統資源監控」還沒有接資料" not in dom
@@ -613,10 +595,9 @@ def test_consoleShowsBusyAgentDetail(dashboard, tmp_path):
   assert "75.0%" in summary and "25.0%" in summary and "server 主機" in summary
 
 
-@needsBrowser
-def test_systemMonitorPageMountsCardsAndCharts(dashboard, gitProject, tmp_path):
-  # 換頁不用等資料，先看的區塊顯示與否沒有資料也成立；等監控卡片畫出來才算有資料
-  dom = renderUntil(tmp_path, dashboard + "#system-monitor", lambda dom: 'class="smon-card"' in dom)
+def test_systemMonitorPageMountsCardsAndCharts(dashboard, gitProject, browserPages):
+  # 換頁不用等資料，先看的區塊顯示與否沒有資料也成立；卡片在資料回來前就先畫出空的，等數值出現才算有資料
+  dom = browserPages.renderUntil(dashboard + "#system-monitor", domHas('class="smon-card"') + " && " + domHas("75.0%"))
   assert "hidden" not in sectionTag(dom, "system-monitor")
   assert "hidden" in sectionTag(dom, "overview") and "hidden" in sectionTag(dom, "placeholder")
   link = railLink(dom, "system-monitor")
@@ -631,18 +612,16 @@ def test_systemMonitorPageMountsCardsAndCharts(dashboard, gitProject, tmp_path):
   assert "75.0%" in page and "25.0%" in page and "監控對象：server 主機" in page
 
 
-@needsBrowser
-def test_topologyLinkRedirectsToSystemMonitor(dashboard, tmp_path, monkeypatch):
+def test_topologyLinkRedirectsToSystemMonitor(dashboard, browserPages, tmp_path, monkeypatch):
   addProbe(tmp_path, monkeypatch, "document.body.dataset.probe = JSON.stringify({ hash: location.hash, page: app.page });")
-  dom = renderUntil(tmp_path, dashboard + "#topology", probeReady(lambda probe: probe.get("page")))
+  dom = browserPages.renderUntil(dashboard + "#topology", probeHas("page"))
   assert readProbe(dom) == {"hash": "#system-monitor", "page": "system-monitor"}
   assert "hidden" not in sectionTag(dom, "system-monitor")
   # 左側導覽不再有空白的拓撲頁
   assert railLink(dom, "topology") is None and "拓撲" not in dom
 
 
-@needsBrowser
-def test_consoleSummaryOpensFullPage(dashboard, tmp_path, monkeypatch):
+def test_consoleSummaryOpensFullPage(dashboard, browserPages, tmp_path, monkeypatch):
   addProbe(tmp_path, monkeypatch, """
     const summaryLink = document.querySelector('#systemMonitorSummary a');
     const focusable = summaryLink.tabIndex >= 0;
@@ -654,12 +633,13 @@ def test_consoleSummaryOpensFullPage(dashboard, tmp_path, monkeypatch):
         cards: document.querySelectorAll('#systemMonitorPage .smon-card').length,
       });
     }, 2500);""")
-  dom = renderUntil(tmp_path, dashboard + "#console", probeReady(lambda probe: probe["cards"]))
+  # 快轉到點擊；換到完整頁、監控資料讀回來後，再快轉到量測
+  fastForward(monkeypatch, 1000, then=[(monitorDrawn, 1500)])
+  dom = browserPages.renderUntil(dashboard + "#console", probeHas("cards"))
   assert readProbe(dom) == {"focusable": True, "hash": "#system-monitor", "page": "system-monitor", "shown": True, "cards": 3}
 
 
-@needsBrowser
-def test_switchingPagesKeepsOtherPagesAndStopsMonitorPolling(dashboard, tmp_path, monkeypatch):
+def test_switchingPagesKeepsOtherPagesAndStopsMonitorPolling(dashboard, browserPages, tmp_path, monkeypatch):
   # 從系統監控頁依序切到總覽、任務、模型、設定，再到控制台；離開期間不能再讀監控資料，到控制台摘要才再讀
   addProbe(tmp_path, monkeypatch, """
     let monitorCalls = 0;
@@ -685,7 +665,9 @@ def test_switchingPagesKeepsOtherPagesAndStopsMonitorPolling(dashboard, tmp_path
       result.onConsole = monitorCalls;
       document.body.dataset.probe = JSON.stringify(result);
     }, 4800);""")
-  dom = renderUntil(tmp_path, dashboard + "#system-monitor", probeReady(lambda probe: probe["visits"]))
+  # 要跨過好幾輪輪詢，用 page.clock 一小段一小段快轉，每段之間讓頁面處理換頁；監控資料第一次讀回來才開始
+  fastForward(monkeypatch, 4800, drawn=f"{appDrawn} && {monitorDrawn}", step=50)
+  dom = browserPages.renderUntil(dashboard + "#system-monitor", probeHas("visits"))
   probe = readProbe(dom)
   # 標籤在當下那一頁記錄；最後停在控制台，DOM 裡的標籤已經換掉
   assert probe["visits"] == [
@@ -698,8 +680,7 @@ def test_switchingPagesKeepsOtherPagesAndStopsMonitorPolling(dashboard, tmp_path
   assert probe["whileAway"] == 0 and probe["onConsole"] == 1
 
 
-@needsBrowser
-def test_narrowWindowStacksMonitorCardsWithoutOverflow(dashboard, tmp_path, monkeypatch):
+def test_narrowWindowStacksMonitorCardsWithoutOverflow(dashboard, browserPages, tmp_path, monkeypatch):
   addProbe(tmp_path, monkeypatch, """
     setTimeout(() => {
       const page = document.querySelector('#systemMonitorPage');
@@ -717,8 +698,8 @@ def test_narrowWindowStacksMonitorCardsWithoutOverflow(dashboard, tmp_path, monk
       });
     }, 3000);""")
   # 視窗寬度沒有資料也量得到；等監控卡片畫出來才算有資料
-  dom = renderUntil(tmp_path, dashboard + "#system-monitor", probeReady(lambda probe: probe["cardTops"]),
-                    "--window-size=560,1000")
+  fastForward(monkeypatch, 3000, drawn=f"{monitorDrawn} && {fontsLoaded}")
+  dom = browserPages.renderUntil(dashboard + "#system-monitor", probeHas("cardTops"), viewport={"width": 560, "height": 1000})
   probe = readProbe(dom)
   assert probe["width"] <= 760
   assert probe["documentOverflow"] <= 0 and probe["pageOverflow"] <= 0 and probe["contentOverflow"] <= 1
@@ -729,17 +710,15 @@ def test_narrowWindowStacksMonitorCardsWithoutOverflow(dashboard, tmp_path, monk
   assert len(probe["chartTops"]) == 2
 
 
-@needsBrowser
-def test_assistantGreetsAndOffersQuickAsks(dashboard, tmp_path):
-  dom = renderUntil(tmp_path, dashboard, lambda dom: "你好，我是儀表板助手" in dom)
+def test_assistantGreetsAndOffersQuickAsks(dashboard, browserPages):
+  dom = browserPages.renderUntil(dashboard, domHas("你好，我是儀表板助手"))
   assert "你好，我是儀表板助手" in dom
   assert 'data-ask="等你處理的有哪些？"' in dom and 'data-ask="writer 在做什麼？"' in dom
 
 
-@needsBrowser
-def test_modelsPageShowsRoleSettings(dashboard, tmp_path):
+def test_modelsPageShowsRoleSettings(dashboard, browserPages):
   # 換頁不用等資料；等角色目前的設定畫出來才算有資料
-  dom = renderUntil(tmp_path, dashboard + "#models", lambda dom: "目前：Claude・sonnet" in dom)
+  dom = browserPages.renderUntil(dashboard + "#models", domHas("目前：Claude・sonnet"))
   section = re.search(r'<section class="page models-page"[^>]*>', dom)
   assert section and "hidden" not in section.group(0)
   assert "目前：Claude・sonnet" in dom and "目前：Codex・預設模型" in dom
@@ -750,8 +729,7 @@ def test_modelsPageShowsRoleSettings(dashboard, tmp_path):
   assert 'data-save-role="writer" disabled' in dom
 
 
-@needsBrowser
-def test_modelsPageLoadsCliModelsAndEfforts(dashboard, tmp_path, monkeypatch):
+def test_modelsPageLoadsCliModelsAndEfforts(dashboard, browserPages, tmp_path, monkeypatch):
   import board_models
   def discover(projectDir, cli, command, **kwargs):
     model = "sonnet" if cli == "claude" else "gpt-test-new"
@@ -763,7 +741,7 @@ def test_modelsPageLoadsCliModelsAndEfforts(dashboard, tmp_path, monkeypatch):
   main.write_text(f"sessionStorage.setItem('boardToken', '{token}');\n" +
                   (toolDir / "web/js/main.js").read_text(encoding="utf-8"), encoding="utf-8")
   monkeypatch.setitem(server.staticFiles, "/js/main.js", (str(main), "text/javascript; charset=utf-8"))
-  dom = renderUntil(tmp_path, dashboard + "#models", lambda dom: "CLI New Version" in dom)
+  dom = browserPages.renderUntil(dashboard + "#models", domHas("CLI New Version"))
   assert "CLI New Version" in dom and "full-model-v2" in dom
   assert 'data-role-effort="writer"' in dom and 'value="high"' in dom
   assert "重新整理模型" in dom
