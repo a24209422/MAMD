@@ -218,7 +218,12 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 
 #### 測試判定
 
-失敗名稱取自測試完整輸出裡以 `FAILED ` 或 `ERROR ` 開頭的行（「 - 」之前的部分），也就是 pytest 結尾 short test summary 的格式。
+失敗名稱有兩種，都從測試完整輸出裡取：
+
+- pytest：以 `FAILED ` 或 `ERROR ` 開頭的行（「 - 」之前的部分），也就是 pytest 結尾 short test summary 的格式
+- 品質門檻（tdd-crap 專案的品質檢查）：品質檢查每個函式印一行 `PASS` 或 `FAIL`，每個 `FAIL`（超標）的函式就是一個失敗名稱，格式是 `品質門檻 檔案::函式`，例如 `品質門檻 conductor.py::compareWithBaseline`。名稱不含行號：函式上面多一行，行號就變了，含行號就跟基準比不起來。品質檢查最後一行 `FAILED: ...report.json` 因為冒號緊接在 `FAILED` 後面，不算名稱
+
+品質檢查只在 pytest 全部通過時才計算覆蓋率、印出 `PASS`／`FAIL` 行；pytest 失敗或超時時只有 pytest 的失敗名稱，品質沒有計算。兩種名稱分開跟基準比，比法一樣（名稱不在基準裡就是新增），再合併：任一種有新增就退回。基準或任務測試有一方品質沒有計算時，品質超標不算新增，因為沒有東西可比。
 
 | 基準 | 任務測試 | 接下來 |
 |---|---|---|
@@ -226,6 +231,9 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 | 通過 | 失敗（含超時） | 退回寫程式的 agent |
 | 失敗，有失敗名稱 | 失敗，有不在基準裡的名稱，或一個名稱都沒有 | 退回寫程式的 agent |
 | 失敗，有失敗名稱 | 失敗，名稱全都在基準裡 | 送審，審查的 agent 會看到基準就有的失敗 |
+| pytest 全過，只有品質超標 | pytest 全過，品質超標的函式全都在基準裡 | 送審，審查的 agent 會看到基準就有的品質超標 |
+| pytest 全過，只有品質超標 | pytest 失敗，或有基準沒有的品質超標 | 退回寫程式的 agent |
+| pytest 失敗（品質沒有計算） | pytest 全過，只有品質超標 | 送審，品質超標不算新增；審查的 agent 會被告知基準就失敗、無法比對 |
 | 失敗，沒有失敗名稱（輸出分不出名稱，或超時） | 失敗 | 送審，審查的 agent 會被告知基準就失敗、無法比對 |
 
 - pytest 的 `-r` 要保留 `f`（失敗）和 `E`（錯誤），short test summary 才會列出 `FAILED`／`ERROR` 測試名稱，才分得出新增的失敗。pytest 沒設 `-r` 時預設就是 `fE`；在 `addopts` 自己設了 `-r`（例如只有 `-rs`）就會蓋掉預設，要寫成 `-rfEs` 這種同時含 `f`、`E` 的寫法（本專案的 `pytest.ini` 就是 `-rfEs`）
