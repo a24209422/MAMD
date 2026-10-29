@@ -4,6 +4,7 @@
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -61,6 +62,26 @@ def failureNames(output):
       if name and name not in names:
         names.append(name)
   return names
+
+
+qualityLinePattern = re.compile(r"^(PASS|FAIL) (\S+):\d+ (\S+)")
+
+
+def qualityResults(output):
+  """讀 tdd-crap 品質檢查每個函式一行的 PASS／FAIL，回傳 (checked, names)。"""
+  # pytest 失敗時品質檢查不算覆蓋率、不印這些行，checked 才分得出「沒有超標」和「沒有檢查」
+  checked = False
+  names = []
+  for line in output.splitlines():
+    match = qualityLinePattern.match(line)
+    if not match:
+      continue
+    checked = True
+    # 名稱不含行號：函式上面多一行，行號就變了，含行號就跟基準比不了
+    name = f"品質門檻 {match.group(2)}::{match.group(3)}"
+    if match.group(1) == "FAIL" and name not in names:
+      names.append(name)
+  return checked, names
 
 
 def compareWithBaseline(baseline, passed, failures):
@@ -391,10 +412,11 @@ class Conductor:
     try:
       if job.error is not None:
         raise job.error
-      passed, tail, failures = job.result
+      passed, tail, failures, qualityChecked, qualityFailures = job.result
       appendEvent(self.projectDir, "testBaseline", plan=info["plan"],
                   data={"command": self.config["testCommand"], "commit": info["baseCommit"], "passed": passed,
-                        "failures": failures, "tail": tail})
+                        "failures": failures, "qualityChecked": qualityChecked, "qualityFailures": qualityFailures,
+                        "tail": tail})
     except Exception as error:
       # plan 沒有「等你處理」狀態可以記；基準沒記下來，下一輪會自動重跑
       self.notifyOnce(f"{info['plan']} 的基準測試執行失敗：{error}")
@@ -597,10 +619,11 @@ class Conductor:
     job = info["job"]
     if job.error is not None:
       raise job.error
-    passed, tail, failures = job.result
+    passed, tail, failures, qualityChecked, qualityFailures = job.result
     # verdict 在這裡算好寫進事件：之後重播事件時，結果才不會因為基準或輸出不同而改變
     verdict, newFailures = compareWithBaseline(planState["testBaseline"], passed, failures)
-    self.event("testRun", info, passed=passed, tail=tail, verdict=verdict, newFailures=newFailures)
+    self.event("testRun", info, passed=passed, tail=tail, verdict=verdict, newFailures=newFailures,
+               qualityChecked=qualityChecked, qualityFailures=qualityFailures)
 
   def runTestCommand(self, cwd, onStarted=None):
     command = self.config["testCommand"]
@@ -616,9 +639,11 @@ class Conductor:
       output, _ = process.communicate(timeout=self.timeoutSeconds())
       passed = process.returncode == 0
       failures = [] if passed else failureNames(output)
+      qualityChecked, qualityFailures = qualityResults(output)
     except subprocess.TimeoutExpired:
       # 超時的輸出只有一部分，裡面的失敗名稱不完整，當成分不出名稱
       failures = []
+      qualityChecked, qualityFailures = False, []
       board_agents.killProcessTree(process.pid)
       try:
         output, _ = process.communicate(timeout=outputWaitAfterKillSeconds)
@@ -629,7 +654,7 @@ class Conductor:
         threading.Thread(target=process.communicate, daemon=True).start()
         output = "測試超時（輸出無法取得）"
       passed = False
-    return passed, "\n".join(output.splitlines()[-50:]), failures
+    return passed, "\n".join(output.splitlines()[-50:]), failures, qualityChecked, qualityFailures
 
   def startReviews(self, plans, state):
     for taskState in tasksWithStatus(state, TaskStatus.toReview):
