@@ -9,7 +9,7 @@ import board_core
 import board_git
 from board_core import PlanStatus, TaskStatus
 import conductor as conductorModule
-from conductor import Conductor, compareWithBaseline, failureNames, formatEvent
+from conductor import Conductor, compareWithBaseline, failureNames, formatEvent, qualityResults
 from helpers import fakeConfig, fakeRole, makeEvent, readCalls, runUntil
 
 oneTask = ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |"]
@@ -165,7 +165,7 @@ def test_testBaselineRunsAtBaseCommitBeforeFirstTaskThenIsRemoved(startBoard):
   baseline = eventsOf(conductor, "testBaseline")[0]
   assert baseline["plan"] == "P0001" and baseline["task"] is None
   assert baseline["data"] == {"command": "git rev-parse HEAD", "commit": baseCommit, "passed": True, "failures": [],
-                              "tail": baseCommit}
+                              "qualityChecked": False, "qualityFailures": [], "tail": baseCommit}
   assert conductor.currentState()[1]["plans"]["P0001"]["testBaseline"] == baseline["data"]
   assert noBaselineWorktreeLeft(conductor.projectDir)
 
@@ -253,6 +253,49 @@ def test_sameFailuresAsBaselineStillGoToReview(startBoard, tmp_path):
   assert len(readCalls(scenarioDir, "write")) == 1
   reviewPrompt = readCalls(scenarioDir, "review")[0]["prompt"]
   assert "基準就有" in reviewPrompt and "- tests/test_old.py::test_old" in reviewPrompt
+
+
+qualityOutput = ("512 passed in 3.2s\n"
+                 "PASS conductor.py:55 failureNames C=4 coverage=100.0% CRAP=4.00\n"
+                 "FAIL conductor.py:300 Conductor.mergeOneTask C=16 coverage=90.0% CRAP=16.06\n"
+                 "SKIP conductor.py:10 main (no coverage)\n"
+                 "FAIL board.py:20 missingPackages C=2 coverage=0.0% CRAP=6.00\n"
+                 "FAIL: .quality/report.json\n")
+
+
+def test_qualityFailuresAreRecordedInBaselineAndTestRun(startBoard, tmp_path):
+  body = f"print({qualityOutput!r})\nsys.exit(1)\n"
+  conductor, _ = startBoard(oneTask, testCommand=pythonTestCommand(tmp_path, body))
+  runUntil(conductor, planDone)
+  expected = ["品質門檻 conductor.py::Conductor.mergeOneTask", "品質門檻 board.py::missingPackages"]
+  for event in (eventsOf(conductor, "testBaseline")[0], eventsOf(conductor, "testRun")[0]):
+    assert event["data"]["qualityChecked"] is True
+    assert event["data"]["qualityFailures"] == expected
+
+
+def test_pytestFailureWithoutQualityLinesIsNotChecked(startBoard, tmp_path):
+  body = "print('FAILED tests/test_old.py::test_old - AssertionError')\nprint('FAIL: pytest failed')\nsys.exit(1)\n"
+  conductor, _ = startBoard(oneTask, testCommand=pythonTestCommand(tmp_path, body))
+  runUntil(conductor, planDone)
+  for event in (eventsOf(conductor, "testBaseline")[0], eventsOf(conductor, "testRun")[0]):
+    assert (event["data"]["qualityChecked"], event["data"]["qualityFailures"]) == (False, [])
+
+
+def test_qualityResultsReadPassFailLinesWithoutLineNumbers():
+  assert qualityResults(qualityOutput) == (True, ["品質門檻 conductor.py::Conductor.mergeOneTask",
+                                                  "品質門檻 board.py::missingPackages"])
+  moved = qualityOutput.replace("conductor.py:300", "conductor.py:301")
+  assert qualityResults(moved) == qualityResults(qualityOutput)
+  spacedPath = ("PASS conductor.py:55 failureNames C=4 coverage=100.0% CRAP=4.00\n"
+                "FAIL src/new module.py:20 process C=2 coverage=0.0% CRAP=6.00\n")
+  assert qualityResults(spacedPath) == (True, ["品質門檻 src/new module.py::process"])
+  assert qualityResults(spacedPath.split("\n", 1)[1]) == (True, ["品質門檻 src/new module.py::process"])
+  allPassed = "PASS conductor.py:55 failureNames C=4 coverage=100.0% CRAP=4.00\nPASS: .quality/report.json\n"
+  assert qualityResults(allPassed) == (True, [])
+  # pytest 失敗時品質檢查沒有算，沒有 PASS／FAIL 行
+  assert qualityResults("FAILED tests/test_a.py::test_one - AssertionError\nFAIL: pytest failed\n") == (False, [])
+  # 一般 pytest 輸出，沒有品質檢查
+  assert qualityResults("tests/test_a.py ..\n2 passed in 0.1s\n") == (False, [])
 
 
 def test_unnamedBaselineFailureIsExplainedToReviewer(startBoard, tmp_path):
