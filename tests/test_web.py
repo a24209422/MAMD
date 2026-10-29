@@ -38,9 +38,9 @@ gib = 1024 ** 3
 # 每個測試 server 的網址 → 它收到的請求；和共用瀏覽器同一份，renderUntil 失敗時列出來
 serverRequests = browser.serverRequests
 fakeDashboard = "http://127.0.0.1:1/"
-# 資料讀回來、畫面畫好了：一般頁看 app.state，系統監控頁看監控卡片
+# 資料讀回來、畫面畫好了：一般頁看 app.state，系統監控頁看監控卡片有數值（資料回來前卡片先畫成空的）
 appDrawn = "typeof app !== 'undefined' && app.state !== null"
-monitorDrawn = "document.querySelector('#systemMonitorPage .smon-card') !== null"
+monitorDrawn = "document.querySelector('#systemMonitorPage .smon-card[data-state=\"ok\"]') !== null"
 # 量版面前網頁字型要換好，不然寬度是備用字型的；先讀 offsetWidth 排版，用到的字型才會開始載入
 fontsLoaded = "document.body.offsetWidth > 0 && document.fonts.status === 'loaded'"
 timedOutError = "Page.wait_for_function: Timeout 15000ms exceeded."
@@ -125,12 +125,14 @@ def probeHas(*keys):
           f" const value = JSON.parse(text){path}; return Array.isArray(value) ? value.length > 0 : Boolean(value); }}")
 
 
-def fastForward(monkeypatch, ms, drawn=appDrawn, step=None, screenshot=None):
-  # 量測的計時器不用真的等：分頁先裝 page.clock，等資料畫好（drawn 成立）才快轉 ms 毫秒，之後照真實時間走
+def fastForward(monkeypatch, ms, drawn=appDrawn, step=None, screenshot=None, then=()):
+  # 量測的計時器不用真的等：分頁的時間先停住，計時器不會在資料回來前先跑；等資料畫好（drawn 成立）才快轉 ms 毫秒
+  # then：之後每一段（條件, 毫秒），條件成立才再快轉；全部快轉完才恢復照真實時間走
   # step：每次只快轉這麼多，中間讓頁面處理 hashchange 這類事件；screenshot：取 DOM 前先截圖
+  stages = [(drawn, ms), *then]
   realLoadPage = browser.loadPage
   def loadPage(context, url, ready, viewport):
-    return realLoadPage(ClockContext(context, drawn, ms, step or ms, screenshot), url, ready, viewport)
+    return realLoadPage(ClockContext(context, stages, step, screenshot), url, ready, viewport)
   monkeypatch.setattr(browser, "loadPage", loadPage)
 
 
@@ -141,25 +143,31 @@ class ClockContext:
 
   def new_page(self):
     page = self.context.new_page()
-    page.clock.install()
+    # 載入前就停住時間；之後只有快轉時計時器才會跑
+    now = datetime.now()
+    page.clock.install(time=now)
+    page.clock.pause_at(now + timedelta(seconds=1))
     return ClockPage(page, *self.clockArgs)
 
 
 class ClockPage:
-  # 等 ready 前先快轉計時器；其他操作照原本的 page
-  def __init__(self, page, drawn, ms, step, screenshot):
-    self.page, self.drawn, self.ms, self.step, self.screenshot = page, drawn, ms, step, screenshot
+  # 等 ready 前先一段一段快轉計時器；其他操作照原本的 page
+  def __init__(self, page, stages, step, screenshot):
+    self.page, self.stages, self.step, self.screenshot = page, stages, step, screenshot
 
   def __getattr__(self, name):
     return getattr(self.page, name)
 
   def wait_for_function(self, ready, timeout):
     started = time.monotonic()
-    self.page.wait_for_function(self.drawn, timeout=timeout)
-    for _ in range(0, self.ms, self.step):
-      self.page.clock.run_for(self.step)
-    remaining = timeout - (time.monotonic() - started) * 1000
-    self.page.wait_for_function(ready, timeout=max(remaining, 1000))
+    remaining = lambda: max(timeout - (time.monotonic() - started) * 1000, 1000)
+    for condition, ms in self.stages:
+      self.page.wait_for_function(condition, timeout=remaining())
+      step = self.step or ms
+      for _ in range(0, ms, step):
+        self.page.clock.run_for(step)
+    self.page.clock.resume()
+    self.page.wait_for_function(ready, timeout=remaining())
 
   def content(self):
     if self.screenshot:
@@ -382,7 +390,8 @@ def test_overview_has_main_agents_and_two_children_per_role(dashboard, gitProjec
         document.body.dataset.probe = JSON.stringify(result);
       }, 500);
     }, 1000);""")
-  fastForward(monkeypatch, 1000)
+  # 點下去之後換頁是 hashchange 事件，一小段一小段快轉，中間讓頁面處理
+  fastForward(monkeypatch, 1500, step=50)
   dom = browserPages.renderUntil(dashboard, probeHas("main"), viewport={"width": 1440, "height": 1200})
   probe = readProbe(dom)
   assert probe["main"] == ["writer", "reviewer"]
@@ -539,8 +548,9 @@ def test_tasksPageShowsStatsOfApprovedPlan(dashboard, gitProject, browserPages, 
     const result = {};
     setTimeout(() => { result.pending = read(); selectPlan('P0001'); }, 1500);
     setTimeout(() => { result.approved = read(); document.body.dataset.probe = JSON.stringify(result); }, 3500);""")
-  # 換到 P0001 後要等它的細節讀回來，只快轉到第一個計時器
-  fastForward(monkeypatch, 1500)
+  # P0002 的細節讀回來才快轉到第一個計時器；換到 P0001 後等它的成效畫出來，再快轉到第二個
+  fastForward(monkeypatch, 1500, drawn=f"{appDrawn} && {domHas('橘｜')}",
+              then=[("app.selectedPlan === 'P0001' && !document.querySelector('#planStats').hidden", 2000)])
   probe = readProbe(browserPages.renderUntil(dashboard + "#tasks", probeHas("pending", "plan")))
   assert probe["pending"] == {"plan": "P0002", "hidden": True, "items": []}
   assert probe["approved"]["plan"] == "P0001" and probe["approved"]["hidden"] is False
@@ -623,8 +633,8 @@ def test_consoleSummaryOpensFullPage(dashboard, browserPages, tmp_path, monkeypa
         cards: document.querySelectorAll('#systemMonitorPage .smon-card').length,
       });
     }, 2500);""")
-  # 點下去之後要等監控資料讀回來，只快轉到點擊
-  fastForward(monkeypatch, 1000)
+  # 快轉到點擊；換到完整頁、監控資料讀回來後，再快轉到量測
+  fastForward(monkeypatch, 1000, then=[(monitorDrawn, 1500)])
   dom = browserPages.renderUntil(dashboard + "#console", probeHas("cards"))
   assert readProbe(dom) == {"focusable": True, "hash": "#system-monitor", "page": "system-monitor", "shown": True, "cards": 3}
 
