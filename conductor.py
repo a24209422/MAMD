@@ -64,7 +64,8 @@ def failureNames(output):
   return names
 
 
-qualityLinePattern = re.compile(r"^(PASS|FAIL) (\S+):\d+ (\S+)")
+# 檔案路徑可能有空白；函式名稱沒有空白，後面一定接著「 C=複雜度」
+qualityLinePattern = re.compile(r"^(PASS|FAIL) (.+):\d+ (\S+) C=")
 
 
 def qualityResults(output):

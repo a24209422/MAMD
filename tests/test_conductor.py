@@ -286,6 +286,10 @@ def test_qualityResultsReadPassFailLinesWithoutLineNumbers():
                                                   "品質門檻 board.py::missingPackages"])
   moved = qualityOutput.replace("conductor.py:300", "conductor.py:301")
   assert qualityResults(moved) == qualityResults(qualityOutput)
+  spacedPath = ("PASS conductor.py:55 failureNames C=4 coverage=100.0% CRAP=4.00\n"
+                "FAIL src/new module.py:20 process C=2 coverage=0.0% CRAP=6.00\n")
+  assert qualityResults(spacedPath) == (True, ["品質門檻 src/new module.py::process"])
+  assert qualityResults(spacedPath.split("\n", 1)[1]) == (True, ["品質門檻 src/new module.py::process"])
   allPassed = "PASS conductor.py:55 failureNames C=4 coverage=100.0% CRAP=4.00\nPASS: .quality/report.json\n"
   assert qualityResults(allPassed) == (True, [])
   # pytest 失敗時品質檢查沒有算，沒有 PASS／FAIL 行
