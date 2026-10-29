@@ -332,11 +332,14 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 
 ## 測試
 
+先安裝測試用的套件（Playwright），再跑測試：
+
 ```
+python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-網頁畫面的測試用 Edge（或 Chrome）的無頭模式，JavaScript 語法檢查用 node；找不到就跳過。
+網頁畫面的測試用 Playwright 控制電腦上的 Edge（或 Chrome），整段測試只開一次瀏覽器，每個測試用自己的乾淨分頁，等畫面真的畫好再檢查；用的是電腦上已裝的瀏覽器，不需要另外執行 `playwright install`。找不到 Playwright（沒裝 `requirements-dev.txt`）或找不到 Edge／Chrome 時，網頁畫面的測試會跳過；跳過的原因會列在測試結果的 short test summary。JavaScript 語法檢查用 node，找不到也會跳過。
 
 ## 授權
 
