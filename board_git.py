@@ -45,6 +45,10 @@ def baselineWorktreePath(projectDir, planIdValue):
   return worktreesRoot(projectDir) / f"{planIdValue}-baseline"
 
 
+def mergeTestWorktreePath(projectDir, planIdValue):
+  return worktreesRoot(projectDir) / f"{planIdValue}-mergetest"
+
+
 def headCommit(projectDir):
   return runGit(projectDir, "rev-parse", "HEAD")
 
@@ -90,24 +94,50 @@ def ensureTaskWorktree(projectDir, planIdValue, taskId):
   return path
 
 
-def addBaselineWorktree(projectDir, planIdValue, baseCommit):
-  # 上次沒移除乾淨的基準 worktree 可能留著舊的測試產物，先整個移除再重建
-  removeBaselineWorktree(projectDir, planIdValue)
-  path = baselineWorktreePath(projectDir, planIdValue)
+def addDetachedWorktree(projectDir, path, commit):
+  # 上次沒移除乾淨的暫時 worktree 可能留著舊的測試產物，先整個移除再重建
+  removeDetachedWorktree(projectDir, path)
   path.parent.mkdir(parents=True, exist_ok=True)
-  # detached：基準只是暫時跑測試，不需要分支，也不會留下要清的分支
-  runGit(projectDir, "worktree", "add", "--detach", str(path), baseCommit)
+  # detached：只是暫時跑測試，不需要分支，也不會留下要清的分支
+  runGit(projectDir, "worktree", "add", "--detach", str(path), commit)
   return path
 
 
-def removeBaselineWorktree(projectDir, planIdValue):
-  path = baselineWorktreePath(projectDir, planIdValue)
+def removeDetachedWorktree(projectDir, path):
   if path.exists():
     runGit(projectDir, "worktree", "remove", "--force", str(path), check=False)
   if path.exists():
     # 資料夾還在但已經不是登記中的 worktree（例如被 prune 過），git 不肯移除，只能直接刪
     shutil.rmtree(path)
   runGit(projectDir, "worktree", "prune")
+
+
+def addBaselineWorktree(projectDir, planIdValue, baseCommit):
+  return addDetachedWorktree(projectDir, baselineWorktreePath(projectDir, planIdValue), baseCommit)
+
+
+def removeBaselineWorktree(projectDir, planIdValue):
+  removeDetachedWorktree(projectDir, baselineWorktreePath(projectDir, planIdValue))
+
+
+def addMergeTestWorktree(projectDir, planIdValue, commit):
+  # 不在 plan worktree 跑：測試期間還會合併新任務，測的內容會變，測試產物也會擋住合併
+  return addDetachedWorktree(projectDir, mergeTestWorktreePath(projectDir, planIdValue), commit)
+
+
+def removeMergeTestWorktree(projectDir, planIdValue):
+  removeDetachedWorktree(projectDir, mergeTestWorktreePath(projectDir, planIdValue))
+
+
+def firstParentCommits(projectDir, planIdValue):
+  # 每次合併任務都在 plan 分支的 first-parent 上留下一個 commit；被合併進來的任務 commit 不在這條線上
+  output = runGit(projectDir, "rev-list", "--first-parent", "--reverse", planBranch(planIdValue))
+  return output.splitlines()
+
+
+def fastForwardTaskToPlan(projectDir, planIdValue, taskId):
+  # 合併後測試退回的任務已經合併過，任務分支是 plan 分支的祖先；快轉後修正輪才看得到其他任務的改動
+  runGit(taskWorktreePath(projectDir, planIdValue, taskId), "merge", "--ff-only", planBranch(planIdValue))
 
 
 def cleanWorktree(path):
@@ -224,9 +254,9 @@ def removePlanWorktrees(projectDir, planIdValue):
   root = worktreesRoot(projectDir)
   if root.exists():
     for path in sorted(root.iterdir()):
-      if path == baselineWorktreePath(projectDir, planIdValue):
-        # Alfred 跑基準測試到一半被關掉時會留下來
-        removeBaselineWorktree(projectDir, planIdValue)
+      if path in (baselineWorktreePath(projectDir, planIdValue), mergeTestWorktreePath(projectDir, planIdValue)):
+        # Alfred 跑基準或合併後測試到一半被關掉時會留下來
+        removeDetachedWorktree(projectDir, path)
         removed.append(path.name)
       elif path.name == planIdValue or path.name.startswith(f"{planIdValue}-"):
         runGit(projectDir, "worktree", "remove", "--force", str(path))

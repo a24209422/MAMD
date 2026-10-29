@@ -105,3 +105,9 @@ plan 層級的事件（task 為 null），data 欄位：
 
 - 這份 plan 先做，不依賴 P0010、P0012。P0010、P0012 都會改 conductor.py 的測試流程，而且是照原流程寫的；這份 plan 合併回 main 之後，先依新的程式改寫這兩份再核准：P0010 的沿用來源加上 mergeTestRun（commit、failures、command 欄位已經記下），P0012 的測試名額加上合併後測試。這份 plan 進行中不要核准 P0010、P0012。
 - 這份 plan 和 P0014 都會改 conductor.py；P0014 在這份 plan 合併後再核准，核准前重新盤點品質數字。
+
+## 實作紀錄
+
+- 使用者 2026-10-29 明確要求「直接改，不要經過 MAMD」。由當時的 agent 直接實作與驗證，不經 Alfred 派工，不代替使用者核准或變更 plan 的事件狀態；本文件保留為需求與驗收依據。
+- 實作時補充的細節：對任務選 `decide ... done` 時照原流程直接完成，合併時不帶 verify、不跑合併後測試（跟原流程選 done 會跳過測試與審查一致）。
+- 測試的 `startBoard` 預設照原流程核准（`cmdApprove(..., testTiming=None)`），既有的流程測試不變；合併後測試的情境在 `tests/test_conductor_after_merge.py`，傳 `testTiming="afterMerge"`。

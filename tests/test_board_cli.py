@@ -60,6 +60,7 @@ def test_approveWritesTaskSnapshot(gitProject, writePlan):
   assert approved["data"]["baseCommit"] == board_git.headCommit(gitProject)
   assert [task["id"] for task in approved["data"]["tasks"]] == ["T1", "T2"]
   assert approved["data"]["tasks"][1]["dependsOn"] == ["T1"]
+  assert approved["data"]["testTiming"] == "afterMerge"
 
 
 def test_approveAsksWhenWarningsAndCanCancel(gitProject, writePlan):
@@ -300,7 +301,7 @@ def test_statsOfPlanMatchesReferenceValues(gitProject, writePlan, capsys):
     "寫完次數：6",
     "審查：6 次（通過 5、不通過 1）",
     "第一次審查就通過：4/5",
-    "測試：1 次，失敗 0，退回 0",
+    "測試：1 次，失敗 0，退回 0，沿用 0",
     "寫完後被退回：1/6",
     "你的決定：1（retry 1）",
     "還在等你：0",

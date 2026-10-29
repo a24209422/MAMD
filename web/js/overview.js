@@ -32,6 +32,10 @@ function renderLead(state) {
   const testing = state.tasks.filter(task => task.status === '測試中');
   const testingNote = testing.length
     ? `<p>測試中：${testing.map(task => escapeHtml(`${task.plan} ${task.task}`)).join('、')}</p>` : '';
+  // 合併後才測試的 plan：已經合併、等 Alfred 跑合併後測試；跟「測試中」分開，任務可能還沒輪到測試
+  const merged = state.tasks.filter(task => task.status === '已合併待測試');
+  const mergedNote = merged.length
+    ? `<p>已合併待測試：${merged.map(task => escapeHtml(`${task.plan} ${task.task}`)).join('、')}</p>` : '';
   $('#leadCard').dataset.paused = String(stateKey !== 'run');
   $('#leadCard').innerHTML = `
     <div class="agent-head">
@@ -40,7 +44,7 @@ function renderLead(state) {
       <span class="state" data-state="${stateKey}">${stateLabel}</span>
     </div>
     <div class="lead-body">
-      <div class="task-block"><small>目前任務</small><p>${plans.length ? `進行中 ${plans.length} 份 plan` : '沒有進行中的 plan'}</p>${testingNote}${pauseNote}</div>
+      <div class="task-block"><small>目前任務</small><p>${plans.length ? `進行中 ${plans.length} 份 plan` : '沒有進行中的 plan'}</p>${testingNote}${mergedNote}${pauseNote}</div>
       <div class="meters">${meter('任務進度', percent(done, total), 'progress', `${done}/${total}`)}</div>
     </div>`;
   $('#focusList').innerHTML = plans.length
