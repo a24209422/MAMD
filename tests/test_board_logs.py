@@ -136,6 +136,23 @@ def test_claudeReviewDetailShowsWholeResult(tmp_path):
   assert detail["messages"] == [{"text": json.dumps(verdict, ensure_ascii=False)}]
 
 
+def test_toolTargetPicksFileNameThenCommandThenPattern():
+  assert board_logs.toolTarget({"file_path": "D:/w/P0001-T1/calc.py", "command": "ls"}) == "calc.py"
+  assert board_logs.toolTarget({"command": "pytest -q", "pattern": "def add"}) == "pytest -q"
+  assert board_logs.toolTarget({"file_path": "", "command": "", "pattern": "def add"}) == "def add"
+  assert board_logs.toolTarget({"description": "沒有目標"}) == ""
+  assert board_logs.toolTarget("not a dict") == ""
+  assert board_logs.toolTarget(None) == ""
+
+
+def test_toolResultTextJoinsTextBlocks():
+  assert board_logs.toolResultText("The file has been updated") == "The file has been updated"
+  blocks = [{"type": "text", "text": "第一段"}, "skip", {"type": "image"}, {"type": "text", "text": "第二段"}]
+  assert board_logs.toolResultText(blocks) == "第一段\n\n第二段"
+  assert board_logs.toolResultText(None) == ""
+  assert board_logs.toolResultText({"text": "不是清單"}) == ""
+
+
 def test_codexSummaryShortensLongCommands(tmp_path):
   command = "Set-Content a.txt '" + "x" * 300 + "'\n第二行"
   records = [{"type": "item.completed", "item": {"id": "item_0", "type": "command_execution", "command": command,
