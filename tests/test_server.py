@@ -239,6 +239,78 @@ def test_refusesToStartWithoutConsole(gitProject):
   assert "只能由使用者在終端機啟動" in completed.stdout
 
 
+class FakeHttpServer:
+  server_address = ("127.0.0.1", 9999)
+
+  def __init__(self):
+    self.closed = False
+
+  def serve_forever(self):
+    raise KeyboardInterrupt
+
+  def server_close(self):
+    self.closed = True
+
+
+def test_mainRefusesWithoutConsoleInProcess(gitProject, monkeypatch, capsys):
+  monkeypatch.setattr(board, "isHuman", lambda: False)
+  assert server.main([str(gitProject)]) == 2
+  assert "只能由使用者在終端機啟動" in capsys.readouterr().out
+
+
+def test_mainNeedsExistingProjectFolder(tmp_path, monkeypatch, capsys):
+  monkeypatch.setattr(board, "isHuman", lambda: True)
+  assert server.main([str(tmp_path / "missing")]) == 1
+  assert "找不到專案資料夾" in capsys.readouterr().out
+
+
+def test_mainReportsPortInUse(gitProject, monkeypatch, capsys):
+  monkeypatch.setattr(board, "isHuman", lambda: True)
+  def occupied(projectDir, port, token):
+    raise OSError("in use")
+  monkeypatch.setattr(server, "makeServer", occupied)
+  assert server.main([str(gitProject), "--port", "8800"]) == 1
+  assert "埠 8800 被佔用" in capsys.readouterr().out
+
+
+def test_mainPrintsUrlAndClosesOnCtrlC(gitProject, monkeypatch, capsys):
+  monkeypatch.setattr(board, "isHuman", lambda: True)
+  fake, calls = FakeHttpServer(), []
+  def make(projectDir, port, token):
+    calls.append((projectDir, port, token))
+    return fake
+  monkeypatch.setattr(server, "makeServer", make)
+  assert server.main([str(gitProject)]) == 0
+  out = capsys.readouterr().out
+  [(projectDir, port, urlToken)] = calls
+  assert projectDir == gitProject.resolve() and port == 8765 and len(urlToken) >= 32
+  assert f"儀表板：http://127.0.0.1:9999/#token={urlToken}" in out and "已結束" in out
+  assert fake.closed is True
+
+
+def test_runCommandReturnsBoardErrorMessage(gitProject):
+  dashboard = server.Dashboard(gitProject, token)
+  def fail(projectDir):
+    print("寫到一半")
+    raise board_core.BoardError("指令失敗")
+  assert dashboard.runCommand(fail) == {"ok": False, "message": "指令失敗"}
+  # 出錯後鎖要放掉，下一個寫入才跑得動
+  assert dashboard.runCommand(lambda projectDir: 0) == {"ok": True, "message": ""}
+
+
+def test_modelCommandRejectsBrokenConfig(gitProject):
+  dashboard = server.Dashboard(gitProject, token)
+  configFile = gitProject / ".board" / "config.json"
+  configFile.parent.mkdir(exist_ok=True)
+  configFile.write_text("{壞掉", encoding="utf-8")
+  with pytest.raises(board_core.BoardError, match="config.json 讀不懂"):
+    dashboard.modelCommand("writer", "codex")
+  for command in ["codex", ["codex", 3]]:
+    board_core.writeUserConfig(gitProject, {"writer": {"cli": "codex", "command": command}})
+    with pytest.raises(board_core.BoardError, match="writer.command 要是指令文字陣列"):
+      dashboard.modelCommand("writer", "codex")
+
+
 def test_saveRoleWritesConfigAndRejectsBadInput(running, monkeypatch):
   import board_models
   monkeypatch.setattr(board_models, "discoverModels", lambda *args: [{"id": "gpt-6.1-sol", "efforts": []}])
