@@ -10,7 +10,7 @@ import board_git
 from board_core import PlanStatus, TaskStatus
 import conductor as conductorModule
 from conductor import Conductor, compareWithBaseline, failureNames, formatEvent, qualityResults
-from helpers import fakeConfig, fakeRole, makeEvent, readCalls, runUntil
+from helpers import fakeConfig, fakeRole, fakesDir, makeEvent, readCalls, runUntil
 
 oneTask = ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |"]
 chainedTasks = oneTask + ["| R1 | | D1 | | T2 任務二 | T1 | 驗證二 |"]
@@ -406,12 +406,47 @@ def test_noDispatchUntilBaselineIsRecorded(startBoard, monkeypatch):
   assert types.index("testBaseline") < types.index("taskStarted")
 
 
-def test_noReviewUntilBaselineForChangedCommandIsRecorded(startBoard, monkeypatch):
-  firstConductor, _ = startBoard(oneTask, {"review": {"T1": ["hang", "pass"]}}, testCommand="git --version")
-  runUntil(firstConductor, taskIs(TaskStatus.reviewing))
+def killJobs(conductor):
+  for info in list(conductor.jobs.values()):
+    info["job"].kill()
+
+
+def firstReviewCallRecorded(scenarioDir):
+  # 假 agent 用 write_text 寫紀錄，檔案建立時內容可能還沒寫完；在那時暫停會留下殘缺紀錄，
+  # 所以要能完整解析才算記下，寫入中的讀取失敗（含 Windows 的共用鎖定）都當成還沒好
+  try:
+    json.loads((scenarioDir / "call-review-P0001-T1-1.json").read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return False
+  return True
+
+
+def test_firstReviewCallRecordedNeedsCompleteJson(tmp_path):
+  callPath = tmp_path / "call-review-P0001-T1-1.json"
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_text("", encoding="utf-8")
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_text('{"argv": ["exec"], "prompt": "審', encoding="utf-8")
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_bytes('{"prompt": "審'.encode("utf-8")[:-1])
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_text('{"argv": ["exec"], "prompt": "審查"}', encoding="utf-8")
+  assert firstReviewCallRecorded(tmp_path)
+
+
+def pauseAfterFirstReviewCall(conductor, scenarioDir):
+  runUntil(conductor, taskIs(TaskStatus.reviewing))
+  # 審查中是父程序派工時就寫入的狀態，假 reviewer 要等子程序真的啟動才記下第一次呼叫；
+  # 在那之前暫停，重啟後會再拿到情境裡的第一次 hang
+  runUntil(conductor, lambda state: firstReviewCallRecorded(scenarioDir))
   # 暫停會中斷審查，任務回到待審查
-  board_core.appendEvent(firstConductor.projectDir, "paused", data={"reason": "測試暫停"})
-  runUntil(firstConductor, lambda current: not firstConductor.jobs and taskIs(TaskStatus.toReview)(current))
+  board_core.appendEvent(conductor.projectDir, "paused", data={"reason": "測試暫停"})
+  runUntil(conductor, lambda current: not conductor.jobs and taskIs(TaskStatus.toReview)(current))
+
+
+def test_noReviewUntilBaselineForChangedCommandIsRecorded(startBoard, monkeypatch):
+  firstConductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["hang", "pass"]}}, testCommand="git --version")
+  pauseAfterFirstReviewCall(firstConductor, scenarioDir)
   board_core.appendEvent(firstConductor.projectDir, "resumed")
   lines = []
   restarted = Conductor(firstConductor.projectDir, config=fakeConfig(testCommand="git rev-parse HEAD"), out=lines.append)
@@ -421,19 +456,64 @@ def test_noReviewUntilBaselineForChangedCommandIsRecorded(startBoard, monkeypatc
 
   realBaseline = board_git.addBaselineWorktree
   monkeypatch.setattr(board_git, "addBaselineWorktree", failingBaseline)
-  for _ in range(3):
-    restarted.tick()
-  assert lines.count("P0001 的基準測試 worktree 建立失敗：模擬基準 worktree 失敗") == 1
-  assert len(eventsOf(restarted, "reviewStarted")) == 1
-  assert not restarted.jobs
-  assert restarted.currentState()[1]["tasks"]["P0001/T1"]["status"] == TaskStatus.toReview
-  monkeypatch.setattr(board_git, "addBaselineWorktree", realBaseline)
-  runUntil(restarted, planDone)
+  try:
+    for _ in range(3):
+      restarted.tick()
+    assert lines.count("P0001 的基準測試 worktree 建立失敗：模擬基準 worktree 失敗") == 1
+    assert len(eventsOf(restarted, "reviewStarted")) == 1
+    assert not restarted.jobs
+    assert restarted.currentState()[1]["tasks"]["P0001/T1"]["status"] == TaskStatus.toReview
+    monkeypatch.setattr(board_git, "addBaselineWorktree", realBaseline)
+    runUntil(restarted, planDone)
+  finally:
+    # 重啟的 conductor 不在 fixture 的清理清單裡，失敗時要自己結束它的子程序
+    killJobs(restarted)
   events = board_core.readEvents(restarted.projectDir)
   baselines = [index for index, event in enumerate(events) if event["type"] == "testBaseline"]
   reviews = [index for index, event in enumerate(events) if event["type"] == "reviewStarted"]
   assert [events[index]["data"]["command"] for index in baselines] == ["git --version", "git rev-parse HEAD"]
   assert baselines[1] < reviews[1]
+
+
+gatedReviewerScript = """import runpy
+import sys
+import time
+from pathlib import Path
+
+gate = Path(sys.argv.pop(1))
+fakeCodex = sys.argv.pop(1)
+# 有上限的等待，測試忘了開閘時也不會留下永遠不結束的子程序
+deadline = time.time() + 60
+while not gate.exists() and time.time() < deadline:
+  time.sleep(0.02)
+sys.argv[0] = fakeCodex
+runpy.run_path(fakeCodex, run_name="__main__")
+"""
+
+
+def gatedReviewer(scriptDir, gatePath):
+  # 子程序啟動後先停在閘門前，還沒遞增呼叫次數，用來穩定重現「已派工但 reviewer 尚未初始化」的時間窗
+  scriptPath = scriptDir / "gated_reviewer.py"
+  scriptPath.write_text(gatedReviewerScript, encoding="utf-8")
+  return {"cli": "codex", "command": [sys.executable, str(scriptPath), str(gatePath), str(fakesDir / "fake_codex.py")]}
+
+
+def test_pauseAfterDelayedReviewerStartRecordsFirstCall(startBoard, tmp_path):
+  gatePath = tmp_path / "reviewer-gate"
+  firstConductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["hang", "pass"]}},
+                                           reviewer=gatedReviewer(tmp_path, gatePath))
+  runUntil(firstConductor, taskIs(TaskStatus.reviewing))
+  assert not (scenarioDir / "call-review-P0001-T1-1.json").exists()
+  gatePath.touch()
+  pauseAfterFirstReviewCall(firstConductor, scenarioDir)
+  board_core.appendEvent(firstConductor.projectDir, "resumed")
+  restarted = Conductor(firstConductor.projectDir, config=fakeConfig(), out=lambda line: None)
+  try:
+    runUntil(restarted, planDone)
+  finally:
+    killJobs(restarted)
+  # 第一次 hang 已被暫停中斷，重啟只多一次呼叫，用的是情境裡的 pass
+  assert len(readCalls(scenarioDir, "review")) == 2
 
 
 def test_tddCrapAddsStepsToPromptsAndAllowsPytest(startBoard):
