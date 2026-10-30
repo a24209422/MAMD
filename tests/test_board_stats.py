@@ -237,6 +237,16 @@ def test_oldEventsWithoutCliUseClaudeForWriter():
                              "reviewer": [{"cli": None, "model": None, "reasoningEffort": None}]}
 
 
+def test_noApprovedPlanGivesEmptyTotal():
+  timeline = Timeline()
+  timeline.add("planSubmitted")
+  total = statsOf(timeline.events)["total"]
+  assert total["tasks"] == {"done": 0, "abandoned": 0, "total": 0}
+  assert total["averageRounds"] is None
+  assert total["firstReviewPassed"] == {"passed": 0, "reviewed": 0}
+  assert total["duration"] == {"seconds": 0, "inProgress": False}
+
+
 def mergeTestRun(timeline, outcomes, passed, reused=False):
   timeline.add("mergeTestRun", passed=passed, reused=reused, covers=list(outcomes),
                outcomes={taskId: {"result": result, "names": []} for taskId, result in outcomes.items()})
