@@ -89,7 +89,7 @@ def test_p0001MatchesReferenceValues():
   assert stats["written"] == 6
   assert stats["reviews"] == {"total": 6, "passed": 5, "failed": 1}
   assert stats["firstReviewPassed"] == {"passed": 4, "reviewed": 5}
-  assert stats["tests"] == {"runs": 1, "failed": 0, "returned": 0}
+  assert stats["tests"] == {"runs": 1, "failed": 0, "returned": 0, "reused": 0}
   assert stats["returnedAfterWrite"] == {"returned": 1, "written": 6}
   assert stats["decisions"] == {"total": 1, "retry": 1, "done": 0, "abandon": 0}
   assert stats["waiting"] == 0
@@ -113,7 +113,7 @@ def test_oldTestRunWithoutVerdictCountsFailureButNotReturn():
   timeline.merge("T1")
   timeline.add("planCompleted")
   stats = statsOf(timeline.events)["plans"]["P0001"]
-  assert stats["tests"] == {"runs": 1, "failed": 1, "returned": 0}
+  assert stats["tests"] == {"runs": 1, "failed": 1, "returned": 0, "reused": 0}
   assert stats["returnedAfterWrite"] == {"returned": 0, "written": 1}
 
 
@@ -127,7 +127,7 @@ def test_newFailureCountsAsReturn():
   timeline.review("T1", 2)
   timeline.merge("T1")
   stats = statsOf(timeline.events)["plans"]["P0001"]
-  assert stats["tests"] == {"runs": 2, "failed": 2, "returned": 1}
+  assert stats["tests"] == {"runs": 2, "failed": 2, "returned": 1, "reused": 0}
   assert stats["returnedAfterWrite"] == {"returned": 1, "written": 2}
   assert stats["averageRounds"] == 2
   assert stats["firstReviewPassed"] == {"passed": 1, "reviewed": 1}
@@ -235,3 +235,26 @@ def test_oldEventsWithoutCliUseClaudeForWriter():
   stats = planStats(events, deriveState(events, makePlans("P0001"), testConfig), "P0001")
   assert stats["models"] == {"writer": [{"cli": "claude", "model": None, "reasoningEffort": None}],
                              "reviewer": [{"cli": None, "model": None, "reasoningEffort": None}]}
+
+
+def mergeTestRun(timeline, outcomes, passed, reused=False):
+  timeline.add("mergeTestRun", passed=passed, reused=reused, covers=list(outcomes),
+               outcomes={taskId: {"result": result, "names": []} for taskId, result in outcomes.items()})
+
+
+def test_mergeTestCountsOncePerRunReturnsPerTaskAndReusedSeparately():
+  timeline = Timeline()
+  timeline.approve([("T1", []), ("T2", []), ("T3", [])])
+  for taskId in ("T1", "T2", "T3"):
+    timeline.write(taskId, 1)
+    timeline.review(taskId, 1)
+    timeline.merge(taskId)
+  mergeTestRun(timeline, {"T1": "verified", "T2": "verified", "T3": "verified"}, passed=True)
+  stats = statsOf(timeline.events)["plans"]["P0001"]
+  assert stats["tests"] == {"runs": 1, "failed": 0, "returned": 0, "reused": 0}
+  mergeTestRun(timeline, {"T1": "split", "T2": "split"}, passed=False)
+  mergeTestRun(timeline, {"T1": "stillFailing"}, passed=False)
+  mergeTestRun(timeline, {"T2": "verified"}, passed=False, reused=True)
+  stats = statsOf(timeline.events)["plans"]["P0001"]
+  assert stats["tests"] == {"runs": 3, "failed": 2, "returned": 1, "reused": 1}
+  assert stats["returnedAfterWrite"] == {"returned": 1, "written": 3}

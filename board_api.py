@@ -278,7 +278,8 @@ def taskDiffView(projectDir, planIdValue, taskId):
     return None
   view = {"base": None, "stat": "", "diff": "", "pending": "", "truncated": False, "message": ""}
   mergedCommit = mergedCommitOf(snapshot["events"], planIdValue, taskId)
-  if mergedCommit:
+  # 合併後測試退回的修正輪還在任務分支上改，看上一次的合併會看不到這一輪的改動
+  if mergedCommit and taskState["status"] in (TaskStatus.mergedUntested, TaskStatus.done):
     # 合併後任務分支已經在 plan 分支裡，直接比對分支會是空的，改看合併 commit 帶進來的改動
     view["base"], rangeArgs = "merge", [f"{mergedCommit}^1", mergedCommit]
   elif board_git.branchExists(projectDir, board_git.taskBranch(planIdValue, taskId)):

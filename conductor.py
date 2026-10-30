@@ -39,6 +39,8 @@ eventLabels = {
   "taskWritten": "寫完並 commit",
   "taskBlocked": "回報卡住",
   "testRun": "跑測試",
+  "mergeTestRun": "合併後測試",
+  "mergeTestSkipped": "略過合併後測試",
   "reviewStarted": "開始審查",
   "reviewPassed": "審查通過",
   "reviewFailed": "審查不通過",
@@ -124,6 +126,36 @@ def compareWithBaseline(baseline, passed, failures, qualityChecked=False, qualit
   return ("preexisting", []) if verdict == "passed" else (verdict, newFailures)
 
 
+def mergeTestOutcome(predecessor, record, covers, mergeFailures, splitCommit=None, staleSplit=False):
+  """合併後測試的判定（plan「共同契約」的「判定」）；回傳要寫進 mergeTestRun 的欄位。"""
+  verdict, newFailures = compareWithBaseline(predecessor, record["passed"], record["failures"],
+                                             record["qualityChecked"], record["qualityFailures"])
+  hadSplit = bool(splitCommit) or staleSplit
+  if verdict == "unknown" or (verdict == "newFailure" and not newFailures):
+    # 分不出是哪些失敗，不能自動退回任何任務；這筆也不當之後的比較對象
+    outcomes = {taskId: {"result": "unknown", "names": []} for taskId in covers}
+    return {"verdict": verdict, "newFailures": newFailures, "outcomes": outcomes, "advance": False,
+            "split": "clear" if hadSplit else None}
+  if verdict == "newFailure" and len(covers) > 1:
+    # 涵蓋好幾次合併：先不退回，照合併順序逐一測，找出從哪次合併開始失敗
+    outcomes = {taskId: {"result": "split", "names": []} for taskId in covers}
+    return {"verdict": verdict, "newFailures": newFailures, "outcomes": outcomes, "advance": False, "split": "start"}
+  names = set(record["failures"]) | set(record["qualityFailures"])
+  outcomes = {}
+  for taskId in covers:
+    still = [name for name in mergeFailures.get(taskId, []) if name in names]
+    if still:
+      extra = [name for name in newFailures if name not in still] if verdict == "newFailure" else []
+      outcomes[taskId] = {"result": "stillFailing", "names": still + extra}
+    elif verdict == "newFailure":
+      outcomes[taskId] = {"result": "newFailure", "names": list(newFailures)}
+    else:
+      outcomes[taskId] = {"result": "verified", "names": []}
+  reachedSplit = bool(splitCommit) and record["commit"] == splitCommit
+  return {"verdict": verdict, "newFailures": newFailures, "outcomes": outcomes, "advance": True,
+          "split": "clear" if reachedSplit or staleSplit else None}
+
+
 class BackgroundTestJob:
   """在背景執行緒跑任務的測試；結果留給主執行緒的 collectFinishedJobs 寫事件，事件只由主執行緒寫。"""
 
@@ -169,6 +201,23 @@ class BackgroundTestJob:
       board_agents.killProcessTree(process.pid)
 
 
+def reusedFromText(source):
+  who = " ".join(part for part in (source.get("plan"), source.get("task")) if part)
+  testKind = {"baseline": "基準測試", "mergeTestRun": "合併後測試"}.get(source.get("kind"), "測試")
+  return f"沿用 {who} 的{testKind}結果"
+
+
+def testDetails(event, data):
+  details = ["通過" if data.get("passed") else "失敗"]
+  if data.get("reusedFrom"):
+    details.append(reusedFromText(data["reusedFrom"]))
+  if event["type"] == "mergeTestRun":
+    details.append("涵蓋 " + "、".join(data.get("covers") or []))
+    if data.get("reused"):
+      details.append("沿用同一個 commit 的結果")
+  return details
+
+
 def formatEvent(event):
   timeText = (event.get("time") or "")[11:19]
   who = " ".join(part for part in (event.get("plan"), event.get("task"), event.get("agent")) if part)
@@ -178,8 +227,8 @@ def formatEvent(event):
     details.append(f"第 {event['round']} 輪")
   if event["type"] == "reviewFailed":
     details.append(f"必改 {data.get('mustFix', 0)} 條")
-  if event["type"] in ("testRun", "testBaseline"):
-    details.append("通過" if data.get("passed") else "失敗")
+  if event["type"] in ("testRun", "testBaseline", "mergeTestRun"):
+    details += testDetails(event, data)
   if data.get("mode") == "resolve":
     details.append("解合併衝突")
   for key in ("reason", "action", "note"):
@@ -194,6 +243,37 @@ def baselineKey(planIdValue):
   return f"{planIdValue}/baseline"
 
 
+def mergeTestKey(planIdValue):
+  return f"{planIdValue}/mergetest"
+
+
+# 任務測試與合併後測試都要有被測的 commit、完整失敗名單和指令，才能拿來當基準
+reusableTestRunFields = ("commit", "failures", "command")
+
+
+def baselineReuseCandidates(events, command):
+  """可以沿用成基準的 (種類, 事件)，新的在前；不論來源 plan 的狀態。"""
+  candidates = []
+  for event in reversed(events):
+    data = event.get("data") or {}
+    if event["type"] == "testBaseline":
+      kind = "baseline"
+    elif event["type"] in ("testRun", "mergeTestRun") and all(field in data for field in reusableTestRunFields):
+      kind = event["type"]
+    else:
+      continue
+    # 指令不同，結果就不能比
+    if data.get("commit") and data.get("command") == command:
+      candidates.append((kind, event))
+  return candidates
+
+
+# 合併後測試的結果欄位；逐一測沿用同一個 commit 的結果時照抄這些
+mergeTestRecordFields = ("commit", "command", "passed", "failures", "qualityChecked", "qualityFailures", "tail")
+# 背景跑完整測試、跑完要移除暫時 worktree 的 job
+detachedTestKinds = ("baseline", "mergeTest")
+
+
 class Conductor:
   def __init__(self, projectDir, config=None, out=print):
     self.projectDir = Path(projectDir).resolve()
@@ -204,6 +284,7 @@ class Conductor:
     self.jobs = {}
     self.recovered = False
     self.notified = set()
+    self.onlyPlansCache = {}
     # 啟動前的歷史事件不重印，終端機只顯示這次執行期間發生的事
     self.printedCount = len(readEvents(self.projectDir))
     self.roles = {role: self.roleLaunch(roleSpec(self.config, role)) for role in roleNames}
@@ -285,13 +366,16 @@ class Conductor:
     self.collectFinishedJobs(plans, state)
     plans, state = self.currentState()
     if not state["paused"]:
+      # 基準先拿測試名額：基準沒記下來前整份 plan 不派工
+      self.runTestBaselines(state)
+      plans, state = self.currentState()
       self.startTests(state)
     self.ensurePlanWorktrees(state)
     self.mergeReadyTasks(state)
     plans, state = self.currentState()
     self.completeFinishedPlans(state)
     if not state["paused"]:
-      self.runTestBaselines(state)
+      self.startMergeTests(state)
       plans, state = self.currentState()
       self.startReviews(plans, state)
       self.startWrites(plans, state)
@@ -319,19 +403,19 @@ class Conductor:
       info = self.jobs.get(key)
       if info is None:
         continue
-      isTest = info["kind"] in ("test", "baseline")
+      isTest = info["kind"] in ("test", *detachedTestKinds)
       finished = info["job"].poll() if isTest else info["job"].process.poll() is not None
-      if recordInterruption and finished and info["kind"] != "baseline":
+      if recordInterruption and finished and info["kind"] not in detachedTestKinds:
         # 已經自己結束的 agent 可能寫好了成果，留給 collectFinishedJobs 照常處理，暫停時才不會丟掉
-        # 基準不留：Ctrl+C 退出後沒有下一輪收集，worktree 會留著；丟掉結果只是之後重跑
+        # 基準與合併後測試不留：Ctrl+C 退出後沒有下一輪收集，worktree 會留著；丟掉結果只是之後重跑
         continue
       del self.jobs[key]
       info["job"].kill()
       info["job"].poll()
-      if info["kind"] == "baseline":
+      if info["kind"] in detachedTestKinds:
         # Windows 上測試程式還沒完全結束時，它的工作目錄刪不掉；等背景執行緒收完再移除
         info["job"].wait(outputWaitAfterKillSeconds)
-        self.removeBaselineWorktree(info["plan"])
+        self.removeDetachedWorktree(info)
       # 測試不記中斷：狀態留在測試中，繼續或重開 Alfred 後 startTests 會重跑；基準沒記下來，之後會從頭重跑
       elif recordInterruption and not isTest:
         self.event("taskInterrupted", info, stage=info["kind"])
@@ -342,7 +426,7 @@ class Conductor:
     self.stopJobs(keys, recordInterruption=False)
 
   def jobInactive(self, state, key, info):
-    if info["kind"] == "baseline":
+    if info["kind"] in detachedTestKinds:
       return state["plans"].get(info["plan"], {}).get("status") != PlanStatus.active
     return state["tasks"].get(key, {}).get("status") == TaskStatus.abandoned
 
@@ -377,6 +461,9 @@ class Conductor:
       if info["kind"] == "baseline":
         self.finishTestBaseline(info)
         continue
+      if info["kind"] == "mergeTest":
+        self.finishMergeTest(info)
+        continue
       try:
         if info["kind"] == "write":
           self.finishWrite(info)
@@ -410,10 +497,55 @@ class Conductor:
     return baseline is None or baseline.get("command") != command
 
   def runTestBaselines(self, state):
+    candidates = None
     for planState in state["plans"].values():
       key = baselineKey(planState["id"])
-      if planState["status"] == PlanStatus.active and key not in self.jobs and self.needsTestBaseline(planState):
+      if planState["status"] != PlanStatus.active or key in self.jobs or not self.needsTestBaseline(planState):
+        continue
+      if candidates is None:
+        # 有 plan 要基準時才讀整份事件紀錄
+        candidates = baselineReuseCandidates(readEvents(self.projectDir), self.config["testCommand"])
+      source = next(((kind, event) for kind, event in candidates
+                     if self.onlyPlansChanged(event["data"]["commit"], planState["baseCommit"])), None)
+      if source is not None:
+        # 沿用不跑測試，不佔測試名額
+        self.reuseTestBaseline(planState, *source)
+      elif not self.waitsForRunningBaseline(planState) and self.freeTestSlots() > 0:
         self.startTestBaseline(planState, key)
+
+  def freeTestSlots(self):
+    # 基準、任務測試和合併後測試都是完整測試，合計不超過 maxParallelTests；名額滿了留到之後的 tick
+    running = sum(1 for info in self.jobs.values() if info["kind"] in ("test", *detachedTestKinds))
+    return self.config.get("maxParallelTests", defaultConfig["maxParallelTests"]) - running
+
+  def onlyPlansChanged(self, fromCommit, toCommit):
+    # tests/ 不讀 repo 的 plans/，只差 plan 檔時測試結果不會不同；commit 內容不會變，結果可以一直留著
+    key = (fromCommit, toCommit)
+    if key not in self.onlyPlansCache:
+      try:
+        paths = board_git.changedPaths(self.projectDir, fromCommit, toCommit)
+      except Exception:
+        # 例如來源的 commit 已經不在了：不能確定程式碼相同，就不沿用，照原本流程自己跑
+        return False
+      self.onlyPlansCache[key] = all(path.startswith("plans/") for path in paths)
+    return self.onlyPlansCache[key]
+
+  def waitsForRunningBaseline(self, planState):
+    # 另一份 plan 正在跑程式碼相同的基準：這一輪先不啟動，等它記下來再沿用，不同時跑兩份完整測試
+    return any(info["kind"] == "baseline" and info["plan"] != planState["id"]
+               and self.onlyPlansChanged(info["baseCommit"], planState["baseCommit"])
+               for info in self.jobs.values())
+
+  def reuseTestBaseline(self, planState, kind, event):
+    data = event["data"]
+    # 不建立基準 worktree、不跑測試；commit 記這份 plan 自己的 baseCommit，來源另外記在 reusedFrom
+    appendEvent(self.projectDir, "testBaseline", plan=planState["id"],
+                data={"command": self.config["testCommand"], "commit": planState["baseCommit"],
+                      "passed": bool(data.get("passed")), "failures": list(data.get("failures") or []),
+                      "qualityChecked": bool(data.get("qualityChecked")),
+                      "qualityFailures": list(data.get("qualityFailures") or []), "tail": data.get("tail", ""),
+                      "reusedFrom": {"kind": kind, "plan": event.get("plan"), "task": event.get("task"),
+                                     "commit": data["commit"]}})
 
   def startTestBaseline(self, planState, key):
     planIdValue, baseCommit = planState["id"], planState["baseCommit"]
@@ -451,6 +583,117 @@ class Conductor:
       # 結果已經記下來，不能因為移除失敗而每一輪重跑整套測試；下次建立前會先移除，cleanup 也會清掉
       self.notifyOnce(f"{planIdValue} 的基準測試 worktree 移除失敗：{error}")
 
+  def removeMergeTestWorktree(self, planIdValue):
+    try:
+      board_git.removeMergeTestWorktree(self.projectDir, planIdValue)
+    except Exception as error:
+      # 下次建立前會先移除，cleanup 也會清掉
+      self.notifyOnce(f"{planIdValue} 的合併後測試 worktree 移除失敗：{error}")
+
+  def removeDetachedWorktree(self, info):
+    if info["kind"] == "baseline":
+      self.removeBaselineWorktree(info["plan"])
+    else:
+      self.removeMergeTestWorktree(info["plan"])
+
+  def runsMergeTests(self, planState):
+    return (planState["testTiming"] == "afterMerge" and bool(self.config.get("testCommand"))
+            and not self.config.get("skipTests", False))
+
+  def startMergeTests(self, state):
+    for planState in state["plans"].values():
+      key = mergeTestKey(planState["id"])
+      if planState["status"] != PlanStatus.active or key in self.jobs or planState["testTiming"] != "afterMerge":
+        continue
+      if not self.runsMergeTests(planState):
+        self.skipMergeTests(planState, state)
+        continue
+      if self.needsTestBaseline(planState):
+        # 第一次合併後測試要跟基準比；testCommand 改掉後也要等新的基準
+        continue
+      tasks = [taskState for taskState in state["tasks"].values() if taskState["plan"] == planState["id"]]
+      if any(taskState["status"] == TaskStatus.needsYou and (taskState["needs"] or {}).get("kind") == "mergeTest"
+             for taskState in tasks):
+        # 分不出結果的那次等你決定；先測後面的合併，範圍會包含它的改動，可能算錯是誰造成的
+        continue
+      pending = [taskState for taskState in tasks if taskState["status"] == TaskStatus.mergedUntested]
+      if pending:
+        try:
+          self.startMergeTest(planState, pending, key)
+        except Exception as error:
+          # plan 沒有「等你處理」狀態可以記；下一輪會自動再試
+          self.notifyOnce(f"{planState['id']} 的合併後測試無法開始：{error}")
+
+  def skipMergeTests(self, planState, state):
+    # 合併後才把測試關掉時，已合併待測試的任務沒有測試可等；記下來讓重播也得到同樣結果
+    covers = [taskState["task"] for taskState in state["tasks"].values()
+              if taskState["plan"] == planState["id"] and taskState["status"] == TaskStatus.mergedUntested]
+    if covers:
+      appendEvent(self.projectDir, "mergeTestSkipped", plan=planState["id"],
+                  data={"covers": covers, "reason": "testCommand 沒有設定或 skipTests 為 true"})
+
+  def mergeTestPredecessor(self, planState):
+    lastTested = planState["mergeTest"]["lastTested"]
+    # testCommand 改掉後，舊指令的結果不能拿來比，改跟重跑的基準比
+    if lastTested and lastTested.get("command") == self.config["testCommand"]:
+      return lastTested
+    return planState["testBaseline"]
+
+  def startMergeTest(self, planState, pending, key):
+    planIdValue = planState["id"]
+    commits = board_git.firstParentCommits(self.projectDir, planIdValue)
+    position = {commit: index for index, commit in enumerate(commits)}
+    pending = sorted(pending, key=lambda taskState: position.get(taskState["mergedCommit"], len(commits)))
+    split = planState["mergeTest"]["split"]
+    first = position.get(pending[0]["mergedCommit"], len(commits))
+    splitUsable = bool(split) and split.get("command") == self.config["testCommand"] \
+      and split.get("commit") in position and first <= position[split["commit"]]
+    info = {"kind": "mergeTest", "plan": planIdValue, "task": None, "agent": None,
+            "predecessor": self.mergeTestPredecessor(planState),
+            "splitCommit": split["commit"] if splitUsable else None, "staleSplit": bool(split) and not splitUsable}
+    if splitUsable:
+      # 逐一測：照合併順序一次只測一個任務的合併 commit
+      info["commit"], info["covers"] = pending[0]["mergedCommit"], [pending[0]["task"]]
+    else:
+      info["commit"], info["covers"] = commits[-1], [taskState["task"] for taskState in pending]
+    info["mergeFailures"] = {taskState["task"]: list(taskState["mergeFailures"]) for taskState in pending}
+    if splitUsable and info["commit"] == split["commit"]:
+      # 這個 commit 就是一開始一起測的那次，結果已經有了，不必重跑
+      self.writeMergeTestRun(info, {field: split.get(field) for field in mergeTestRecordFields}, reused=True)
+      return
+    if self.freeTestSlots() <= 0:
+      # 名額滿了先不跑，任務維持已合併待測試，留到之後的 tick
+      return
+    worktree = board_git.addMergeTestWorktree(self.projectDir, planIdValue, info["commit"])
+    info["job"] = BackgroundTestJob(self.runTestCommand, worktree).start()
+    self.jobs[key] = info
+
+  def finishMergeTest(self, info):
+    job = info["job"]
+    try:
+      if job.error is not None:
+        raise job.error
+      passed, tail, failures, qualityChecked, qualityFailures = job.result
+      record = {"commit": info["commit"], "command": self.config["testCommand"], "passed": passed,
+                "failures": failures, "qualityChecked": qualityChecked, "qualityFailures": qualityFailures,
+                "tail": tail}
+      self.writeMergeTestRun(info, record, reused=False)
+    except BoardError:
+      raise
+    except Exception as error:
+      # 結果沒記下來，任務還是已合併待測試，下一輪會自動重跑
+      self.notifyOnce(f"{info['plan']} 的合併後測試執行失敗：{error}")
+    finally:
+      self.removeMergeTestWorktree(info["plan"])
+
+  def writeMergeTestRun(self, info, record, reused):
+    # 結果在這裡算好寫進事件：之後重播事件時，結果才不會因為程式或設定改了而不同
+    outcome = mergeTestOutcome(info["predecessor"], record, info["covers"], info["mergeFailures"],
+                               info["splitCommit"], info["staleSplit"])
+    appendEvent(self.projectDir, "mergeTestRun", plan=info["plan"],
+                data={**record, "comparedTo": (info["predecessor"] or {}).get("commit"), "covers": info["covers"],
+                      "reused": reused, **outcome})
+
   def startWrites(self, plans, state):
     for taskState in readyTasks(state):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
@@ -482,7 +725,7 @@ class Conductor:
     cli, model = launch["spec"]["cli"], launch["spec"]["model"]
     info = {"kind": "write", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
             "agent": lane, "text": taskState["text"], "mode": "resolve" if taskState["resolving"] else "write",
-            "cli": cli, "model": model, "launch": launch}
+            "cli": cli, "model": model, "launch": launch, "afterMerge": taskState["testAfterMerge"]}
     # 換了 CLI，上一輪的對話接不回來；換了模型，不確定接續時能不能換，所以也開新對話
     resume, info["sessionId"] = self.writerSession(taskState, cli, model)
     cleanRemerge = False
@@ -490,6 +733,9 @@ class Conductor:
       worktree = board_git.ensureTaskWorktree(self.projectDir, info["plan"], info["task"])
       if taskState["needsClean"]:
         board_git.cleanWorktree(worktree)
+      if taskState["mergeFix"]:
+        # 合併後測試退回：從最新的 plan 分支修，才重現得了跟其他任務合在一起的失敗
+        board_git.fastForwardTaskToPlan(self.projectDir, info["plan"], info["task"])
       if info["mode"] == "resolve":
         info["conflicts"] = board_git.mergePlanIntoTask(self.projectDir, info["plan"], info["task"],
                                                         f"{info['plan']} {info['task']} 合併最新的 plan 分支")
@@ -508,7 +754,7 @@ class Conductor:
       # 最新的 plan 分支合併進來沒有衝突（例如你已經在任務的 worktree 處理過），不必叫寫程式的 agent，直接測試、審查
       info["agent"] = None
       self.event("taskWritten", info, commit=board_git.headCommit(worktree), summary="合併最新的 plan 分支，沒有衝突",
-                 mode="resolve", conflicts=[], testing=bool(self.config["testCommand"]))
+                 mode="resolve", conflicts=[], testing=self.testsBeforeReview(info))
       return
     # 先登記再寫事件：事件寫入失敗時 agent 不會變成沒人管的孤兒
     key = taskKey(info["plan"], info["task"])
@@ -520,6 +766,15 @@ class Conductor:
       self.jobs.pop(key, None)
       info["job"].kill()
       raise
+
+  def testsBeforeReview(self, info):
+    # 合併後才測試的 plan 寫完直接送審；原流程有測試指令時先進測試中
+    return bool(self.config["testCommand"]) and not info.get("afterMerge")
+
+  def verifyAfterMerge(self, taskState):
+    # 你選「完成」的任務照原流程直接完成，不再跑合併後測試
+    return (taskState["testAfterMerge"] and bool(self.config.get("testCommand"))
+            and not self.config.get("skipTests", False) and not taskState["userDone"])
 
   def writerSession(self, taskState, cli, model):
     resume = bool(taskState["resumable"] and taskState["sessionId"] and taskState["sessionCli"] == cli
@@ -539,11 +794,11 @@ class Conductor:
     testCommand, pythonCommand = self.writerCommands(info["cli"])
     if info["mode"] == "resolve":
       return buildResolvePrompt(plan, info["task"], info["round"], info["conflicts"], taskState["userNote"],
-                                testCommand, self.config.get("skipTests", False))
+                                testCommand, self.config.get("skipTests", False), afterMerge=info["afterMerge"])
     return buildWritePrompt(plan, info["task"], info["round"], self.readReview(taskState["lastReviewNotes"]),
                             taskState["userNote"], testCommand if self.config.get("tddCrap") else "", info["cli"],
                             testCommand, self.config.get("skipTests", False), self.config.get("tddSkill"), pythonCommand,
-                            lastTest=taskState["lastTest"])
+                            lastTest=taskState["lastTest"], afterMerge=info["afterMerge"])
 
   def writeLaunch(self, info, worktree, prompt, resume):
     launch = info["launch"]
@@ -619,22 +874,38 @@ class Conductor:
       return
     # 有測試指令時先進測試中，由 startTests 在背景跑，不擋其他任務
     self.event("taskWritten", info, commit=commit, summary=result["summary"], mode=info["mode"],
-               conflicts=info.get("conflicts", []), testing=bool(self.config["testCommand"]), **session)
+               conflicts=info.get("conflicts", []), testing=self.testsBeforeReview(info), **session)
 
   def startTests(self, state):
     if not self.config["testCommand"]:
       return
-    # 測試不佔寫程式、審查的名額，也不限同時數量：同時進行的任務數已經被寫程式的名額限制住
-    for taskState in tasksWithStatus(state, TaskStatus.testing):
-      key = taskKey(taskState["plan"], taskState["task"])
-      planState = state["plans"][taskState["plan"]]
-      if key in self.jobs or planState["status"] != PlanStatus.active or self.needsTestBaseline(planState):
-        continue
-      info = {"kind": "test", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
-              "agent": taskState["agent"]}
-      worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
-      info["job"] = BackgroundTestJob(self.runTestCommand, worktree).start()
-      self.jobs[key] = info
+    # 測試不佔寫程式、審查的名額；同時跑的完整測試數由 maxParallelTests 限制，等待中的任務狀態維持測試中、不寫事件
+    waiting = [taskState for taskState in tasksWithStatus(state, TaskStatus.testing)
+               if taskKey(taskState["plan"], taskState["task"]) not in self.jobs
+               and not self.needsTestBaseline(state["plans"][taskState["plan"]])]
+    slots = self.freeTestSlots()
+    if not waiting or slots <= 0:
+      return
+    for taskState in self.inTestingOrder(waiting)[:slots]:
+      self.startTest(taskState)
+
+  def inTestingOrder(self, tasks):
+    # 先進測試中的先測：看最後一次 taskWritten 在事件紀錄裡的位置，時間只到秒，同一秒寫完的也分得出先後
+    written = {}
+    for index, event in enumerate(readEvents(self.projectDir)):
+      if event["type"] == "taskWritten":
+        written[taskKey(event.get("plan"), event.get("task"))] = index
+    return sorted(tasks, key=lambda taskState: written.get(taskKey(taskState["plan"], taskState["task"]), -1))
+
+  def startTest(self, taskState):
+    info = {"kind": "test", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
+            "agent": taskState["agent"]}
+    worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
+    # 記下被測的 commit 和指令：之後程式碼相同時才能沿用這次的結果
+    info["commit"] = board_git.headCommit(worktree)
+    info["command"] = self.config["testCommand"]
+    info["job"] = BackgroundTestJob(self.runTestCommand, worktree).start()
+    self.jobs[taskKey(info["plan"], info["task"])] = info
 
   def finishTests(self, planState, info):
     job = info["job"]
@@ -644,7 +915,8 @@ class Conductor:
     # verdict 在這裡算好寫進事件：之後重播事件時，結果才不會因為基準或輸出不同而改變
     verdict, newFailures = compareWithBaseline(planState["testBaseline"], passed, failures, qualityChecked, qualityFailures)
     self.event("testRun", info, passed=passed, tail=tail, verdict=verdict, newFailures=newFailures,
-               qualityChecked=qualityChecked, qualityFailures=qualityFailures)
+               qualityChecked=qualityChecked, qualityFailures=qualityFailures, commit=info["commit"],
+               failures=failures, command=info["command"])
 
   def runTestCommand(self, cwd, onStarted=None):
     command = self.config["testCommand"]
@@ -699,9 +971,13 @@ class Conductor:
       worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
       diff = board_git.taskDiff(self.projectDir, info["plan"], info["task"])
       resolvedConflicts = taskState["conflictFiles"] if taskState["lastWriteMode"] == "resolve" else None
-      prompt = buildReviewPrompt(plan, info["task"], info["round"], diff, taskState["lastTest"], previousErrors,
+      afterMerge = taskState["testAfterMerge"] and bool(self.config.get("testCommand"))         and not self.config.get("skipTests", False)
+      # 合併後才測試的 plan 審查時還沒有完整測試結果；lastTest 是上一次合併後測試，不是這次改動的結果
+      testRun = None if taskState["testAfterMerge"] else taskState["lastTest"]
+      prompt = buildReviewPrompt(plan, info["task"], info["round"], diff, testRun, previousErrors,
                                  resolvedConflicts, bool(self.config.get("tddCrap")),
-                                 self.preexistingFailures(taskState))
+                                 self.preexistingFailures(taskState), afterMerge=afterMerge,
+                                 mergeFailures=taskState["mergeFailures"])
       argv, stdinText, lineParser = self.reviewLaunch(info, worktree, prompt)
       info["job"] = board_agents.AgentJob(argv, worktree, stdinText, self.logPath(info, f"review{attempt}"),
                                           lineParser, self.timeoutSeconds(),
@@ -792,7 +1068,8 @@ class Conductor:
         # 解衝突途中停下時，任務 worktree 留著還沒結束的合併；直接 commit 會把衝突標記帶進 plan 分支
         if board_git.isMerged(self.projectDir, planIdValue, taskId):
           # 你在 plan worktree 解完了，任務 worktree 裡解到一半的合併已經用不到
-          self.event("taskMerged", info, commit=board_git.runGit(self.projectDir, "rev-parse", board_git.planBranch(planIdValue)))
+          self.event("taskMerged", info, commit=board_git.runGit(self.projectDir, "rev-parse", board_git.planBranch(planIdValue)),
+                     verify=self.verifyAfterMerge(taskState))
           return
         files = sorted(set(board_git.unmergedFiles(worktree)) | set(taskState["conflictFiles"]))
         remaining = board_git.filesWithConflictMarkers(worktree, files)
@@ -807,12 +1084,13 @@ class Conductor:
       return
     if board_git.isMerged(self.projectDir, planIdValue, taskId):
       # 你已經自己合併過（例如處理完衝突），只要記下來就好
-      self.event("taskMerged", info, commit=board_git.runGit(self.projectDir, "rev-parse", board_git.planBranch(planIdValue)))
+      self.event("taskMerged", info, commit=board_git.runGit(self.projectDir, "rev-parse", board_git.planBranch(planIdValue)),
+                 verify=self.verifyAfterMerge(taskState))
       return
     merged, commit, conflicts = board_git.mergeTask(self.projectDir, planIdValue, taskId,
                                                     f"合併 {planIdValue} {taskId}：{taskState['text']}")
     if merged:
-      self.event("taskMerged", info, commit=commit)
+      self.event("taskMerged", info, commit=commit, verify=self.verifyAfterMerge(taskState))
     elif taskState["conflictCount"] < maxAutoResolves:
       self.event("taskConflicted", info, conflicts=conflicts, reason="、".join(conflicts))
     else:

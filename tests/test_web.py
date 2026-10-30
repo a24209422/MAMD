@@ -500,6 +500,31 @@ def test_overviewLeadCardListsTestingTasks(dashboard, gitProject, browserPages):
   assert "測試中：" not in dom
 
 
+def test_overviewLeadCardListsTasksWaitingForMergeTest(dashboard, gitProject, browserPages):
+  # 合併後才測試的任務合併後列在 Alfred 卡片；合併後測試確認後就不再列出
+  appendEvent(gitProject, "taskMerged", plan="P0001", task="T1", roundNumber=1, data={"commit": "m1", "verify": True})
+  dom = browserPages.renderUntil(dashboard + "#token=" + token, domHas("已合併待測試：P0001 T1"))
+  lead = re.search(r'id="leadCard".*?</article>', dom, re.S)
+  assert lead and "已合併待測試：P0001 T1" in lead.group(0) and "測試中：" not in lead.group(0)
+  appendEvent(gitProject, "mergeTestRun", plan="P0001", data={
+    "commit": "m1", "passed": True, "tail": "ok", "covers": ["T1"], "advance": True, "split": None,
+    "outcomes": {"T1": {"result": "verified", "names": []}}})
+  dom = browserPages.renderUntil(dashboard + "#token=" + token, domHas("Alfred<span>（指揮程式）</span>"))
+  assert "已合併待測試：" not in dom
+
+
+def test_mergeTestNeedsYouShowsRetestHint(dashboard, gitProject, browserPages):
+  appendEvent(gitProject, "taskMerged", plan="P0001", task="T1", roundNumber=1, data={"commit": "m1", "verify": True})
+  appendEvent(gitProject, "mergeTestRun", plan="P0001", data={
+    "commit": "m1", "passed": False, "tail": "測試超時", "covers": ["T1"], "advance": False, "split": None,
+    "outcomes": {"T1": {"result": "unknown", "names": []}}})
+  # 重試說明在「人工介入」分頁；等待條件每次檢查時順便切到那個分頁
+  openManual = "document.querySelector('[data-ops=\"manual\"]')?.click()"
+  dom = browserPages.renderUntil(dashboard + "#token=" + token,
+                                 f"({openManual}, {domHas('重新跑合併後測試（不算輪數）')})")
+  assert "重試：重新跑合併後測試（不算輪數）" in dom and "合併後的完整測試無法判定" in dom
+
+
 def test_overviewShowsRunningCliUntilMainTaskEnds(dashboard, gitProject, browserPages):
   (gitProject / ".board" / "config.json").write_text(json.dumps({
     "maxParallel": 2, "writer": {"cli": "codex", "model": "gpt-6.1-sol"}, "reviewer": {"cli": "claude", "model": "opus"},

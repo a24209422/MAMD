@@ -18,6 +18,7 @@ const retryHints = {
   invalidReview: '重新審查（說明不會交給審查的 agent）',
   mergeConflict: '再交給寫程式的 agent 解一次（會附上你的說明）',
   mergeFailed: '重試合併',
+  mergeTest: '重新跑合併後測試（不算輪數）',
 };
 const readAlerts = loadReadAlerts();
 

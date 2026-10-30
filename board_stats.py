@@ -41,9 +41,16 @@ def firstReviewResults(events):
 
 def testStats(events):
   runs = [event for event in events if event.get("type") == "testRun"]
+  mergeRuns = [event for event in events if event.get("type") == "mergeTestRun"]
+  # 逐一測沿用同一個 commit 的結果時沒有真的跑，不算次數；一次涵蓋好幾個任務也只算一次
+  ranAfterMerge = [event for event in mergeRuns if not event["data"].get("reused")]
+  mergeReturned = sum(1 for event in mergeRuns for outcome in (event["data"].get("outcomes") or {}).values()
+                      if outcome.get("result") in ("newFailure", "stillFailing"))
   # 舊的 testRun 沒有 verdict，只算次數和失敗，不算退回
-  return {"runs": len(runs), "failed": sum(1 for event in runs if not event["data"].get("passed")),
-          "returned": sum(1 for event in runs if event["data"].get("verdict") == "newFailure")}
+  return {"runs": len(runs) + len(ranAfterMerge),
+          "failed": sum(1 for event in runs + ranAfterMerge if not event["data"].get("passed")),
+          "returned": sum(1 for event in runs if event["data"].get("verdict") == "newFailure") + mergeReturned,
+          "reused": len(mergeRuns) - len(ranAfterMerge)}
 
 
 def decisionStats(events):

@@ -99,11 +99,15 @@ def taskHeadline(plan, taskId, roundNumber):
   return f"plan {planId(plan)}「{plan['title']}」的任務 {taskId}：{plan['graph'].tasks[taskId]['text']}（第 {roundNumber} 輪）"
 
 
-def testExecutionLines(testCommand, skipTests):
+def testExecutionLines(testCommand, skipTests, afterMerge=False):
   if testCommand:
+    # 合併後才測試的 plan 寫完直接送審，完整測試在合併進 plan 分支後才跑
+    fullTestLine = ("- 不要自己跑完整測試，也不要用背景執行跑測試；審查通過、合併進 plan 分支後，流程才會跑一次完整測試，"
+                    "出現新增的失敗會退回這個任務修正。" if afterMerge else
+                    "- 不要自己跑完整測試，也不要用背景執行跑測試；交付後流程會在這個 worktree 跑一次完整測試，結果決定能不能送審。")
     return ["專案設定的測試指令（流程已將這個指令加入 writer 的允許清單）：", testCommand,
             "- 開發時只跑跟這次改動相關的測試：保留上述指令前綴，依該工具語法追加參數。",
-            "- 不要自己跑完整測試，也不要用背景執行跑測試；交付後流程會在這個 worktree 跑一次完整測試，結果決定能不能送審。",
+            fullTestLine,
             "- 測試設定已由流程提供，不需要讀取主專案的 .board/config.json。",
             "- 無法執行或測試失敗時據實回報，不要把未執行說成通過。"]
   if skipTests:
@@ -113,7 +117,14 @@ def testExecutionLines(testCommand, skipTests):
 
 def testFailureLines(lastTest, tddCrap=False):
   names = lastTest.get("newFailures") or []
-  lines = ["上一輪的自動測試出現基準沒有的失敗，沒有送審；請修正到這些測試通過：",
+  if lastTest.get("source") == "mergeTest":
+    # 合併後測試退回時改動已經在 plan 分支裡，流程把資料夾快轉到最新的 plan 分支，writer 要知道看到的不只自己的改動
+    header = (f"這個任務合併進 plan 分支後，完整測試（commit {(lastTest.get('commit') or '')[:7]}）出現新增的失敗，"
+              "或上一次退回的失敗還在。這個資料夾已經更新到最新的 plan 分支，包含其他任務已經合併的改動；"
+              "請修正到這些測試通過：")
+  else:
+    header = "上一輪的自動測試出現基準沒有的失敗，沒有送審；請修正到這些測試通過："
+  lines = [header,
            *([f"- {name}" for name in names] or ["- （輸出裡分不出測試名稱，請看下面的測試輸出）"])]
   if tddCrap:
     # 覆蓋率或複雜度沒過時 pytest 全部通過，輸出裡沒有失敗的測試名稱，writer 只看輸出會找不到原因
@@ -132,8 +143,20 @@ def baselineFailureLines(testRun, baselineFailures):
   return []
 
 
+def afterMergeReviewLines(mergeFailures):
+  # 新流程審查時還沒跑完整測試；不說清楚的話，審查者會因為驗證欄寫了完整測試而一直退回
+  lines = ["這個 plan 的完整測試在審查通過、合併進 plan 分支後才跑，這裡沒有自動測試結果；"
+           "不要因為沒有測試結果而退回，也不要自己跑完整測試。",
+           "驗證欄裡的完整測試（例如執行 python -m pytest -q 通過）由合併後的測試把關，不是這次審查要確認的項目；"
+           "驗證欄的其他項目照常確認。"]
+  if mergeFailures:
+    lines += ["這一輪是修正合併後測試出現的新增失敗，請確認 diff 針對這些失敗：", *[f"- {name}" for name in mergeFailures]]
+  return lines
+
+
 def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", qualityCommand="", cli="claude",
-                     testCommand="", skipTests=False, tddSkill=None, pythonCommand="python", lastTest=None):
+                     testCommand="", skipTests=False, tddSkill=None, pythonCommand="python", lastTest=None,
+                     afterMerge=False):
   parts = [
     taskHeadline(plan, taskId, roundNumber), "",
     "這個任務要滿足的需求：", *requirementLines(plan, taskId), "",
@@ -142,18 +165,21 @@ def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", 
   if lastTest and lastTest.get("verdict") == "newFailure":
     # 被測試退回的這一輪沒有審查；更早的審查意見針對的是舊的改動，附上反而會讓 writer 改錯方向
     parts += ["", *testFailureLines(lastTest, bool(qualityCommand))]
-  elif reviewMarkdown:
+  mergeFixReviewed = lastTest and lastTest.get("source") == "mergeTest"
+  if reviewMarkdown and (mergeFixReviewed or not (lastTest and lastTest.get("verdict") == "newFailure")):
+    # 合併後測試退回後，修正輪又被審查退回：失敗還要修，審查意見也要改，兩個都附
     parts += ["", "上一輪審查沒有通過，請修正「必改」的每一條（「建議」可以參考，不強制）：", reviewMarkdown]
   if userNote:
     parts += ["", "使用者補充：" + userNote]
-  parts += ["", *testExecutionLines(testCommand, skipTests)]
+  parts += ["", *testExecutionLines(testCommand, skipTests, afterMerge)]
   if qualityCommand:
     parts += ["", *tddWriteLines(cli, tddSkill, pythonCommand)]
   parts += ["", "改完後要能照表格的「驗證」欄驗證。完成後依格式回覆。"]
   return "\n".join(parts)
 
 
-def buildResolvePrompt(plan, taskId, roundNumber, conflicts, userNote="", testCommand="", skipTests=False):
+def buildResolvePrompt(plan, taskId, roundNumber, conflicts, userNote="", testCommand="", skipTests=False,
+                       afterMerge=False):
   parts = [
     taskHeadline(plan, taskId, roundNumber), "",
     "這一輪要解合併衝突：其他任務已經先合併進 plan 分支，和這個任務改到同樣的檔案。",
@@ -167,13 +193,13 @@ def buildResolvePrompt(plan, taskId, roundNumber, conflicts, userNote="", testCo
   ]
   if userNote:
     parts += ["", "使用者補充：" + userNote]
-  parts += ["", *testExecutionLines(testCommand, skipTests)]
+  parts += ["", *testExecutionLines(testCommand, skipTests, afterMerge)]
   parts += ["", "完成後依格式回覆。"]
   return "\n".join(parts)
 
 
 def buildReviewPrompt(plan, taskId, roundNumber, diff, testRun=None, previousErrors=None, resolvedConflicts=None,
-                      tddCrap=False, baselineFailures=None):
+                      tddCrap=False, baselineFailures=None, afterMerge=False, mergeFailures=None):
   parts = [
     "審查 " + taskHeadline(plan, taskId, roundNumber), "",
     "這個任務要滿足的需求（必改的 ref 只能用這些編號或「驗證」）：", *requirementLines(plan, taskId), "",
@@ -187,6 +213,8 @@ def buildReviewPrompt(plan, taskId, roundNumber, diff, testRun=None, previousErr
   if testRun:
     parts += ["", f"自動測試結果：{'通過' if testRun['passed'] else '失敗'}", "```", testRun.get("tail", ""), "```"]
     parts += baselineFailureLines(testRun, baselineFailures or [])
+  if afterMerge:
+    parts += ["", *afterMergeReviewLines(mergeFailures or [])]
   if tddCrap:
     parts += ["", *tddReviewLines]
   if len(diff) > maxDiffChars:

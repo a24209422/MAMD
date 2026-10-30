@@ -59,14 +59,15 @@ def startBoard(gitProject, writePlan, tmp_path, monkeypatch):
 
   conductors = []
 
-  def start(rows, scenario=None, planAfter="", **configOverrides):
+  # 預設核准成原流程（寫完先測試再審查），既有的流程測試照舊；合併後才測試的測試傳 testTiming="afterMerge"
+  def start(rows, scenario=None, planAfter="", testTiming=None, **configOverrides):
     scenarioDir = tmp_path / "scenario"
     scenarioDir.mkdir(exist_ok=True)
     (scenarioDir / "scenario.json").write_text(json.dumps(scenario or {}), encoding="utf-8")
     monkeypatch.setenv("FAKE_SCENARIO", str(scenarioDir / "scenario.json"))
     writePlan("0001-demo.md", rows, planId="P0001", projectDir=gitProject, after=planAfter)
     assert boardCli.cmdSubmit(gitProject, "P0001") == 0
-    assert boardCli.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y") == 0
+    assert boardCli.cmdApprove(gitProject, "P0001", confirm=lambda prompt: "y", testTiming=testTiming) == 0
     conductor = Conductor(gitProject, config=fakeConfig(**configOverrides), out=lambda line: None)
     conductors.append(conductor)
     return conductor, scenarioDir

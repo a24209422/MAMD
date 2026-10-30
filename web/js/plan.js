@@ -135,7 +135,7 @@ function statsItems(stats) {
     ['寫完次數', String(stats.written)],
     ['審查', `${reviews.total} 次（通過 ${reviews.passed}、不通過 ${reviews.failed}）`],
     ['第一次審查就通過', `${stats.firstReviewPassed.passed}/${stats.firstReviewPassed.reviewed}`],
-    ['測試', `${tests.runs} 次，失敗 ${tests.failed}，退回 ${tests.returned}`],
+    ['測試', `${tests.runs} 次，失敗 ${tests.failed}，退回 ${tests.returned}，沿用 ${tests.reused ?? 0}`],
     ['寫完後被退回', `${stats.returnedAfterWrite.returned}/${stats.returnedAfterWrite.written}`],
     ['你的決定', statsDecisions(stats.decisions)],
     ['還在等你', String(stats.waiting)],

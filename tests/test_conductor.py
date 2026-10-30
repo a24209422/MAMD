@@ -210,6 +210,21 @@ def test_newFailureGoesBackToWriterWithoutReview(startBoard, tmp_path):
   assert "FAILED tests/test_new.py::test_new - AssertionError" in calls[1]["prompt"]
 
 
+def test_testRunRecordsTestedCommitFailuresAndCommand(startBoard, tmp_path):
+  # 第 1 輪失敗、第 2 輪通過：每次都記下當時任務 worktree 的 HEAD、完整的失敗名稱和測試指令
+  body = "if written.exists() and '第 1 次' in written.read_text(encoding='utf-8'):\n  " + failNewTest.replace("\n", "\n  ")
+  command = pythonTestCommand(tmp_path, body)
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  runUntil(conductor, planDone)
+  written = [event["data"]["commit"] for event in eventsOf(conductor, "taskWritten")]
+  firstRun, secondRun = eventsOf(conductor, "testRun")
+  assert (firstRun["data"]["commit"], secondRun["data"]["commit"]) == tuple(written)
+  assert firstRun["data"]["failures"] == ["tests/test_new.py::test_new"]
+  assert secondRun["data"]["failures"] == []
+  assert firstRun["data"]["command"] == secondRun["data"]["command"] == command
+  assert (firstRun["data"]["verdict"], secondRun["data"]["verdict"]) == ("newFailure", "passed")
+
+
 def test_testReturnAfterFailedReviewDropsEarlierReview(startBoard, tmp_path):
   # 第 1 輪審查不通過，第 2 輪寫出的內容測試有新增的失敗，第 3 輪只附測試的失敗
   body = "if written.exists() and '第 2 次' in written.read_text(encoding='utf-8'):\n  " + failNewTest.replace("\n", "\n  ")
@@ -510,7 +525,7 @@ def taskTestStarted(logPath, count=1):
 
 def test_testsRunInBackgroundInParallelWithoutBlockingOtherTasks(startBoard, tmp_path):
   command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 6, "P0001-T2": 1.5})
-  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command)
+  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command, maxParallelTests=2)
   runUntil(conductor, taskIs(TaskStatus.testing))
   runUntil(conductor, planDone)
   assert all(event["data"]["testing"] is True for event in eventsOf(conductor, "taskWritten"))
@@ -519,6 +534,77 @@ def test_testsRunInBackgroundInParallelWithoutBlockingOtherTasks(startBoard, tmp
   assert order.index(("start", "P0001-T2")) < order.index(("end", "P0001-T1"))
   events = [(event["type"], event["task"]) for event in board_core.readEvents(conductor.projectDir)]
   assert events.index(("reviewStarted", "T2")) < events.index(("testRun", "T1"))
+
+
+def loggedTestOrder(logPath):
+  return [tuple(line.split()[:2]) for line in logPath.read_text(encoding="utf-8").splitlines()]
+
+
+def waitingForTest(conductor, taskId):
+  return lambda state: (state["tasks"][f"P0001/{taskId}"]["status"] == TaskStatus.testing
+                        and f"P0001/{taskId}" not in conductor.jobs)
+
+
+def test_oneTestAtATimeWaitsWithoutEvents(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 4, "P0001-T2": 1})
+  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command)
+  runUntil(conductor, waitingForTest(conductor, "T2"))
+  assert "P0001/T1" in conductor.jobs
+  eventCount = len(board_core.readEvents(conductor.projectDir))
+  for _ in range(3):
+    conductor.tick()
+  state = conductor.currentState()[1]
+  assert state["tasks"]["P0001/T2"]["status"] == TaskStatus.testing and "P0001/T2" not in conductor.jobs
+  assert len(board_core.readEvents(conductor.projectDir)) == eventCount
+  runUntil(conductor, planDone)
+  # 預設一次只跑一份：T2 的測試等 T1 的測試結束才開始
+  order = loggedTestOrder(logPath)
+  assert order.index(("end", "P0001-T1")) < order.index(("start", "P0001-T2"))
+  assert sorted(event["task"] for event in eventsOf(conductor, "testRun")) == ["T1", "T2"]
+
+
+def test_waitingTestsRunInOrderOfEnteringTesting(startBoard, tmp_path):
+  # 只有一個寫程式名額，照列的順序寫：T1、T3、T2；T1 測試時 T3、T2 依序進測試中等待
+  rows = oneTask + ["| R1 | | D1 | | T3 任務三 | | 驗證三 |", "| R1 | | D1 | | T2 任務二 | | 驗證二 |"]
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 4})
+  conductor, _ = startBoard(rows, testCommand=command, maxParallel=1)
+  runUntil(conductor, planDone)
+  written = [event["task"] for event in eventsOf(conductor, "taskWritten")]
+  assert written == ["T1", "T3", "T2"]
+  order = loggedTestOrder(logPath)
+  starts = [name for kind, name in order if kind == "start" and not name.endswith("-baseline")]
+  assert starts == ["P0001-T1", "P0001-T3", "P0001-T2"]
+  for earlier, later in zip(starts, starts[1:]):
+    assert order.index(("end", earlier)) < order.index(("start", later))
+
+
+def test_baselineGetsFreeTestSlotBeforeWaitingTask(startBoard, writePlan, gitProject, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 4, "P0002-baseline": 1})
+  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command)
+  runUntil(conductor, waitingForTest(conductor, "T2"))
+  # P0002 的 baseCommit 有程式碼改動，不能沿用，要自己跑基準
+  commitCode(gitProject)
+  approvePlan(gitProject, writePlan, "P0002")
+  conductor.tick()
+  assert "P0002/baseline" not in conductor.jobs and "P0001/T1" in conductor.jobs
+  runUntil(conductor, planDone)
+  order = loggedTestOrder(logPath)
+  assert order.index(("end", "P0001-T1")) < order.index(("start", "P0002-baseline"))
+  assert order.index(("end", "P0002-baseline")) < order.index(("start", "P0001-T2"))
+
+
+def test_pauseWhileWaitingForTestThenResumeRunsEachTestOnce(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 4, "P0001-T2": 1})
+  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command)
+  runUntil(conductor, waitingForTest(conductor, "T2"))
+  board_core.appendEvent(conductor.projectDir, "paused", data={"reason": "測試暫停"})
+  state = runUntil(conductor, lambda current: not conductor.jobs)
+  assert state["tasks"]["P0001/T2"]["status"] == TaskStatus.testing
+  board_core.appendEvent(conductor.projectDir, "resumed")
+  runUntil(conductor, planDone)
+  assert sorted(event["task"] for event in eventsOf(conductor, "testRun")) == ["T1", "T2"]
+  assert eventsOf(conductor, "taskInterrupted") == []
+  assert [entry[0] for entry in taskTestLog(logPath, "T2")] == ["start", "end"]
 
 
 def test_pauseWhileTestingRerunsTestsWithoutInterruption(startBoard, tmp_path):
@@ -616,7 +702,10 @@ def test_otherPlanDispatchesWhileBaselineRuns(startBoard, writePlan, gitProject,
   import board as boardCli
 
   command, logPath = sleepyTestCommand(tmp_path, {"P0002-baseline": 10})
-  conductor, _ = startBoard(oneTask, testCommand=command)
+  # 兩份基準同時跑，P0002 的基準才會在 P0001 派工前開始
+  conductor, _ = startBoard(oneTask, testCommand=command, maxParallelTests=2)
+  # 兩份 plan 的 baseCommit 之間有程式碼改動，P0002 不能沿用 P0001 的基準，要自己跑
+  commitCode(gitProject)
   writePlan("0002-other.md", oneTask, planId="P0002", projectDir=gitProject)
   assert boardCli.cmdSubmit(gitProject, "P0002") == 0
   assert boardCli.cmdApprove(gitProject, "P0002", confirm=lambda prompt: "y") == 0
@@ -689,6 +778,218 @@ def test_baselineWorktreeRemovalFailureKeepsResult(startBoard, tmp_path, monkeyp
   runUntil(conductor, lambda state: eventsOf(conductor, "taskStarted"))
   assert lines.count("P0001 的基準測試 worktree 移除失敗：模擬移除失敗") == 1
   assert len(eventsOf(conductor, "testBaseline")) == 1
+
+
+# 下一份 plan 的任務用 T9：P0001 合併回 main 後，T1 寫出的內容跟 main 一樣，會被當成沒有改動
+nextPlanTask = ["| R1 需求一 | 理解一 | D1 做法一 | - | T9 任務九 | | 驗證九 |"]
+
+
+def approvePlan(gitProject, writePlan, planIdValue, rows=nextPlanTask):
+  import board as boardCli
+
+  # submit 會 commit plan 檔，baseCommit 跟前一份只差這個 plan 檔
+  writePlan(f"{planIdValue[1:]}-next.md", rows, planId=planIdValue, projectDir=gitProject)
+  assert boardCli.cmdSubmit(gitProject, planIdValue) == 0
+  # 跟 startBoard 一樣核准成寫完先測試再審查，任務才會留下 testRun
+  assert boardCli.cmdApprove(gitProject, planIdValue, confirm=lambda prompt: "y", testTiming=None) == 0
+  approved = [event for event in board_core.readEvents(gitProject) if event["type"] == "planApproved"]
+  return approved[-1]["data"]["baseCommit"]
+
+
+def commitCode(gitProject):
+  (gitProject / "calc.py").write_text("def add(a, b):\n  return a + b\n", encoding="utf-8")
+  subprocess.run(["git", "add", "calc.py"], cwd=gitProject, check=True, capture_output=True)
+  subprocess.run(["git", "commit", "-q", "-m", "改程式"], cwd=gitProject, check=True, capture_output=True)
+
+
+def mergePlanIntoMain(gitProject, planIdValue):
+  subprocess.run(["git", "merge", "--no-ff", "-q", "-m", f"合併 {planIdValue}", f"plan/{planIdValue}"], cwd=gitProject,
+                 check=True, capture_output=True)
+
+
+def recordBaselineWorktrees(monkeypatch):
+  created = []
+  realAdd = board_git.addBaselineWorktree
+
+  def recording(projectDir, planIdValue, baseCommit):
+    created.append(planIdValue)
+    return realAdd(projectDir, planIdValue, baseCommit)
+
+  monkeypatch.setattr(board_git, "addBaselineWorktree", recording)
+  return created
+
+
+def baselineOf(planIdValue):
+  return lambda state: planIdValue in state["plans"] and state["plans"][planIdValue]["testBaseline"]
+
+
+def baselineRunsInLog(logPath):
+  lines = [line.split() for line in logPath.read_text(encoding="utf-8").splitlines()]
+  return [entry[1] for entry in lines if entry[0] == "start" and entry[1].endswith("-baseline")]
+
+
+def test_nextPlanReusesBaselineWhenOnlyPlanFilesDiffer(startBoard, writePlan, gitProject, tmp_path, monkeypatch):
+  command, logPath = sleepyTestCommand(tmp_path, {})
+  created = recordBaselineWorktrees(monkeypatch)
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  runUntil(conductor, baselineOf("P0001"))
+  baseCommit = approvePlan(gitProject, writePlan, "P0002")
+  state = runUntil(conductor, baselineOf("P0002"))
+  first, second = state["plans"]["P0001"]["testBaseline"], state["plans"]["P0002"]["testBaseline"]
+  assert board_git.changedPaths(gitProject, first["commit"], baseCommit) == ["plans/0002-next.md"]
+  assert second == {**first, "commit": baseCommit,
+                    "reusedFrom": {"kind": "baseline", "plan": "P0001", "task": None, "commit": first["commit"]}}
+  assert created == ["P0001"]
+  assert baselineRunsInLog(logPath) == ["P0001-baseline"]
+  assert noBaselineWorktreeLeft(gitProject)
+  runUntil(conductor, lambda current: any(event["plan"] == "P0002" for event in eventsOf(conductor, "taskStarted")))
+  reusedEvent = eventsOf(conductor, "testBaseline")[-1]
+  assert "沿用 P0001 的基準測試結果" in formatEvent(reusedEvent)
+
+
+def test_nextPlanReusesLastTaskTestRunAfterPlanMergedToMain(startBoard, writePlan, gitProject, tmp_path, monkeypatch):
+  # 2026-10-28 的情況：T2 前置是 T1，T2 測過的就是最後的組合；合併回 main 後只多了下一份 plan 檔
+  body = "print('FAILED tests/test_old.py::test_old - AssertionError')\nsys.exit(1)\n"
+  created = recordBaselineWorktrees(monkeypatch)
+  conductor, _ = startBoard(chainedTasks, testCommand=pythonTestCommand(tmp_path, body))
+  runUntil(conductor, planDone)
+  mergePlanIntoMain(gitProject, "P0001")
+  baseCommit = approvePlan(gitProject, writePlan, "P0002")
+  conductor.tick()
+  baseline = conductor.currentState()[1]["plans"]["P0002"]["testBaseline"]
+  lastRun = [event for event in eventsOf(conductor, "testRun") if event["task"] == "T2"][-1]
+  assert baseline["reusedFrom"] == {"kind": "testRun", "plan": "P0001", "task": "T2", "commit": lastRun["data"]["commit"]}
+  assert (baseline["passed"], baseline["failures"], baseline["tail"]) == (
+    False, ["tests/test_old.py::test_old"], lastRun["data"]["tail"])
+  assert baseline["commit"] == baseCommit
+  assert created == ["P0001"]
+  # 沿用的基準照樣拿來判定：跟基準一樣的失敗不算新增
+  state = runUntil(conductor, lambda current: current["tasks"]["P0002/T9"]["status"] == TaskStatus.done)
+  nextRun = [event for event in eventsOf(conductor, "testRun") if event["plan"] == "P0002"][0]
+  assert (nextRun["data"]["verdict"], nextRun["data"]["newFailures"]) == ("preexisting", [])
+  assert state["plans"]["P0002"]["testBaseline"]["reusedFrom"]["kind"] == "testRun"
+  assert "沿用 P0001 T2 的測試結果" in formatEvent(eventsOf(conductor, "testBaseline")[-1])
+
+
+def test_nextPlanReusesMergeTestRunAfterPlanMergedToMain(startBoard, writePlan, gitProject, tmp_path, monkeypatch):
+  body = "print('FAILED tests/test_old.py::test_old - AssertionError')\nsys.exit(1)\n"
+  created = recordBaselineWorktrees(monkeypatch)
+  conductor, _ = startBoard(oneTask, testTiming="afterMerge", testCommand=pythonTestCommand(tmp_path, body))
+  runUntil(conductor, planDone)
+  lastRun = eventsOf(conductor, "mergeTestRun")[-1]["data"]
+  mergePlanIntoMain(gitProject, "P0001")
+  baseCommit = approvePlan(gitProject, writePlan, "P0002")
+  conductor.tick()
+  # 新 plan 只多了 plan 檔，不能再建立基準 worktree 或啟動完整測試
+  assert created == ["P0001"]
+  assert "P0002/baseline" not in conductor.jobs
+  baseline = conductor.currentState()[1]["plans"]["P0002"]["testBaseline"]
+  assert baseline["commit"] == baseCommit
+  assert baseline["reusedFrom"] == {"kind": "mergeTestRun", "plan": "P0001", "task": None,
+                                    "commit": lastRun["commit"]}
+  for field in ("command", "passed", "failures", "qualityChecked", "qualityFailures", "tail"):
+    assert baseline[field] == lastRun[field]
+  assert baseline["failures"] == ["tests/test_old.py::test_old"]
+  assert "沿用 P0001 的合併後測試結果" in formatEvent(eventsOf(conductor, "testBaseline")[-1])
+
+
+def test_codeChangeBetweenPlansRunsOwnBaseline(startBoard, writePlan, gitProject, monkeypatch):
+  created = recordBaselineWorktrees(monkeypatch)
+  conductor, _ = startBoard(oneTask, testCommand="git --version")
+  runUntil(conductor, baselineOf("P0001"))
+  commitCode(gitProject)
+  approvePlan(gitProject, writePlan, "P0002")
+  state = runUntil(conductor, baselineOf("P0002"))
+  assert "reusedFrom" not in state["plans"]["P0002"]["testBaseline"]
+  assert created == ["P0001", "P0002"]
+
+
+def test_unrelatedTasksMergedTogetherAreNotReused(startBoard, writePlan, gitProject, monkeypatch):
+  # T1、T2 沒有前置關係，各自在自己的分支測試；合併後的組合沒人測過
+  created = recordBaselineWorktrees(monkeypatch)
+  conductor, _ = startBoard(twoTasks, testCommand="git --version")
+  runUntil(conductor, planDone)
+  assert {event["task"] for event in eventsOf(conductor, "testRun")} == {"T1", "T2"}
+  mergePlanIntoMain(gitProject, "P0001")
+  approvePlan(gitProject, writePlan, "P0002")
+  state = runUntil(conductor, baselineOf("P0002"))
+  assert "reusedFrom" not in state["plans"]["P0002"]["testBaseline"]
+  assert created == ["P0001", "P0002"]
+
+
+def test_differentTestCommandIsNotReused(startBoard, writePlan, gitProject, monkeypatch):
+  created = recordBaselineWorktrees(monkeypatch)
+  conductor, _ = startBoard(oneTask, testCommand="git --version")
+  runUntil(conductor, baselineOf("P0001"))
+  board_core.appendEvent(gitProject, "planAbandoned", plan="P0001")
+  conductor.tick()
+  approvePlan(gitProject, writePlan, "P0002")
+  changed = Conductor(gitProject, config=fakeConfig(testCommand="git rev-parse HEAD"), out=lambda line: None)
+  state = runUntil(changed, baselineOf("P0002"))
+  baseline = state["plans"]["P0002"]["testBaseline"]
+  assert baseline["command"] == "git rev-parse HEAD" and "reusedFrom" not in baseline
+  assert created == ["P0001", "P0002"]
+
+
+def test_abandonedSourcePlanIsStillReused(startBoard, writePlan, gitProject, monkeypatch):
+  created = recordBaselineWorktrees(monkeypatch)
+  conductor, _ = startBoard(oneTask, testCommand="git --version")
+  runUntil(conductor, baselineOf("P0001"))
+  board_core.appendEvent(gitProject, "planAbandoned", plan="P0001")
+  approvePlan(gitProject, writePlan, "P0002")
+  state = runUntil(conductor, baselineOf("P0002"))
+  assert state["plans"]["P0001"]["status"] == PlanStatus.abandoned
+  assert state["plans"]["P0002"]["testBaseline"]["reusedFrom"]["plan"] == "P0001"
+  assert created == ["P0001"]
+
+
+def test_changedPathsFailureRunsOwnBaseline(startBoard, writePlan, gitProject, monkeypatch):
+  created = recordBaselineWorktrees(monkeypatch)
+  conductor, _ = startBoard(oneTask, testCommand="git --version")
+  runUntil(conductor, baselineOf("P0001"))
+
+  def failingChangedPaths(projectDir, fromCommit, toCommit):
+    raise board_git.GitError("模擬 git diff 失敗")
+
+  monkeypatch.setattr(board_git, "changedPaths", failingChangedPaths)
+  approvePlan(gitProject, writePlan, "P0002")
+  state = runUntil(conductor, baselineOf("P0002"))
+  assert "reusedFrom" not in state["plans"]["P0002"]["testBaseline"]
+  assert created == ["P0001", "P0002"]
+
+
+def test_plansApprovedTogetherRunOneBaseline(startBoard, writePlan, gitProject, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-baseline": 1, "P0002-baseline": 1})
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  approvePlan(gitProject, writePlan, "P0002")
+  state = runUntil(conductor, lambda current: {event["plan"] for event in eventsOf(conductor, "taskStarted")}
+                   == {"P0001", "P0002"})
+  runs = baselineRunsInLog(logPath)
+  assert len(runs) == 1
+  ran = runs[0].split("-")[0]
+  other = ({"P0001", "P0002"} - {ran}).pop()
+  assert "reusedFrom" not in state["plans"][ran]["testBaseline"]
+  assert state["plans"][other]["testBaseline"]["reusedFrom"] == {
+    "kind": "baseline", "plan": ran, "task": None, "commit": state["plans"][ran]["baseCommit"]}
+  assert len(eventsOf(conductor, "testBaseline")) == 2
+
+
+def test_baselineReuseCandidatesSkipOldTestRunsAndOtherCommands():
+  events = [
+    makeEvent("testBaseline", plan="P0001", command="pytest -q", commit="a1", passed=True, failures=[], tail=""),
+    # 舊的 testRun 沒有 commit、failures、command
+    makeEvent("testRun", plan="P0001", task="T1", passed=False, tail="", verdict="newFailure", newFailures=[]),
+    makeEvent("testRun", plan="P0001", task="T2", command="pytest", commit="b2", failures=[], passed=True, tail=""),
+    makeEvent("testRun", plan="P0001", task="T3", command="pytest -q", commit="c3", failures=["t::x"], passed=False,
+              tail=""),
+    makeEvent("mergeTestRun", plan="P0001", command="pytest -q", commit="d4", failures=[], passed=True, tail=""),
+    makeEvent("mergeTestRun", plan="P0001", command="pytest", commit="e5", failures=[], passed=True, tail=""),
+    makeEvent("mergeTestRun", plan="P0001", command="pytest -q", commit="f6", passed=False, tail=""),
+    makeEvent("mergeTestRun", plan="P0001", command="pytest -q", commit=None, failures=[], passed=True, tail=""),
+  ]
+  candidates = conductorModule.baselineReuseCandidates(events, "pytest -q")
+  assert [(kind, event["data"]["commit"]) for kind, event in candidates] == [
+    ("mergeTestRun", "d4"), ("testRun", "c3"), ("baseline", "a1")]
 
 
 def test_testCommandTimeoutKillsProcessTree(startBoard, tmp_path):
@@ -797,6 +1098,14 @@ def test_formatEvent():
   baseline = makeEvent("testBaseline", plan="P0001", command="pytest -q", passed=False, tail="1 failed")
   baseline["time"] = "2026-10-25T21:42:00+08:00"
   assert formatEvent(baseline) == "21:42:00 P0001 跑基準測試（失敗）"
+  fromRun = makeEvent("testBaseline", plan="P0008", passed=False, tail="",
+                      reusedFrom={"kind": "testRun", "plan": "P0007", "task": "T2", "commit": "abc"})
+  fromRun["time"] = "2026-10-25T21:43:00+08:00"
+  assert formatEvent(fromRun) == "21:43:00 P0008 跑基準測試（失敗，沿用 P0007 T2 的測試結果）"
+  fromBaseline = makeEvent("testBaseline", plan="P0006", passed=True, tail="",
+                           reusedFrom={"kind": "baseline", "plan": "P0005", "task": None, "commit": "abc"})
+  fromBaseline["time"] = "2026-10-25T21:44:00+08:00"
+  assert formatEvent(fromBaseline) == "21:44:00 P0006 跑基準測試（通過，沿用 P0005 的基準測試結果）"
 
 
 def test_failureNamesReadPytestShortSummary():

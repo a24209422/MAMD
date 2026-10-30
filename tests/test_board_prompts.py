@@ -229,3 +229,40 @@ def test_codexWriterReadsTddSkillFile(writePlan):
   assert str(tddCrapDir / "SKILL.md") in prompt and command not in prompt
   assert "Skill 工具" not in prompt
   assert prompt.splitlines()[-1] == "改完後要能照表格的「驗證」欄驗證。完成後依格式回覆。"
+
+
+def test_afterMergeWriterIsToldFullTestsRunAfterMerge(writePlan):
+  plan = samplePlan(writePlan)
+  for prompt in (buildWritePrompt(plan, "T1", 1, testCommand="npm test", afterMerge=True),
+                 buildResolvePrompt(plan, "T1", 2, ["calc.py"], testCommand="npm test", afterMerge=True)):
+    assert "合併進 plan 分支後，流程才會跑一次完整測試" in prompt
+    assert "交付後流程會在這個 worktree 跑一次完整測試" not in prompt
+    assert "只跑跟這次改動相關的測試" in prompt and "不要自己跑完整測試" in prompt
+
+
+mergeFailure = {"source": "mergeTest", "verdict": "newFailure", "newFailures": ["t.py::test_new"],
+                "commit": "abcdef1234567", "tail": "FAILED t.py::test_new - boom"}
+
+
+def test_mergeFixPromptShowsFailuresOnLatestPlanAndLaterReview(writePlan):
+  plan = samplePlan(writePlan)
+  prompt = buildWritePrompt(plan, "T1", 2, lastTest=mergeFailure, testCommand="npm test", afterMerge=True)
+  assert "合併進 plan 分支後，完整測試（commit abcdef1）出現新增的失敗" in prompt
+  assert "已經更新到最新的 plan 分支" in prompt
+  assert "- t.py::test_new" in prompt and "FAILED t.py::test_new - boom" in prompt
+  assert "基準沒有的失敗" not in prompt and "上一輪審查沒有通過" not in prompt
+  reviewed = buildWritePrompt(plan, "T1", 3, reviewMarkdown="## 必改\n- [R1] 還沒修好", lastTest=mergeFailure,
+                              testCommand="npm test", afterMerge=True)
+  assert "- t.py::test_new" in reviewed and "- [R1] 還沒修好" in reviewed
+
+
+def test_afterMergeReviewHasNoTestResultAndListsFailuresToFix(writePlan):
+  plan = samplePlan(writePlan)
+  prompt = buildReviewPrompt(plan, "T1", 1, "+x", afterMerge=True)
+  assert "自動測試結果：" not in prompt
+  assert "合併進 plan 分支後才跑" in prompt and "不要自己跑完整測試" in prompt
+  assert "驗證欄裡的完整測試" in prompt and "不是這次審查要確認的項目" in prompt
+  assert "修正合併後測試" not in prompt
+  fix = buildReviewPrompt(plan, "T1", 2, "+x", afterMerge=True, mergeFailures=["t.py::test_new"])
+  assert "這一輪是修正合併後測試出現的新增失敗" in fix and "- t.py::test_new" in fix
+  assert "合併進 plan 分支後才跑" not in buildReviewPrompt(plan, "T1", 1, "+x")

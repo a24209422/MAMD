@@ -239,7 +239,7 @@ def statsDetail(stats):
     f"寫完次數：{stats['written']}",
     f"審查：{reviews['total']} 次（通過 {reviews['passed']}、不通過 {reviews['failed']}）",
     f"第一次審查就通過：{stats['firstReviewPassed']['passed']}/{stats['firstReviewPassed']['reviewed']}",
-    f"測試：{tests['runs']} 次，失敗 {tests['failed']}，退回 {tests['returned']}",
+    f"測試：{tests['runs']} 次，失敗 {tests['failed']}，退回 {tests['returned']}，沿用 {tests['reused']}",
     f"寫完後被退回：{stats['returnedAfterWrite']['returned']}/{stats['returnedAfterWrite']['written']}",
     f"你的決定：{decisionsText(stats['decisions'])}",
     f"還在等你：{stats['waiting']}",
@@ -285,7 +285,7 @@ def cmdStats(projectDir, planIdValue=None):
   return 0
 
 
-def cmdApprove(projectDir, planIdValue, confirm=input):
+def cmdApprove(projectDir, planIdValue, confirm=input, testTiming="afterMerge"):
   plans, state = currentState(projectDir)
   planState = state["plans"].get(planIdValue)
   if not planState or planState["status"] != PlanStatus.pending:
@@ -314,9 +314,11 @@ def cmdApprove(projectDir, planIdValue, confirm=input):
       return 1
   tasks = [{"id": task["id"], "text": task["text"], "dependsOn": task["dependsOn"],
             "requirementIds": task["requirementIds"]} for task in graph.tasks.values()]
-  appendEvent(projectDir, "planApproved", plan=planIdValue,
-              data={"baseCommit": board_git.headCommit(projectDir), "branch": board_git.planBranch(planIdValue),
-                    "tasks": tasks})
+  data = {"baseCommit": board_git.headCommit(projectDir), "branch": board_git.planBranch(planIdValue), "tasks": tasks}
+  # 新核准的 plan 一律合併後才跑完整測試；沒有這個欄位的舊事件照原流程。測試可以傳 None 核准成原流程
+  if testTiming:
+    data["testTiming"] = testTiming
+  appendEvent(projectDir, "planApproved", plan=planIdValue, data=data)
   print(f"{planIdValue} 已核准，Alfred 會開始執行。")
   return 0
 

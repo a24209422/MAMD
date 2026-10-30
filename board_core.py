@@ -32,6 +32,7 @@ legacyConfigKeys = {
 }
 defaultConfig = {
   "maxParallel": 3,
+  "maxParallelTests": 1,
   "maxRounds": 3,
   "timeoutMinutes": 30,
   "testCommand": "",
@@ -95,6 +96,9 @@ def configProblems(userConfig, requireTestChoice=False):
   for role in roleNames:
     if role in userConfig:
       problems.extend(roleConfigProblems(role, userConfig[role]))
+  maxParallelTests = userConfig.get("maxParallelTests", defaultConfig["maxParallelTests"])
+  if type(maxParallelTests) is not int or maxParallelTests < 1:
+    problems.append(f"maxParallelTests 要寫成 1 以上的整數，現在是 {json.dumps(maxParallelTests, ensure_ascii=False)}")
   return problems + testConfigProblems(userConfig, requireTestChoice)
 
 
@@ -303,6 +307,8 @@ class TaskStatus:
   toReview = "待審查"
   reviewing = "審查中"
   merging = "合併中"
+  # 合併後才測試的 plan：已經合併進 plan 分支、還沒被合併後測試確認
+  mergedUntested = "已合併待測試"
   done = "完成"
   needsYou = "等你處理"
   abandoned = "放棄"
@@ -323,6 +329,7 @@ def newTaskState(planIdValue, task, config):
     "failStreak": 0, "needs": None, "userNote": "", "userDone": False,
     "reviews": [], "lastReviewNotes": None, "lastCommit": None, "lastTest": None,
     "resolving": False, "conflictFiles": [], "conflictCount": 0, "lastWriteMode": "write",
+    "testAfterMerge": False, "mergedCommit": None, "mergeFailures": [], "mergeFix": False,
   }
 
 
@@ -343,13 +350,79 @@ def onPlanRejected(state, planState, event, config):
 def onPlanApproved(state, planState, event, config):
   planState["status"] = PlanStatus.active
   planState["baseCommit"] = event["data"].get("baseCommit")
+  # 舊的核准事件沒有這個欄位：照原流程，寫完先測試再審查
+  planState["testTiming"] = event["data"].get("testTiming")
   for task in event["data"].get("tasks", []):
-    state["tasks"][taskKey(planState["id"], task["id"])] = newTaskState(planState["id"], task, config)
+    taskState = newTaskState(planState["id"], task, config)
+    # 每個任務都記一份，conductor 派工、寫 prompt 時不必再回頭查 plan
+    taskState["testAfterMerge"] = planState["testTiming"] == "afterMerge"
+    state["tasks"][taskKey(planState["id"], task["id"])] = taskState
 
 
 def onTestBaseline(state, planState, event, config):
   # 只留最新一次：testCommand 改掉後重跑的基準才是之後比對的依據
   planState["testBaseline"] = event["data"]
+
+
+def mergeFailureLastTest(data, names):
+  # writer 的 prompt 跟原流程一樣看 verdict 和 newFailures；source 讓它分得出是合併後測試退回的
+  return {"source": "mergeTest", "verdict": "newFailure", "newFailures": list(names),
+          "commit": data.get("commit"), "tail": data.get("tail", "")}
+
+
+def reopenAfterMergeTest(taskState, data, names):
+  taskState["lastTest"] = mergeFailureLastTest(data, names)
+  taskState["mergeFailures"] = list(names)
+  taskState["mergeFix"] = True
+  # 合併前的審查意見針對的是已經通過的改動，附上會讓 writer 改錯方向
+  taskState["lastReviewNotes"] = None
+  # 對話與 resumable 不動：修正輪接續上一輪的 writer 對話
+  if taskState["round"] < taskState["maxRounds"]:
+    taskState["status"] = TaskStatus.queued
+    taskState["round"] += 1
+    return
+  reason = f"第 {taskState['round']} 輪合併後測試有新增的失敗，輪數用完"
+  taskState["status"] = TaskStatus.needsYou
+  taskState["needs"] = {"kind": "tests", "reason": reason + ("：" + "、".join(names) if names else "")}
+
+
+def applyMergeTestOutcome(taskState, data, outcome):
+  result = outcome.get("result")
+  if result == "verified":
+    taskState["status"] = TaskStatus.done
+    taskState["mergeFailures"] = []
+  elif result in ("newFailure", "stillFailing"):
+    reopenAfterMergeTest(taskState, data, outcome.get("names") or [])
+  elif result == "unknown":
+    taskState["status"] = TaskStatus.needsYou
+    taskState["needs"] = {"kind": "mergeTest",
+                          "reason": "合併後的完整測試無法判定有沒有新增的失敗（例如超時或分不出失敗名稱），"
+                                    f"commit {(data.get('commit') or '')[:7]}"}
+
+
+def onMergeTestRun(state, planState, event, config):
+  # 判定都在 conductor 寫事件時算好，這裡只照事件更新，重播時結果才不會因為程式或設定改了而不同
+  data = event["data"]
+  mergeTest = planState["mergeTest"]
+  if data.get("advance"):
+    mergeTest["lastTested"] = data
+  if data.get("split") == "start":
+    mergeTest["split"] = data
+  elif data.get("split") == "clear":
+    mergeTest["split"] = None
+  for taskId, outcome in (data.get("outcomes") or {}).items():
+    taskState = state["tasks"].get(taskKey(planState["id"], taskId))
+    # 已經放棄或被你處理掉的任務不再被這次測試改動
+    if taskState and taskState["status"] == TaskStatus.mergedUntested:
+      applyMergeTestOutcome(taskState, data, outcome)
+
+
+def onMergeTestSkipped(state, planState, event, config):
+  # 任務合併後測試才被關掉（清空 testCommand 或 skipTests）：跟一開始就略過一樣直接完成，不然會一直等測試
+  for taskId in event["data"].get("covers") or []:
+    taskState = state["tasks"].get(taskKey(planState["id"], taskId))
+    if taskState and taskState["status"] == TaskStatus.mergedUntested:
+      taskState["status"] = TaskStatus.done
 
 
 def onPlanAbandoned(state, planState, event, config):
@@ -365,6 +438,8 @@ planEventHandlers = {
   "planRejected": onPlanRejected,
   "planApproved": onPlanApproved,
   "testBaseline": onTestBaseline,
+  "mergeTestRun": onMergeTestRun,
+  "mergeTestSkipped": onMergeTestSkipped,
   "planAbandoned": onPlanAbandoned,
   "planCompleted": onPlanCompleted,
 }
@@ -416,6 +491,8 @@ def onTaskWritten(taskState, event):
     taskState["conflictFiles"] = list(event["data"].get("conflicts", []))
   # 重新合併沒有衝突時不會經過 taskStarted；寫成功本身就代表 worktree 已經乾淨
   taskState["needsClean"] = False
+  # 修正輪開始前已經快轉到最新的 plan 分支；寫完之後的輪次在任務分支上接著改，不再快轉
+  taskState["mergeFix"] = False
 
 
 def onTaskBlocked(taskState, event):
@@ -470,7 +547,12 @@ def onReviewFailed(taskState, event):
 
 
 def onTaskMerged(taskState, event):
-  taskState["status"] = TaskStatus.done
+  # 合併後才測試的 plan 合併時帶 verify：等合併後測試確認才算完成
+  if event["data"].get("verify"):
+    taskState["status"] = TaskStatus.mergedUntested
+    taskState["mergedCommit"] = event["data"].get("commit")
+  else:
+    taskState["status"] = TaskStatus.done
   taskState["needs"] = None
 
 
@@ -523,6 +605,8 @@ retryTargets = {
   "tests": TaskStatus.queued,
   "invalidReview": TaskStatus.toReview,
   "mergeFailed": TaskStatus.merging,
+  # 合併後測試分不出結果：改動已經在 plan 分支裡，重試就是再測一次，不算輪數
+  "mergeTest": TaskStatus.mergedUntested,
 }
 
 
@@ -533,6 +617,9 @@ def onUserDecision(taskState, event):
   needs = taskState["needs"] or {}
   if action == "abandon":
     taskState["status"] = TaskStatus.abandoned
+  elif action == "done" and needs.get("kind") == "mergeTest":
+    # 已經合併過，你接受目前的結果就直接完成，不必再合併一次
+    taskState["status"] = TaskStatus.done
   elif action == "done":
     taskState["status"] = TaskStatus.merging
     taskState["userDone"] = True
@@ -608,6 +695,7 @@ def deriveState(events, plans, config):
   for planIdValue, plan in plans.items():
     state["plans"][planIdValue] = {"id": planIdValue, "title": plan["title"], "status": PlanStatus.draft,
                                    "baseCommit": None, "testBaseline": None, "rejectReason": "",
+                                   "testTiming": None, "mergeTest": {"lastTested": None, "split": None},
                                    "meta": plan["meta"]}
   for event in events:
     eventType = event.get("type")
@@ -636,7 +724,9 @@ def readyTasks(state):
   ready = []
   for taskState in tasksWithStatus(state, TaskStatus.queued):
     dependencies = [state["tasks"].get(taskKey(taskState["plan"], dependencyId)) for dependencyId in taskState["dependsOn"]]
-    if all(dependency and dependency["status"] == TaskStatus.done for dependency in dependencies):
+    # 已合併待測試的前置已經在 plan 分支裡，依賴它的任務不必等合併後測試
+    satisfied = (TaskStatus.done, TaskStatus.mergedUntested)
+    if all(dependency and dependency["status"] in satisfied for dependency in dependencies):
       ready.append(taskState)
   return ready
 

@@ -333,3 +333,22 @@ def test_busyWriterWithoutCliIsClaudeInCardAndLog(approvedProject):
   logView = board_api.agentLogView(approvedProject, "writer")
   assert logView["context"] == {"tokens": 34168, "window": 200000}
   assert logView["tools"][0]["target"] == "calc.py"
+
+
+def test_taskDiffViewShowsFixRoundBranchAfterMergeTestReturn(approvedProject):
+  board_git.ensurePlanWorktree(approvedProject, "P0001", board_git.headCommit(approvedProject))
+  taskPath = board_git.ensureTaskWorktree(approvedProject, "P0001", "T1")
+  (taskPath / "說明.txt").write_text("第一版\n", encoding="utf-8")
+  board_git.commitAll(taskPath, "T1 第一版")
+  commit = board_git.mergeTask(approvedProject, "P0001", "T1", "合併 T1")[1]
+  appendEvent(approvedProject, "taskMerged", plan="P0001", task="T1", roundNumber=1, data={"commit": commit, "verify": True})
+  view = board_api.taskDiffView(approvedProject, "P0001", "T1")
+  assert view["base"] == "merge" and "+第一版" in view["diff"]
+  appendEvent(approvedProject, "mergeTestRun", plan="P0001", data={
+    "commit": commit, "passed": False, "tail": "1 failed", "covers": ["T1"], "advance": True, "split": None,
+    "outcomes": {"T1": {"result": "newFailure", "names": ["t::a"]}}})
+  board_git.fastForwardTaskToPlan(approvedProject, "P0001", "T1")
+  (taskPath / "說明.txt").write_text("修正版\n", encoding="utf-8")
+  board_git.commitAll(taskPath, "T1 修正")
+  view = board_api.taskDiffView(approvedProject, "P0001", "T1")
+  assert view["base"] == "branch" and "+修正版" in view["diff"] and "+第一版" not in view["diff"]

@@ -16,6 +16,37 @@ def test_worktreesLiveBesideProject(gitProject):
   assert board_git.worktreesRoot(gitProject) == gitProject.parent / "proj-worktrees"
 
 
+def test_changedPathsListsOnlyPlanFilesBetweenCommits(gitProject):
+  baseCommit = board_git.headCommit(gitProject)
+  (gitProject / "plans").mkdir()
+  (gitProject / "plans" / "0001-a.md").write_text("plan a\n", encoding="utf-8")
+  (gitProject / "plans" / "0002-說明.md").write_text("plan b\n", encoding="utf-8")
+  nextCommit = board_git.commitAll(gitProject, "送出 plan")
+  assert sorted(board_git.changedPaths(gitProject, baseCommit, nextCommit)) == [
+    "plans/0001-a.md", "plans/0002-說明.md"]
+
+
+def test_changedPathsOfSameCommitIsEmpty(gitProject):
+  commit = board_git.headCommit(gitProject)
+  assert board_git.changedPaths(gitProject, commit, commit) == []
+
+
+def test_changedPathsIncludesChangedCode(gitProject):
+  baseCommit = board_git.headCommit(gitProject)
+  (gitProject / "plans").mkdir()
+  (gitProject / "plans" / "0001-a.md").write_text("plan a\n", encoding="utf-8")
+  nextCommit = writeAndCommit(gitProject, "calc.py", "x = 1\n")
+  assert sorted(board_git.changedPaths(gitProject, baseCommit, nextCommit)) == ["calc.py", "plans/0001-a.md"]
+
+
+def test_changedPathsRaisesWhenCommitMissing(gitProject):
+  commit = board_git.headCommit(gitProject)
+  with pytest.raises(board_git.GitError):
+    board_git.changedPaths(gitProject, "0" * 40, commit)
+  with pytest.raises(board_git.GitError):
+    board_git.changedPaths(gitProject, commit, "不存在的分支")
+
+
 def test_planAndTaskWorktreesAndCommit(gitProject):
   planPath = startPlan(gitProject)
   assert (planPath / "README.md").exists()
@@ -235,3 +266,57 @@ def test_mergePlanIntoTaskKeepsStagedMarkersAsConflicts(gitProject):
   board_git.runGit(taskPath, "add", "-A")
   assert board_git.mergePlanIntoTask(gitProject, "P0001", "T2", "合併最新的 plan 分支") == ["shared.txt"]
   assert board_git.mergeInProgress(taskPath) is True
+
+
+def test_mergeTestWorktreeIsDetachedAtCommitAndReplacedAndRemovedWithPlan(gitProject):
+  planPath = startPlan(gitProject)
+  firstMerge = writeAndCommit(planPath, "a.txt", "第一次合併\n")
+  writeAndCommit(planPath, "b.txt", "之後的合併\n")
+  path = board_git.addMergeTestWorktree(gitProject, "P0001", firstMerge)
+  assert path == board_git.worktreesRoot(gitProject) / "P0001-mergetest"
+  assert board_git.headCommit(path) == firstMerge
+  assert (path / "a.txt").exists() and not (path / "b.txt").exists()
+  assert board_git.runGit(path, "branch", "--show-current") == ""
+  (path / "產物.txt").write_text("上次測試留下的\n", encoding="utf-8")
+  assert board_git.addMergeTestWorktree(gitProject, "P0001", firstMerge) == path
+  assert not (path / "產物.txt").exists()
+  removed = board_git.removePlanWorktrees(gitProject, "P0001")
+  assert "P0001-mergetest" in removed
+  assert not path.exists()
+  assert "P0001-mergetest" not in registeredWorktrees(gitProject)
+
+
+def test_removeMergeTestWorktree(gitProject):
+  path = board_git.addMergeTestWorktree(gitProject, "P0001", board_git.headCommit(gitProject))
+  board_git.removeMergeTestWorktree(gitProject, "P0001")
+  assert not path.exists()
+  board_git.removeMergeTestWorktree(gitProject, "P0001")
+
+
+def test_firstParentCommitsListsEachMergeInOrderWithoutTaskCommits(gitProject):
+  startPlan(gitProject)
+  baseCommit = board_git.headCommit(gitProject)
+  firstTask = writeAndCommit(board_git.ensureTaskWorktree(gitProject, "P0001", "T1"), "a.txt", "T1\n")
+  secondTask = writeAndCommit(board_git.ensureTaskWorktree(gitProject, "P0001", "T2"), "b.txt", "T2\n")
+  firstMerge = board_git.mergeTask(gitProject, "P0001", "T1", "合併 T1")[1]
+  secondMerge = board_git.mergeTask(gitProject, "P0001", "T2", "合併 T2")[1]
+  commits = board_git.firstParentCommits(gitProject, "P0001")
+  assert commits[-3:] == [baseCommit, firstMerge, secondMerge]
+  assert firstTask not in commits and secondTask not in commits
+
+
+def test_fastForwardTaskToPlanAfterMergeAndRefusesDivergedBranch(gitProject):
+  startPlan(gitProject)
+  writeAndCommit(board_git.ensureTaskWorktree(gitProject, "P0001", "T1"), "a.txt", "T1\n")
+  writeAndCommit(board_git.ensureTaskWorktree(gitProject, "P0001", "T2"), "b.txt", "T2\n")
+  board_git.mergeTask(gitProject, "P0001", "T1", "合併 T1")
+  planHead = board_git.mergeTask(gitProject, "P0001", "T2", "合併 T2")[1]
+  taskPath = board_git.taskWorktreePath(gitProject, "P0001", "T1")
+  board_git.fastForwardTaskToPlan(gitProject, "P0001", "T1")
+  assert board_git.headCommit(taskPath) == planHead
+  assert (taskPath / "b.txt").exists()
+  assert board_git.taskDiff(gitProject, "P0001", "T1") == ""
+  writeAndCommit(taskPath, "a.txt", "修正\n")
+  writeAndCommit(board_git.planWorktreePath(gitProject, "P0001"), "c.txt", "plan 又往前\n")
+  with pytest.raises(board_git.GitError):
+    board_git.fastForwardTaskToPlan(gitProject, "P0001", "T1")
