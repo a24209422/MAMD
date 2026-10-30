@@ -201,6 +201,22 @@ class BackgroundTestJob:
       board_agents.killProcessTree(process.pid)
 
 
+def reusedFromText(source):
+  who = " ".join(part for part in (source.get("plan"), source.get("task")) if part)
+  return f"沿用 {who} 的{'基準測試' if source.get('kind') == 'baseline' else '測試'}結果"
+
+
+def testDetails(event, data):
+  details = ["通過" if data.get("passed") else "失敗"]
+  if data.get("reusedFrom"):
+    details.append(reusedFromText(data["reusedFrom"]))
+  if event["type"] == "mergeTestRun":
+    details.append("涵蓋 " + "、".join(data.get("covers") or []))
+    if data.get("reused"):
+      details.append("沿用同一個 commit 的結果")
+  return details
+
+
 def formatEvent(event):
   timeText = (event.get("time") or "")[11:19]
   who = " ".join(part for part in (event.get("plan"), event.get("task"), event.get("agent")) if part)
@@ -211,11 +227,7 @@ def formatEvent(event):
   if event["type"] == "reviewFailed":
     details.append(f"必改 {data.get('mustFix', 0)} 條")
   if event["type"] in ("testRun", "testBaseline", "mergeTestRun"):
-    details.append("通過" if data.get("passed") else "失敗")
-  if event["type"] == "mergeTestRun":
-    details.append("涵蓋 " + "、".join(data.get("covers") or []))
-    if data.get("reused"):
-      details.append("沿用同一個 commit 的結果")
+    details += testDetails(event, data)
   if data.get("mode") == "resolve":
     details.append("解合併衝突")
   for key in ("reason", "action", "note"):
@@ -234,6 +246,27 @@ def mergeTestKey(planIdValue):
   return f"{planIdValue}/mergetest"
 
 
+# 舊的 testRun 沒有記被測的 commit、完整失敗名單和指令，不能拿來當基準
+reusableTestRunFields = ("commit", "failures", "command")
+
+
+def baselineReuseCandidates(events, command):
+  """可以沿用成基準的 (種類, 事件)，新的在前；不論來源 plan 的狀態。"""
+  candidates = []
+  for event in reversed(events):
+    data = event.get("data") or {}
+    if event["type"] == "testBaseline":
+      kind = "baseline"
+    elif event["type"] == "testRun" and all(field in data for field in reusableTestRunFields):
+      kind = "testRun"
+    else:
+      continue
+    # 指令不同，結果就不能比
+    if data.get("commit") and data.get("command") == command:
+      candidates.append((kind, event))
+  return candidates
+
+
 # 合併後測試的結果欄位；逐一測沿用同一個 commit 的結果時照抄這些
 mergeTestRecordFields = ("commit", "command", "passed", "failures", "qualityChecked", "qualityFailures", "tail")
 # 背景跑完整測試、跑完要移除暫時 worktree 的 job
@@ -250,6 +283,7 @@ class Conductor:
     self.jobs = {}
     self.recovered = False
     self.notified = set()
+    self.onlyPlansCache = {}
     # 啟動前的歷史事件不重印，終端機只顯示這次執行期間發生的事
     self.printedCount = len(readEvents(self.projectDir))
     self.roles = {role: self.roleLaunch(roleSpec(self.config, role)) for role in roleNames}
@@ -460,10 +494,49 @@ class Conductor:
     return baseline is None or baseline.get("command") != command
 
   def runTestBaselines(self, state):
+    candidates = None
     for planState in state["plans"].values():
       key = baselineKey(planState["id"])
-      if planState["status"] == PlanStatus.active and key not in self.jobs and self.needsTestBaseline(planState):
+      if planState["status"] != PlanStatus.active or key in self.jobs or not self.needsTestBaseline(planState):
+        continue
+      if candidates is None:
+        # 有 plan 要基準時才讀整份事件紀錄
+        candidates = baselineReuseCandidates(readEvents(self.projectDir), self.config["testCommand"])
+      source = next(((kind, event) for kind, event in candidates
+                     if self.onlyPlansChanged(event["data"]["commit"], planState["baseCommit"])), None)
+      if source is not None:
+        self.reuseTestBaseline(planState, *source)
+      elif not self.waitsForRunningBaseline(planState):
         self.startTestBaseline(planState, key)
+
+  def onlyPlansChanged(self, fromCommit, toCommit):
+    # tests/ 不讀 repo 的 plans/，只差 plan 檔時測試結果不會不同；commit 內容不會變，結果可以一直留著
+    key = (fromCommit, toCommit)
+    if key not in self.onlyPlansCache:
+      try:
+        paths = board_git.changedPaths(self.projectDir, fromCommit, toCommit)
+      except Exception:
+        # 例如來源的 commit 已經不在了：不能確定程式碼相同，就不沿用，照原本流程自己跑
+        return False
+      self.onlyPlansCache[key] = all(path.startswith("plans/") for path in paths)
+    return self.onlyPlansCache[key]
+
+  def waitsForRunningBaseline(self, planState):
+    # 另一份 plan 正在跑程式碼相同的基準：這一輪先不啟動，等它記下來再沿用，不同時跑兩份完整測試
+    return any(info["kind"] == "baseline" and info["plan"] != planState["id"]
+               and self.onlyPlansChanged(info["baseCommit"], planState["baseCommit"])
+               for info in self.jobs.values())
+
+  def reuseTestBaseline(self, planState, kind, event):
+    data = event["data"]
+    # 不建立基準 worktree、不跑測試；commit 記這份 plan 自己的 baseCommit，來源另外記在 reusedFrom
+    appendEvent(self.projectDir, "testBaseline", plan=planState["id"],
+                data={"command": self.config["testCommand"], "commit": planState["baseCommit"],
+                      "passed": bool(data.get("passed")), "failures": list(data.get("failures") or []),
+                      "qualityChecked": bool(data.get("qualityChecked")),
+                      "qualityFailures": list(data.get("qualityFailures") or []), "tail": data.get("tail", ""),
+                      "reusedFrom": {"kind": kind, "plan": event.get("plan"), "task": event.get("task"),
+                                     "commit": data["commit"]}})
 
   def startTestBaseline(self, planState, key):
     planIdValue, baseCommit = planState["id"], planState["baseCommit"]
