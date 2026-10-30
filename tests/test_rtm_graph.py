@@ -1,4 +1,4 @@
-from rtm_graph import analyzePlan, parseArea
+from rtm_graph import analyzePlan, buildSingle, formatList, main, parseArea
 
 
 def test_dependsOnParsedIntoTasks(writePlan):
@@ -277,3 +277,50 @@ def test_planHeaderAreaWithModules(writePlan):
                    extraMeta="area: [前端/縮圖顯示, 後端/縮圖]\n")
   assert parseArea(analyzePlan(path)["meta"]["area"]) == [
     {"side": "前端", "module": "縮圖顯示"}, {"side": "後端", "module": "縮圖"}]
+
+
+def test_formatListJoinsListsAndHandlesMissing():
+  assert formatList(["前端", "後端"]) == "前端、後端"
+  assert formatList("P0001") == "P0001"
+  assert formatList(None) == ""
+
+
+def test_mainWithoutArgumentsPrintsUsage(monkeypatch, capsys):
+  monkeypatch.setattr("sys.argv", ["rtm_graph.py"])
+  assert main() == 1
+  assert capsys.readouterr().out == "用法：python rtm_graph.py <plan.md> [輸出.html]\n"
+
+
+def test_mainWritesHtmlNextToPlanAndPrintsCleanSummary(writePlan, monkeypatch, capsys):
+  planPath = writePlan("0001-demo.md", ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |"])
+  monkeypatch.setattr("sys.argv", ["rtm_graph.py", str(planPath)])
+  assert main() == 0
+  htmlPath = planPath.resolve().with_suffix(".html")
+  assert "<title>測試 plan</title>" in htmlPath.read_text(encoding="utf-8")
+  assert capsys.readouterr().out == f"RTM 檢查：0001-demo.md（1 列）\n沒有發現斷線\n圖：{htmlPath}\n"
+
+
+def test_mainWritesGivenOutputAndListsProblemsBySeverity(writePlan, tmp_path, monkeypatch, capsys):
+  planPath = writePlan("0001-demo.md", [
+    "| R1 需求一 | | D1 做法一 | | | | |",
+    "| | | | | | | |",
+  ])
+  outputPath = tmp_path / "out" / "graph.html"
+  outputPath.parent.mkdir()
+  monkeypatch.setattr("sys.argv", ["rtm_graph.py", str(planPath), str(outputPath)])
+  assert main() == 0
+  assert outputPath.exists()
+  assert not planPath.with_suffix(".html").exists()
+  # 空白列不畫進圖，但列數照表格實際列數算；沒有問題的嚴重度不印
+  assert capsys.readouterr().out == (
+    "RTM 檢查：0001-demo.md（2 列）\n"
+    "紅 1：R1 缺任務（第 1 列）\n"
+    "黃 1：R1 缺 AI 理解（第 1 列）\n"
+    f"圖：{outputPath.resolve()}\n")
+
+
+def test_buildSingleRejectsPlanWithoutTable(tmp_path, capsys):
+  planPath = writeRawPlan(tmp_path, "# 測試 plan\n\n只有說明\n")
+  assert buildSingle(planPath, None) == 1
+  assert not planPath.with_suffix(".html").exists()
+  assert capsys.readouterr().out == "0001-demo.md 裡找不到追溯矩陣（要有同時含「需求」「任務」欄的表格）\n"
