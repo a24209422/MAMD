@@ -411,11 +411,34 @@ def killJobs(conductor):
     info["job"].kill()
 
 
+def firstReviewCallRecorded(scenarioDir):
+  # 假 agent 用 write_text 寫紀錄，檔案建立時內容可能還沒寫完；在那時暫停會留下殘缺紀錄，
+  # 所以要能完整解析才算記下，寫入中的讀取失敗（含 Windows 的共用鎖定）都當成還沒好
+  try:
+    json.loads((scenarioDir / "call-review-P0001-T1-1.json").read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return False
+  return True
+
+
+def test_firstReviewCallRecordedNeedsCompleteJson(tmp_path):
+  callPath = tmp_path / "call-review-P0001-T1-1.json"
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_text("", encoding="utf-8")
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_text('{"argv": ["exec"], "prompt": "審', encoding="utf-8")
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_bytes('{"prompt": "審'.encode("utf-8")[:-1])
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_text('{"argv": ["exec"], "prompt": "審查"}', encoding="utf-8")
+  assert firstReviewCallRecorded(tmp_path)
+
+
 def pauseAfterFirstReviewCall(conductor, scenarioDir):
   runUntil(conductor, taskIs(TaskStatus.reviewing))
   # 審查中是父程序派工時就寫入的狀態，假 reviewer 要等子程序真的啟動才記下第一次呼叫；
   # 在那之前暫停，重啟後會再拿到情境裡的第一次 hang
-  runUntil(conductor, lambda state: (scenarioDir / "call-review-P0001-T1-1.json").exists())
+  runUntil(conductor, lambda state: firstReviewCallRecorded(scenarioDir))
   # 暫停會中斷審查，任務回到待審查
   board_core.appendEvent(conductor.projectDir, "paused", data={"reason": "測試暫停"})
   runUntil(conductor, lambda current: not conductor.jobs and taskIs(TaskStatus.toReview)(current))
