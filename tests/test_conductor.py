@@ -799,6 +799,28 @@ def test_nextPlanReusesLastTaskTestRunAfterPlanMergedToMain(startBoard, writePla
   assert "沿用 P0001 T2 的測試結果" in formatEvent(eventsOf(conductor, "testBaseline")[-1])
 
 
+def test_nextPlanReusesMergeTestRunAfterPlanMergedToMain(startBoard, writePlan, gitProject, tmp_path, monkeypatch):
+  body = "print('FAILED tests/test_old.py::test_old - AssertionError')\nsys.exit(1)\n"
+  created = recordBaselineWorktrees(monkeypatch)
+  conductor, _ = startBoard(oneTask, testTiming="afterMerge", testCommand=pythonTestCommand(tmp_path, body))
+  runUntil(conductor, planDone)
+  lastRun = eventsOf(conductor, "mergeTestRun")[-1]["data"]
+  mergePlanIntoMain(gitProject, "P0001")
+  baseCommit = approvePlan(gitProject, writePlan, "P0002")
+  conductor.tick()
+  # 新 plan 只多了 plan 檔，不能再建立基準 worktree 或啟動完整測試
+  assert created == ["P0001"]
+  assert "P0002/baseline" not in conductor.jobs
+  baseline = conductor.currentState()[1]["plans"]["P0002"]["testBaseline"]
+  assert baseline["commit"] == baseCommit
+  assert baseline["reusedFrom"] == {"kind": "mergeTestRun", "plan": "P0001", "task": None,
+                                    "commit": lastRun["commit"]}
+  for field in ("command", "passed", "failures", "qualityChecked", "qualityFailures", "tail"):
+    assert baseline[field] == lastRun[field]
+  assert baseline["failures"] == ["tests/test_old.py::test_old"]
+  assert "沿用 P0001 的合併後測試結果" in formatEvent(eventsOf(conductor, "testBaseline")[-1])
+
+
 def test_codeChangeBetweenPlansRunsOwnBaseline(startBoard, writePlan, gitProject, monkeypatch):
   created = recordBaselineWorktrees(monkeypatch)
   conductor, _ = startBoard(oneTask, testCommand="git --version")
@@ -889,9 +911,13 @@ def test_baselineReuseCandidatesSkipOldTestRunsAndOtherCommands():
     makeEvent("testRun", plan="P0001", task="T3", command="pytest -q", commit="c3", failures=["t::x"], passed=False,
               tail=""),
     makeEvent("mergeTestRun", plan="P0001", command="pytest -q", commit="d4", failures=[], passed=True, tail=""),
+    makeEvent("mergeTestRun", plan="P0001", command="pytest", commit="e5", failures=[], passed=True, tail=""),
+    makeEvent("mergeTestRun", plan="P0001", command="pytest -q", commit="f6", passed=False, tail=""),
+    makeEvent("mergeTestRun", plan="P0001", command="pytest -q", commit=None, failures=[], passed=True, tail=""),
   ]
   candidates = conductorModule.baselineReuseCandidates(events, "pytest -q")
-  assert [(kind, event["task"]) for kind, event in candidates] == [("testRun", "T3"), ("baseline", None)]
+  assert [(kind, event["data"]["commit"]) for kind, event in candidates] == [
+    ("mergeTestRun", "d4"), ("testRun", "c3"), ("baseline", "a1")]
 
 
 def test_testCommandTimeoutKillsProcessTree(startBoard, tmp_path):

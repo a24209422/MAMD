@@ -203,7 +203,8 @@ class BackgroundTestJob:
 
 def reusedFromText(source):
   who = " ".join(part for part in (source.get("plan"), source.get("task")) if part)
-  return f"沿用 {who} 的{'基準測試' if source.get('kind') == 'baseline' else '測試'}結果"
+  testKind = {"baseline": "基準測試", "mergeTestRun": "合併後測試"}.get(source.get("kind"), "測試")
+  return f"沿用 {who} 的{testKind}結果"
 
 
 def testDetails(event, data):
@@ -246,7 +247,7 @@ def mergeTestKey(planIdValue):
   return f"{planIdValue}/mergetest"
 
 
-# 舊的 testRun 沒有記被測的 commit、完整失敗名單和指令，不能拿來當基準
+# 任務測試與合併後測試都要有被測的 commit、完整失敗名單和指令，才能拿來當基準
 reusableTestRunFields = ("commit", "failures", "command")
 
 
@@ -257,8 +258,8 @@ def baselineReuseCandidates(events, command):
     data = event.get("data") or {}
     if event["type"] == "testBaseline":
       kind = "baseline"
-    elif event["type"] == "testRun" and all(field in data for field in reusableTestRunFields):
-      kind = "testRun"
+    elif event["type"] in ("testRun", "mergeTestRun") and all(field in data for field in reusableTestRunFields):
+      kind = event["type"]
     else:
       continue
     # 指令不同，結果就不能比
