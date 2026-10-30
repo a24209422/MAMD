@@ -365,13 +365,15 @@ class Conductor:
     self.collectFinishedJobs(plans, state)
     plans, state = self.currentState()
     if not state["paused"]:
+      # 基準先拿測試名額：基準沒記下來前整份 plan 不派工
+      self.runTestBaselines(state)
+      plans, state = self.currentState()
       self.startTests(state)
     self.ensurePlanWorktrees(state)
     self.mergeReadyTasks(state)
     plans, state = self.currentState()
     self.completeFinishedPlans(state)
     if not state["paused"]:
-      self.runTestBaselines(state)
       self.startMergeTests(state)
       plans, state = self.currentState()
       self.startReviews(plans, state)
@@ -505,9 +507,15 @@ class Conductor:
       source = next(((kind, event) for kind, event in candidates
                      if self.onlyPlansChanged(event["data"]["commit"], planState["baseCommit"])), None)
       if source is not None:
+        # 沿用不跑測試，不佔測試名額
         self.reuseTestBaseline(planState, *source)
-      elif not self.waitsForRunningBaseline(planState):
+      elif not self.waitsForRunningBaseline(planState) and self.freeTestSlots() > 0:
         self.startTestBaseline(planState, key)
+
+  def freeTestSlots(self):
+    # 基準和任務測試都是完整測試，合計不超過 maxParallelTests；名額滿了留到之後的 tick
+    running = sum(1 for info in self.jobs.values() if info["kind"] in ("baseline", "test"))
+    return self.config.get("maxParallelTests", defaultConfig["maxParallelTests"]) - running
 
   def onlyPlansChanged(self, fromCommit, toCommit):
     # tests/ 不讀 repo 的 plans/，只差 plan 檔時測試結果不會不同；commit 內容不會變，結果可以一直留著
@@ -867,20 +875,33 @@ class Conductor:
   def startTests(self, state):
     if not self.config["testCommand"]:
       return
-    # 測試不佔寫程式、審查的名額，也不限同時數量：同時進行的任務數已經被寫程式的名額限制住
-    for taskState in tasksWithStatus(state, TaskStatus.testing):
-      key = taskKey(taskState["plan"], taskState["task"])
-      planState = state["plans"][taskState["plan"]]
-      if key in self.jobs or planState["status"] != PlanStatus.active or self.needsTestBaseline(planState):
-        continue
-      info = {"kind": "test", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
-              "agent": taskState["agent"]}
-      worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
-      # 記下被測的 commit 和指令：之後程式碼相同時才能沿用這次的結果
-      info["commit"] = board_git.headCommit(worktree)
-      info["command"] = self.config["testCommand"]
-      info["job"] = BackgroundTestJob(self.runTestCommand, worktree).start()
-      self.jobs[key] = info
+    # 測試不佔寫程式、審查的名額；同時跑的完整測試數由 maxParallelTests 限制，等待中的任務狀態維持測試中、不寫事件
+    waiting = [taskState for taskState in tasksWithStatus(state, TaskStatus.testing)
+               if taskKey(taskState["plan"], taskState["task"]) not in self.jobs
+               and not self.needsTestBaseline(state["plans"][taskState["plan"]])]
+    slots = self.freeTestSlots()
+    if not waiting or slots <= 0:
+      return
+    for taskState in self.inTestingOrder(waiting)[:slots]:
+      self.startTest(taskState)
+
+  def inTestingOrder(self, tasks):
+    # 先進測試中的先測：看最後一次 taskWritten 在事件紀錄裡的位置，時間只到秒，同一秒寫完的也分得出先後
+    written = {}
+    for index, event in enumerate(readEvents(self.projectDir)):
+      if event["type"] == "taskWritten":
+        written[taskKey(event.get("plan"), event.get("task"))] = index
+    return sorted(tasks, key=lambda taskState: written.get(taskKey(taskState["plan"], taskState["task"]), -1))
+
+  def startTest(self, taskState):
+    info = {"kind": "test", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
+            "agent": taskState["agent"]}
+    worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
+    # 記下被測的 commit 和指令：之後程式碼相同時才能沿用這次的結果
+    info["commit"] = board_git.headCommit(worktree)
+    info["command"] = self.config["testCommand"]
+    info["job"] = BackgroundTestJob(self.runTestCommand, worktree).start()
+    self.jobs[taskKey(info["plan"], info["task"])] = info
 
   def finishTests(self, planState, info):
     job = info["job"]
