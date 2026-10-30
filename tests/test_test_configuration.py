@@ -88,6 +88,19 @@ def test_invalid_test_settings_are_rejected(config):
   assert board_core.configProblems(config)
 
 
+def test_max_parallel_tests_defaults_to_one_and_reads_user_value(gitProject):
+  assert board_core.loadConfig(gitProject)["maxParallelTests"] == 1
+  write_config(gitProject, {"testCommand": "npm test", "maxParallelTests": 2})
+  assert board_core.loadConfig(gitProject)["maxParallelTests"] == 2
+  assert board_core.configProblems(board_core.readUserConfig(gitProject)) == []
+
+
+@pytest.mark.parametrize("value", [0, -1, True, "2", 1.5, None])
+def test_invalid_max_parallel_tests_is_rejected(value):
+  problems = board_core.configProblems({"testCommand": "npm test", "maxParallelTests": value})
+  assert any("maxParallelTests 要寫成 1 以上的整數" in problem for problem in problems)
+
+
 @pytest.mark.parametrize("config", [{}, {"testCommand": "   "}])
 def test_main_refuses_missing_test_choice_without_taking_lock(gitProject, config, monkeypatch, capsys):
   write_config(gitProject, config)

@@ -32,6 +32,7 @@ legacyConfigKeys = {
 }
 defaultConfig = {
   "maxParallel": 3,
+  "maxParallelTests": 1,
   "maxRounds": 3,
   "timeoutMinutes": 30,
   "testCommand": "",
@@ -95,6 +96,9 @@ def configProblems(userConfig, requireTestChoice=False):
   for role in roleNames:
     if role in userConfig:
       problems.extend(roleConfigProblems(role, userConfig[role]))
+  maxParallelTests = userConfig.get("maxParallelTests", defaultConfig["maxParallelTests"])
+  if type(maxParallelTests) is not int or maxParallelTests < 1:
+    problems.append(f"maxParallelTests 要寫成 1 以上的整數，現在是 {json.dumps(maxParallelTests, ensure_ascii=False)}")
   return problems + testConfigProblems(userConfig, requireTestChoice)
 
 
