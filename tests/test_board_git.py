@@ -16,6 +16,37 @@ def test_worktreesLiveBesideProject(gitProject):
   assert board_git.worktreesRoot(gitProject) == gitProject.parent / "proj-worktrees"
 
 
+def test_changedPathsListsOnlyPlanFilesBetweenCommits(gitProject):
+  baseCommit = board_git.headCommit(gitProject)
+  (gitProject / "plans").mkdir()
+  (gitProject / "plans" / "0001-a.md").write_text("plan a\n", encoding="utf-8")
+  (gitProject / "plans" / "0002-說明.md").write_text("plan b\n", encoding="utf-8")
+  nextCommit = board_git.commitAll(gitProject, "送出 plan")
+  assert sorted(board_git.changedPaths(gitProject, baseCommit, nextCommit)) == [
+    "plans/0001-a.md", "plans/0002-說明.md"]
+
+
+def test_changedPathsOfSameCommitIsEmpty(gitProject):
+  commit = board_git.headCommit(gitProject)
+  assert board_git.changedPaths(gitProject, commit, commit) == []
+
+
+def test_changedPathsIncludesChangedCode(gitProject):
+  baseCommit = board_git.headCommit(gitProject)
+  (gitProject / "plans").mkdir()
+  (gitProject / "plans" / "0001-a.md").write_text("plan a\n", encoding="utf-8")
+  nextCommit = writeAndCommit(gitProject, "calc.py", "x = 1\n")
+  assert sorted(board_git.changedPaths(gitProject, baseCommit, nextCommit)) == ["calc.py", "plans/0001-a.md"]
+
+
+def test_changedPathsRaisesWhenCommitMissing(gitProject):
+  commit = board_git.headCommit(gitProject)
+  with pytest.raises(board_git.GitError):
+    board_git.changedPaths(gitProject, "0" * 40, commit)
+  with pytest.raises(board_git.GitError):
+    board_git.changedPaths(gitProject, commit, "不存在的分支")
+
+
 def test_planAndTaskWorktreesAndCommit(gitProject):
   planPath = startPlan(gitProject)
   assert (planPath / "README.md").exists()
