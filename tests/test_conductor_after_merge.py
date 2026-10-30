@@ -1,3 +1,4 @@
+import subprocess
 import sys
 import time
 
@@ -157,6 +158,44 @@ def test_dependentStartsWhileItsPrerequisiteWaitsForMergeTest(startBoard, tmp_pa
   runUntil(conductor, planDone)
   events = [(event["type"], event["task"]) for event in board_core.readEvents(conductor.projectDir)]
   assert events.index(("taskStarted", "T2")) < events.index(("mergeTestRun", None))
+
+
+def approveAfterMergePlan(gitProject, writePlan, planIdValue):
+  import board as boardCli
+
+  # baseCommit 有程式碼改動，基準不能沿用，要自己跑
+  (gitProject / "calc.py").write_text("def add(a, b):\n  return a + b\n", encoding="utf-8")
+  subprocess.run(["git", "add", "calc.py"], cwd=gitProject, check=True, capture_output=True)
+  subprocess.run(["git", "commit", "-q", "-m", "改程式"], cwd=gitProject, check=True, capture_output=True)
+  writePlan(f"{planIdValue[1:]}-next.md", oneTask, planId=planIdValue, projectDir=gitProject)
+  assert boardCli.cmdSubmit(gitProject, planIdValue) == 0
+  assert boardCli.cmdApprove(gitProject, planIdValue, confirm=lambda prompt: "y", testTiming="afterMerge") == 0
+
+
+def logOrder(logPath):
+  return [tuple(line.split()[:2]) for line in logPath.read_text(encoding="utf-8").splitlines()]
+
+
+def test_mergeTestSharesTestSlotWithBaseline(startBoard, writePlan, gitProject, tmp_path):
+  command, logPath = sleepyCommand(tmp_path, {"P0001-mergetest": 4, "P0002-baseline": 1})
+  conductor, _ = startBoard(oneTask, testTiming="afterMerge", testCommand=command)
+  runUntil(conductor, lambda state: "P0001/mergetest" in conductor.jobs)
+  approveAfterMergePlan(gitProject, writePlan, "P0002")
+  # 預設 maxParallelTests 是 1：合併後測試在跑，P0002 的基準等它結束才開始
+  conductor.tick()
+  assert "P0002/baseline" not in conductor.jobs and "P0001/mergetest" in conductor.jobs
+  fullTestKinds = ("test", "baseline", "mergeTest")
+  mostRunning = []
+
+  def bothDone(state):
+    mostRunning.append(sum(1 for info in conductor.jobs.values() if info["kind"] in fullTestKinds))
+    return all(state["plans"][planIdValue]["status"] == PlanStatus.completed for planIdValue in ("P0001", "P0002"))
+
+  runUntil(conductor, bothDone)
+  assert max(mostRunning) == 1
+  order = logOrder(logPath)
+  assert order.index(("end", "P0001-mergetest")) < order.index(("start", "P0002-baseline"))
+  assert order.index(("end", "P0002-baseline")) < order.index(("start", "P0002-mergetest"))
 
 
 failT2FirstVersion = ("t2 = pathlib.Path('T2.txt')\n"
