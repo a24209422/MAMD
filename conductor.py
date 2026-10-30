@@ -513,8 +513,8 @@ class Conductor:
         self.startTestBaseline(planState, key)
 
   def freeTestSlots(self):
-    # 基準和任務測試都是完整測試，合計不超過 maxParallelTests；名額滿了留到之後的 tick
-    running = sum(1 for info in self.jobs.values() if info["kind"] in ("baseline", "test"))
+    # 基準、任務測試和合併後測試都是完整測試，合計不超過 maxParallelTests；名額滿了留到之後的 tick
+    running = sum(1 for info in self.jobs.values() if info["kind"] in ("test", *detachedTestKinds))
     return self.config.get("maxParallelTests", defaultConfig["maxParallelTests"]) - running
 
   def onlyPlansChanged(self, fromCommit, toCommit):
@@ -659,6 +659,9 @@ class Conductor:
     if splitUsable and info["commit"] == split["commit"]:
       # 這個 commit 就是一開始一起測的那次，結果已經有了，不必重跑
       self.writeMergeTestRun(info, {field: split.get(field) for field in mergeTestRecordFields}, reused=True)
+      return
+    if self.freeTestSlots() <= 0:
+      # 名額滿了先不跑，任務維持已合併待測試，留到之後的 tick
       return
     worktree = board_git.addMergeTestWorktree(self.projectDir, planIdValue, info["commit"])
     info["job"] = BackgroundTestJob(self.runTestCommand, worktree).start()
