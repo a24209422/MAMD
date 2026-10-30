@@ -120,6 +120,158 @@ def test_parseAreaHandlesMissingAndSingleValue():
   assert parseArea("前端/上傳") == [{"side": "前端", "module": "上傳"}]
 
 
+def graphOf(writePlan, rows):
+  return analyzePlan(writePlan("0001-demo.md", rows))["graph"]
+
+
+def test_rowWithoutRequirementHangsDashedFromRoot(writePlan):
+  graph = graphOf(writePlan, [
+    "| | | D2 做法二 | | T2 任務二 | | 驗證二 |",
+    "| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |",
+  ])
+  # 沒有需求的列不管寫在第幾列都排到最後
+  assert [row["rowNumber"] for row in graph.rows] == [2, 1]
+  assert graph.problems["orange"] == ["D2 → T2 沒有對應需求（第 1 列）"]
+  assert graph.nodes["gap1"] == {"key": "gap1", "kind": "gap", "severity": "orange", "text": "沒有對應需求"}
+  assert list(graph.edges.items()) == [
+    (("root", "R1"), "solid"), (("R1", "D1"), "solid"), (("D1", "T1"), "solid"), (("T1", "verify-row2"), "solid"),
+    (("root", "gap1"), "extra"), (("gap1", "D2"), "solid"), (("D2", "T2"), "solid"), (("T2", "verify-row1"), "solid"),
+  ]
+  assert graph.nodes["D2"]["withRequirement"] is False
+  assert graph.tasks["T2"]["requirementIds"] == []
+  assert graph.nodeClass(graph.nodes["T2"]) == "extra"
+
+
+def test_rowWithoutAnyIdIsCalledThisRow(writePlan):
+  graph = graphOf(writePlan, ["| | | 做法三 | | | | |"])
+  assert graph.problems["orange"] == ["這列 沒有對應需求（第 1 列）"]
+  assert graph.problems["red"] == ["這列 缺任務（第 1 列）"]
+  assert graph.problems["yellow"] == ["第 1 列的做法沒有編號"]
+  assert graph.nodes["decision-row1"]["text"] == "做法三"
+
+
+def test_missingDecisionAndTaskMergeIntoOneGap(writePlan):
+  graph = graphOf(writePlan, ["| R1 需求一 | 理解一 | | | | | |"])
+  assert graph.problems["red"] == ["R1 缺做法、任務（第 1 列）"]
+  assert graph.nodes["gap1"]["text"] == "缺：做法、任務"
+  assert graph.nodes["gap1"]["severity"] == "red"
+  assert list(graph.edges.items()) == [(("root", "R1"), "solid"), (("R1", "gap1"), "solid")]
+  # 沒有任務就不要求驗證
+  assert graph.problems["yellow"] == []
+  assert graph.tasks == {}
+
+
+def test_missingDecisionGapSitsBeforeTask(writePlan):
+  graph = graphOf(writePlan, ["| R1 需求一 | 理解一 | | | T1 任務一 | | 驗證一 |"])
+  assert graph.problems["red"] == ["R1 缺做法（第 1 列）"]
+  assert graph.nodes["gap1"]["text"] == "缺：做法"
+  assert list(graph.edges) == [("root", "R1"), ("R1", "gap1"), ("gap1", "T1"), ("T1", "verify-row1")]
+
+
+def test_missingTaskGapSitsAfterDecision(writePlan):
+  graph = graphOf(writePlan, ["| R1 需求一 | 理解一 | D1 做法一 | | | | 驗證一 |"])
+  assert graph.problems["red"] == ["R1 缺任務（第 1 列）"]
+  assert graph.nodes["gap1"]["text"] == "缺：任務"
+  assert list(graph.edges) == [("root", "R1"), ("R1", "D1"), ("D1", "gap1"), ("gap1", "verify-row1")]
+
+
+def test_taskWithoutVerifyGetsYellowGap(writePlan):
+  graph = graphOf(writePlan, ["| R1 需求一 | 理解一 | D1 做法一 | | T1 任務一 | | |"])
+  assert graph.problems["yellow"] == ["T1 缺驗證（第 1 列）"]
+  assert graph.nodes["gap1"] == {"key": "gap1", "kind": "gap", "severity": "yellow", "text": "缺：驗證"}
+  assert list(graph.edges)[-1] == ("T1", "gap1")
+  assert graph.problems["red"] == []
+
+
+def test_taskWithoutIdAndVerifyIsCalledTask(writePlan):
+  graph = graphOf(writePlan, ["| R1 需求一 | 理解一 | D1 做法一 | | 任務一 | | |"])
+  assert graph.problems["yellow"] == ["第 1 列的任務沒有編號", "任務 缺驗證（第 1 列）"]
+  assert graph.tasks["task-row1"]["id"] is None
+  assert graph.tasks["task-row1"]["text"] == "任務一"
+
+
+def test_requirementWithoutIdIsCalledRequirement(writePlan):
+  graph = graphOf(writePlan, ["| 需求一 | 理解一 | D1 做法一 | | | | |"])
+  assert graph.problems["red"] == ["需求 缺任務（第 1 列）"]
+  assert graph.problems["yellow"] == ["第 1 列的需求沒有編號"]
+  assert ("root", "requirement-row1") in graph.edges
+
+
+def test_taskAcrossRowsCollectsUniqueRequirementsAndDependencies(writePlan):
+  graph = graphOf(writePlan, [
+    "| R1 需求一 | 理解一 | D1 做法一 | | T1 任務一 | T2 | 驗證一 |",
+    "| R1 | | D1 | | T1 | T2, T3 | 驗證二 |",
+    "| R2 需求二 | 理解二 | D1 | | T1 | | 驗證三 |",
+    "| R2 | | D1 | | T2 任務二 | | 驗證四 |",
+    "| R2 | | D1 | | T3 任務三 | | 驗證五 |",
+  ])
+  task = graph.tasks["T1"]
+  assert task["text"] == "任務一"
+  assert task["rowNumbers"] == [1, 2, 3]
+  assert task["requirementIds"] == ["R1", "R2"]
+  assert task["dependsOn"] == ["T2", "T3"]
+  assert graph.problems["red"] == []
+
+
+def test_understandingInLaterRowCounts(writePlan):
+  graph = graphOf(writePlan, [
+    "| R1 需求一 | | D1 做法一 | | T1 任務一 | | 驗證一 |",
+    "| R1 | 理解一 | D1 | | T2 任務二 | | 驗證二 |",
+  ])
+  assert graph.problems["yellow"] == []
+
+
+def test_requirementWithoutUnderstandingIsYellow(writePlan):
+  graph = graphOf(writePlan, [
+    "| R1 需求一 | | D1 做法一 | | T1 任務一 | | 驗證一 |",
+    "| 需求二 | | D1 | | T2 任務二 | | 驗證二 |",
+  ])
+  assert graph.problems["yellow"] == ["第 2 列的需求沒有編號", "R1 缺 AI 理解（第 1 列）", "需求二 缺 AI 理解（第 2 列）"]
+  assert graph.nodeClass(graph.nodes["R1"]) == "incomplete"
+
+
+def test_unknownDependencyOfTaskWithoutId(writePlan):
+  graph = graphOf(writePlan, ["| R1 需求一 | 理解一 | D1 做法一 | | 任務一 | T9 | 驗證一 |"])
+  assert graph.problems["red"] == ["任務 的前置 T9 不存在（第 1 列）"]
+
+
+def test_dependencyCycleListsPath(writePlan):
+  graph = graphOf(writePlan, [
+    "| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | T2 | 驗證一 |",
+    "| R1 | | D1 | | T2 任務二 | T1 | 驗證二 |",
+  ])
+  assert graph.problems["red"] == ["任務互相等待：T1 → T2 → T1"]
+
+
+def test_planWithoutTableHasNoGraph(tmp_path):
+  plan = analyzePlan(writeRawPlan(tmp_path, "# 測試 plan\n\n只有說明\n"))
+  assert plan["graph"] is None
+  assert plan["rowCount"] == 0
+  assert plan["title"] == "測試 plan"
+  assert plan["extraText"] == "只有說明"
+
+
+def test_blankRowsSkippedButCountedAndShortRowsPadded(writePlan):
+  plan = analyzePlan(writePlan("0001-demo.md", [
+    "| R1 需求一 | 理解一 | D1 做法一 |",
+    "| | | | | | | |",
+  ]))
+  graph = plan["graph"]
+  assert plan["rowCount"] == 2
+  assert [row["rowNumber"] for row in graph.rows] == [1]
+  assert graph.rows[0]["verify"] == ""
+  assert graph.problems["red"] == ["R1 缺任務（第 1 列）"]
+
+
+def test_rootLabelJoinsIdAndTitle(writePlan, tmp_path):
+  assert graphOf(writePlan, ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |"]).nodes["root"]["text"] == "P0001 測試 plan"
+  noId = tmp_path / "0003-noid.md"
+  noId.write_text("# 沒有檔頭\n\n" + rtmTable, encoding="utf-8")
+  plan = analyzePlan(noId)
+  assert plan["meta"] == {}
+  assert plan["graph"].nodes["root"]["text"] == "沒有檔頭"
+
+
 def test_planHeaderAreaWithModules(writePlan):
   path = writePlan("0001-area.md", ["| R1 需求 | 理解 | D1 做法 | - | T1 任務 | | 驗證 |"],
                    extraMeta="area: [前端/縮圖顯示, 後端/縮圖]\n")
