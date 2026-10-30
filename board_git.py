@@ -53,6 +53,13 @@ def headCommit(projectDir):
   return runGit(projectDir, "rev-parse", "HEAD")
 
 
+def changedPaths(projectDir, fromCommit, toCommit):
+  # 不偵測改名：搬走的檔案舊路徑也算改過；quotePath 關掉中文檔名才不會變成跳脫字元
+  output = runGit(projectDir, "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames",
+                  fromCommit, toCommit, "--")
+  return output.splitlines()
+
+
 def hasChanges(path):
   return runGit(path, "status", "--porcelain") != ""
 
