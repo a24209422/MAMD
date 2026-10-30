@@ -281,6 +281,29 @@ def test_statusAndIndex(gitProject, writePlan, capsys):
   assert (gitProject / "plans" / "_review" / "index.html").exists()
 
 
+def test_statusShowsPauseRejectReasonAgentAndNeeds(gitProject, writePlan, capsys):
+  writePlan("0001-ok.md", cleanRows, planId="P0001", title="批次上傳", projectDir=gitProject)
+  writePlan("0002-ok.md", cleanRows, planId="P0002", title="系統監控", projectDir=gitProject)
+  board.cmdSubmit(gitProject, "P0001")
+  board.cmdReject(gitProject, "P0001", "缺驗證")
+  board.cmdSubmit(gitProject, "P0002")
+  board.cmdApprove(gitProject, "P0002", confirm=lambda prompt: "y")
+  board_core.appendEvent(gitProject, "taskStarted", plan="P0002", task="T1", agent="writer-1", roundNumber=1)
+  board_core.appendEvent(gitProject, "needsYou", plan="P0002", task="T2", data={"kind": "noChanges", "reason": "沒有改動"})
+  board.cmdStop(gitProject)
+  capsys.readouterr()
+  assert board.cmdStatus(gitProject) == 0
+  assert capsys.readouterr().out.splitlines() == [
+    f"已暫停：{board.stopReason}",
+    "P0001 批次上傳｜退回｜退回原因：缺驗證",
+    "P0002 系統監控｜進行中｜完成 0/2",
+    "  T1 寫程式中（第 1/3 輪，writer-1）",
+    "  T2 等你處理（第 1/3 輪）｜沒有改動",
+  ]
+  assert board.cmdStatus(gitProject, "P0001") == 0
+  assert capsys.readouterr().out.splitlines() == [f"已暫停：{board.stopReason}", "P0001 批次上傳｜退回｜退回原因：缺驗證"]
+
+
 def writeEvents(projectDir, events):
   boardPath = board_core.boardDir(projectDir)
   boardPath.mkdir(parents=True, exist_ok=True)
@@ -380,6 +403,50 @@ def test_humanOnlyCommandsRefusedWhenRedirectedToNul(gitProject):
   stopped = runWithNul("stop")
   assert "paused" not in eventTypes(gitProject)
   assert stopped.returncode == 2, stopped.stderr
+
+
+class FakeStream:
+  def __init__(self, tty):
+    self.tty = tty
+
+  def isatty(self):
+    return self.tty
+
+
+@pytest.mark.parametrize("stdinTty, stdoutTty, expected", [(True, True, True), (True, False, False), (False, True, False)])
+def test_isHumanOutsideWindowsNeedsBothStreamsToBeTerminals(monkeypatch, stdinTty, stdoutTty, expected):
+  monkeypatch.setattr(board.os, "name", "posix")
+  monkeypatch.setattr(board.sys, "stdin", FakeStream(stdinTty))
+  monkeypatch.setattr(board.sys, "stdout", FakeStream(stdoutTty))
+  assert board.isHuman() is expected
+
+
+def test_isHumanOnWindowsAsksConsoleInsteadOfIsatty(monkeypatch):
+  # isatty 都說是終端機，但只要有一端不是主控台就不算使用者
+  monkeypatch.setattr(board.os, "name", "nt")
+  stdin, stdout = FakeStream(True), FakeStream(True)
+  monkeypatch.setattr(board.sys, "stdin", stdin)
+  monkeypatch.setattr(board.sys, "stdout", stdout)
+  monkeypatch.setattr(board, "hasWindowsConsole", lambda stream: stream is stdin)
+  assert board.isHuman() is False
+  monkeypatch.setattr(board, "hasWindowsConsole", lambda stream: True)
+  assert board.isHuman() is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="hasWindowsConsole 只在 Windows 上使用")
+def test_hasWindowsConsoleFalseForStreamWithoutHandle():
+  assert board.hasWindowsConsole(FakeStream(True)) is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="hasWindowsConsole 只在 Windows 上使用")
+def test_hasWindowsConsoleFalseForRegularFile(tmp_path):
+  with open(tmp_path / "out.txt", "w", encoding="utf-8") as stream:
+    assert board.hasWindowsConsole(stream) is False
+
+
+def test_missingPackagesListsOnlyUninstalledOnes(monkeypatch):
+  monkeypatch.setattr(board, "tddPackages", ["pytest", "noSuchPackageForBoardTest"])
+  assert board.missingPackages() == ["noSuchPackageForBoardTest"]
 
 
 def test_hasTrackedChangesIgnoresUntracked(gitProject):
@@ -514,6 +581,31 @@ def test_initRefusesManuallyPastedRules(gitProject, capsys):
   assert readRaw(gitProject / "AGENTS.md") == original
   assert not (gitProject / ".gitignore").exists()
   assert not (gitProject / ".claude").exists()
+
+
+def test_initPrintsEveryStepInOrder(gitProject, capsys):
+  writeRaw(gitProject / "AGENTS.md", "# 我的規則\n")
+  assert board.cmdInit(gitProject, testCommand="python -m pytest -q") == 0
+  assert capsys.readouterr().out.splitlines() == [
+    "AGENTS.md：已在最後加上規則",
+    ".gitignore：補上 .board/、plans/_review/",
+    ".claude/skills/agent-board-plan/SKILL.md：已建立（在 Claude Code 打 /agent-board-plan 加上需求，就由 Claude 寫 plan）",
+    "測試指令：python -m pytest -q",
+    "若 Alfred 已在執行，測試設定變更後請重啟 Alfred 才會生效",
+    "提醒：測試產物（例如 __pycache__/、.pytest_cache/）請自己加進 .gitignore，否則會被 commit 進任務分支",
+    "接下來請 commit：",
+    "  git add AGENTS.md .gitignore .claude/skills/agent-board-plan/SKILL.md",
+    '  git commit -m "啟用 agent-board"',
+  ]
+  assert board.cmdInit(gitProject, testCommand="python -m pytest -q", skipTests=True) == 1
+  assert capsys.readouterr().out.splitlines() == ["沒有修改任何檔案：", "  --tdd、--test-command、--skip-tests 只能選一個"]
+
+
+def test_initRefusesMissingProjectFolder(tmp_path, capsys):
+  missing = tmp_path / "missing"
+  assert board.cmdInit(missing, skipTests=True) == 1
+  assert capsys.readouterr().out == f"找不到專案資料夾：{missing}\n"
+  assert not missing.exists()
 
 
 def test_initNeedsGitRepoWithCommit(tmp_path, capsys):

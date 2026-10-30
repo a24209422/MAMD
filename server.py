@@ -224,28 +224,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
         break
     self.sendJson(404, {"ok": False, "message": "找不到"})
 
-  def routePost(self, path):
+  def readAuthorizedBody(self):
+    # 回傳 None 代表已經回了錯誤，呼叫端不用再回應
     try:
       length = int(self.headers.get("Content-Length") or 0)
     except ValueError:
       self.sendJson(400, {"ok": False, "message": "Content-Length 不正確"})
-      return
+      return None
     if length > maxBodyBytes:
       # 先讀掉送來的內容再回應；用戶端還在送時就關掉連線，它會收不到 413
       self.rfile.read(min(length, maxDiscardBytes))
       self.sendJson(413, {"ok": False, "message": "內容太大"})
-      return
+      return None
     # token 錯也要先讀完內容：沒讀完就關連線，Windows 會送 RST，用戶端還沒讀到的 403 會被丟掉
     data = self.rfile.read(length) if length else b""
     if not self.dashboard.tokenMatches(self.headers.get("X-Board-Token", "")):
       self.sendJson(403, {"ok": False, "message": "token 不對：請用 server.py 印出的網址重新開啟"})
-      return
+      return None
     try:
       body = json.loads(data.decode("utf-8")) if data else {}
     except (UnicodeDecodeError, json.JSONDecodeError):
       body = None
     if not isinstance(body, dict):
       self.sendJson(400, {"ok": False, "message": "內容要是 JSON 物件"})
+      return None
+    return body
+
+  def routePost(self, path):
+    body = self.readAuthorizedBody()
+    if body is None:
       return
     for pattern, methodName in postRoutes:
       match = pattern.match(path)

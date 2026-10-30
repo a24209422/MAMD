@@ -100,33 +100,49 @@ def durationStats(events, now):
   return {"seconds": int((end - parseTime(approved["time"])).total_seconds()), "inProgress": not completed}
 
 
-def collectStats(events, tasks, durations):
+def countStatus(tasks, status):
+  return sum(1 for task in tasks if task["status"] == status)
+
+
+def averageRounds(events, tasks):
   rounds = taskRounds(events)
   taskRoundValues = [rounds[key] for key in (taskKey(task["plan"], task["task"]) for task in tasks) if key in rounds]
+  return round(sum(taskRoundValues) / len(taskRoundValues), 2) if taskRoundValues else None
+
+
+def firstReviewStats(events):
   firstResults = firstReviewResults(events)
+  return {"passed": sum(1 for result in firstResults.values() if result == "reviewPassed"),
+          "reviewed": len(firstResults)}
+
+
+def totalDuration(durations):
+  return {"seconds": sum(item["seconds"] for item in durations),
+          "inProgress": any(item["inProgress"] for item in durations)}
+
+
+def collectStats(events, tasks, durations):
   passed = countType(events, "reviewPassed")
   failed = countType(events, "reviewFailed")
   written = countType(events, "taskWritten")
   tests = testStats(events)
   return {
-    "tasks": {"done": sum(1 for task in tasks if task["status"] == TaskStatus.done),
-              "abandoned": sum(1 for task in tasks if task["status"] == TaskStatus.abandoned),
+    "tasks": {"done": countStatus(tasks, TaskStatus.done),
+              "abandoned": countStatus(tasks, TaskStatus.abandoned),
               "total": len(tasks)},
-    "averageRounds": round(sum(taskRoundValues) / len(taskRoundValues), 2) if taskRoundValues else None,
+    "averageRounds": averageRounds(events, tasks),
     "written": written,
     "reviews": {"total": passed + failed, "passed": passed, "failed": failed},
-    "firstReviewPassed": {"passed": sum(1 for result in firstResults.values() if result == "reviewPassed"),
-                          "reviewed": len(firstResults)},
+    "firstReviewPassed": firstReviewStats(events),
     "tests": tests,
     "returnedAfterWrite": {"returned": failed + tests["returned"], "written": written},
     "decisions": decisionStats(events),
-    "waiting": sum(1 for task in tasks if task["status"] == TaskStatus.needsYou),
+    "waiting": countStatus(tasks, TaskStatus.needsYou),
     "waitSeconds": waitSeconds(events),
     "agentFailed": countType(events, "agentFailed"),
     "conflicts": countType(events, "taskConflicted"),
     "planRejected": countType(events, "planRejected"),
-    "duration": {"seconds": sum(item["seconds"] for item in durations),
-                 "inProgress": any(item["inProgress"] for item in durations)},
+    "duration": totalDuration(durations),
     "models": {"writer": roleModels(events, "taskStarted", "claude"), "reviewer": roleModels(events, "reviewStarted")},
   }
 

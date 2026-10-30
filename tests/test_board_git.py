@@ -67,6 +67,16 @@ def test_ensureIsIdempotent(gitProject):
   assert board_git.ensureTaskWorktree(gitProject, "P0001", "T1") == task
 
 
+def test_addWorktreeReusesExistingBranchInsteadOfStartPoint(gitProject):
+  baseCommit = board_git.headCommit(gitProject)
+  branchCommit = writeAndCommit(startPlan(gitProject), "a.txt", "plan 分支上的改動\n")
+  board_git.removePlanWorktrees(gitProject, "P0001")
+  path = board_git.worktreesRoot(gitProject) / "nested" / "again"
+  board_git.addWorktree(gitProject, path, "plan/P0001", baseCommit)
+  assert board_git.headCommit(path) == branchCommit
+  assert board_git.runGit(path, "branch", "--show-current") == "plan/P0001"
+
+
 def test_mergeTaskSuccess(gitProject):
   planPath = startPlan(gitProject)
   writeAndCommit(board_git.ensureTaskWorktree(gitProject, "P0001", "T1"), "a.txt", "hi\n")

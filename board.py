@@ -166,6 +166,23 @@ def cmdSubmit(projectDir, planIdValue):
   return 0
 
 
+def planStatusLine(planState, tasks):
+  line = f"{planState['id']} {planState['title']}｜{planState['status']}"
+  if tasks:
+    line += f"｜完成 {sum(task['status'] == TaskStatus.done for task in tasks)}/{len(tasks)}"
+  if planState["status"] == PlanStatus.rejected and planState["rejectReason"]:
+    line += f"｜退回原因：{planState['rejectReason']}"
+  return line
+
+
+def taskStatusLine(task):
+  who = {TaskStatus.writing: task["agent"], TaskStatus.reviewing: task["reviewAgent"]}.get(task["status"])
+  detail = f"  {task['task']} {task['status']}（第 {task['round']}/{task['maxRounds']} 輪{'，' + who if who else ''}）"
+  if task["needs"]:
+    detail += f"｜{task['needs']['reason']}"
+  return detail
+
+
 def cmdStatus(projectDir, planIdValue=None):
   loadErrors = []
   _, state = currentState(projectDir, loadErrors)
@@ -176,18 +193,9 @@ def cmdStatus(projectDir, planIdValue=None):
     if planIdValue and planState["id"] != planIdValue:
       continue
     tasks = planTasks(state, planState["id"])
-    line = f"{planState['id']} {planState['title']}｜{planState['status']}"
-    if tasks:
-      line += f"｜完成 {sum(task['status'] == TaskStatus.done for task in tasks)}/{len(tasks)}"
-    if planState["status"] == PlanStatus.rejected and planState["rejectReason"]:
-      line += f"｜退回原因：{planState['rejectReason']}"
-    print(line)
+    print(planStatusLine(planState, tasks))
     for task in tasks:
-      who = {TaskStatus.writing: task["agent"], TaskStatus.reviewing: task["reviewAgent"]}.get(task["status"])
-      detail = f"  {task['task']} {task['status']}（第 {task['round']}/{task['maxRounds']} 輪{'，' + who if who else ''}）"
-      if task["needs"]:
-        detail += f"｜{task['needs']['reason']}"
-      print(detail)
+      print(taskStatusLine(task))
   return 0
 
 
@@ -525,87 +533,99 @@ def tddProblems(projectDir, sources, testsDir, config, command):
   return problems
 
 
-def cmdInit(projectDir, tdd=False, sources=None, testsDir=None, testCommand=None, skipTests=False):
-  projectDir = Path(projectDir)
-  sources, testsDir = list(sources or ["src"]), testsDir or "tests"
-  if not projectDir.is_dir():
-    print(f"找不到專案資料夾：{projectDir}")
-    return 1
-  problems = []
+def repoProblems(projectDir):
   if board_git.runGit(projectDir, "rev-parse", "--is-inside-work-tree", check=False) != "true":
-    problems.append("不是 git repo：先執行 git init，並 commit 一次")
-  elif not board_git.runGit(projectDir, "rev-parse", "--verify", "-q", "HEAD", check=False):
-    problems.append("還沒有任何 commit：先 commit 一次，Alfred 要從目前的 commit 開 plan 分支")
-  agentsPath, ignorePath = projectDir / "AGENTS.md", projectDir / ".gitignore"
-  skillPath = projectDir / planSkillPath
-  agentsText, skillText = readKeepingNewlines(agentsPath), readKeepingNewlines(skillPath)
-  problems += [problem for problem in [agentsProblem(agentsText), planSkillProblem(skillText)] if problem]
-  config, configProblem = readRawConfig(projectDir)
-  problems += [configProblem] if configProblem else []
-  command = None
-  explicitChoices = int(bool(tdd)) + int(testCommand is not None) + int(bool(skipTests))
-  if explicitChoices > 1:
-    problems.append("--tdd、--test-command、--skip-tests 只能選一個")
+    return ["不是 git repo：先執行 git init，並 commit 一次"]
+  if not board_git.runGit(projectDir, "rev-parse", "--verify", "-q", "HEAD", check=False):
+    return ["還沒有任何 commit：先 commit 一次，Alfred 要從目前的 commit 開 plan 分支"]
+  return []
+
+
+def tddConfig(projectDir, config, configProblem, sources, testsDir):
+  command = qualityCommand(sources, testsDir)
+  problems = [] if configProblem else tddProblems(projectDir, sources, testsDir, config, command)
   newConfig = dict(config or {})
+  newConfig.update(tddCrap=True, testCommand=command)
+  newConfig.pop("skipTests", None)
+  return newConfig, command, problems
+
+
+def testCommandConfig(config, testCommand):
+  newConfig = dict(config or {})
+  if not isinstance(testCommand, str) or not testCommand.strip():
+    return newConfig, ["--test-command 要提供非空白的測試指令"]
+  if newConfig.get("tddCrap") and testCommand.strip() != newConfig.get("testCommand"):
+    return newConfig, ["目前已啟用 TDD；一般 --test-command 不會覆蓋 TDD 的品質檢查指令"]
+  newConfig["testCommand"] = testCommand.strip()
+  newConfig.pop("skipTests", None)
+  return newConfig, []
+
+
+def skipTestsConfig(config):
+  newConfig = dict(config or {})
+  if newConfig.get("tddCrap"):
+    return newConfig, ["目前已啟用 TDD，不能用 --skip-tests 略過測試"]
+  newConfig["testCommand"] = ""
+  newConfig["skipTests"] = True
+  return newConfig, []
+
+
+def initTestConfig(projectDir, config, configProblem, tdd, sources, testsDir, testCommand, skipTests):
+  problems, command = [], None
+  if int(bool(tdd)) + int(testCommand is not None) + int(bool(skipTests)) > 1:
+    problems.append("--tdd、--test-command、--skip-tests 只能選一個")
   if tdd:
-    command = qualityCommand(sources, testsDir)
-    if not configProblem:
-      problems += tddProblems(projectDir, sources, testsDir, config, command)
-    newConfig.update(tddCrap=True, testCommand=command)
-    newConfig.pop("skipTests", None)
+    newConfig, command, choiceProblems = tddConfig(projectDir, config, configProblem, sources, testsDir)
   elif testCommand is not None:
-    if not isinstance(testCommand, str) or not testCommand.strip():
-      problems.append("--test-command 要提供非空白的測試指令")
-    elif newConfig.get("tddCrap") and testCommand.strip() != newConfig.get("testCommand"):
-      problems.append("目前已啟用 TDD；一般 --test-command 不會覆蓋 TDD 的品質檢查指令")
-    else:
-      newConfig["testCommand"] = testCommand.strip()
-      newConfig.pop("skipTests", None)
+    newConfig, choiceProblems = testCommandConfig(config, testCommand)
   elif skipTests:
-    if newConfig.get("tddCrap"):
-      problems.append("目前已啟用 TDD，不能用 --skip-tests 略過測試")
-    else:
-      newConfig["testCommand"] = ""
-      newConfig["skipTests"] = True
+    newConfig, choiceProblems = skipTestsConfig(config)
+  else:
+    newConfig, choiceProblems = dict(config or {}), []
+  problems += choiceProblems
   if not configProblem:
     problems += testConfigProblems(newConfig, requireChoice=True)
-  # 全部檢查完才動手，有問題時專案維持原狀，修好再跑一次就好
-  if problems:
-    print("沒有修改任何檔案：")
-    for problem in problems:
-      print("  " + problem)
-    return 1
-  changed = []
+  return newConfig, command, problems
+
+
+def initAgents(agentsPath, agentsText):
   newAgents = updatedAgents(agentsText)
   if newAgents == agentsText:
     print("AGENTS.md：已是最新")
+    return []
+  if not agentsText:
+    action = "已建立"
+  elif agentsMarkers(agentsText.splitlines())[0]:
+    action = "已換成最新版的規則"
   else:
-    if not agentsText:
-      action = "已建立"
-    elif agentsMarkers(agentsText.splitlines())[0]:
-      action = "已換成最新版的規則"
-    else:
-      action = "已在最後加上規則"
-    writeKeepingNewlines(agentsPath, newAgents)
-    changed.append("AGENTS.md")
-    print(f"AGENTS.md：{action}")
+    action = "已在最後加上規則"
+  writeKeepingNewlines(agentsPath, newAgents)
+  print(f"AGENTS.md：{action}")
+  return ["AGENTS.md"]
+
+
+def initGitignore(ignorePath):
   newIgnore, missing = updatedGitignore(readKeepingNewlines(ignorePath))
-  if missing:
-    writeKeepingNewlines(ignorePath, newIgnore)
-    changed.append(".gitignore")
-    print(f".gitignore：補上 {'、'.join(missing)}")
-  else:
+  if not missing:
     print(".gitignore：已是最新")
+    return []
+  writeKeepingNewlines(ignorePath, newIgnore)
+  print(f".gitignore：補上 {'、'.join(missing)}")
+  return [".gitignore"]
+
+
+def initPlanSkill(skillPath, skillText):
   newSkill, skillName = planSkillText(), planSkillPath.as_posix()
   if newSkill == skillText:
     print(f"{skillName}：已是最新")
-  else:
-    writeKeepingNewlines(skillPath, newSkill)
-    changed.append(skillName)
-    print(f"{skillName}：{'已換成最新版' if skillText else '已建立'}"
-          "（在 Claude Code 打 /agent-board-plan 加上需求，就由 Claude 寫 plan）")
-  if newConfig != config:
-    writeKeepingNewlines(boardDir(projectDir) / "config.json", json.dumps(newConfig, ensure_ascii=False, indent=2) + "\n")
+    return []
+  writeKeepingNewlines(skillPath, newSkill)
+  print(f"{skillName}：{'已換成最新版' if skillText else '已建立'}"
+        "（在 Claude Code 打 /agent-board-plan 加上需求，就由 Claude 寫 plan）")
+  return [skillName]
+
+
+def printTestSetting(tdd, command, newConfig):
   if tdd:
     print(f".board/config.json：已開啟 tddCrap，品質檢查指令是 {command}")
     absent = missingPackages()
@@ -619,12 +639,43 @@ def cmdInit(projectDir, tdd=False, sources=None, testsDir=None, testCommand=None
     print(f"測試指令：{newConfig['testCommand']}")
   print("若 Alfred 已在執行，測試設定變更後請重啟 Alfred 才會生效")
   print("提醒：測試產物（例如 __pycache__/、.pytest_cache/）請自己加進 .gitignore，否則會被 commit 進任務分支")
+
+
+def printCommitHint(changed):
   if changed:
     print("接下來請 commit：")
     print(f"  git add {' '.join(changed)}")
     print('  git commit -m "啟用 agent-board"')
   else:
     print("AGENTS.md、.gitignore、agent-board-plan skill 都沒有改動，不用 commit")
+
+
+def cmdInit(projectDir, tdd=False, sources=None, testsDir=None, testCommand=None, skipTests=False):
+  projectDir = Path(projectDir)
+  sources, testsDir = list(sources or ["src"]), testsDir or "tests"
+  if not projectDir.is_dir():
+    print(f"找不到專案資料夾：{projectDir}")
+    return 1
+  agentsPath, skillPath = projectDir / "AGENTS.md", projectDir / planSkillPath
+  agentsText, skillText = readKeepingNewlines(agentsPath), readKeepingNewlines(skillPath)
+  config, configProblem = readRawConfig(projectDir)
+  newConfig, command, testProblems = initTestConfig(projectDir, config, configProblem, tdd, sources, testsDir,
+                                                    testCommand, skipTests)
+  fileProblems = [problem for problem in [agentsProblem(agentsText), planSkillProblem(skillText), configProblem]
+                  if problem]
+  problems = repoProblems(projectDir) + fileProblems + testProblems
+  # 全部檢查完才動手，有問題時專案維持原狀，修好再跑一次就好
+  if problems:
+    print("沒有修改任何檔案：")
+    for problem in problems:
+      print("  " + problem)
+    return 1
+  changed = initAgents(agentsPath, agentsText) + initGitignore(projectDir / ".gitignore")
+  changed += initPlanSkill(skillPath, skillText)
+  if newConfig != config:
+    writeKeepingNewlines(boardDir(projectDir) / "config.json", json.dumps(newConfig, ensure_ascii=False, indent=2) + "\n")
+  printTestSetting(tdd, command, newConfig)
+  printCommitHint(changed)
   return 0
 
 
