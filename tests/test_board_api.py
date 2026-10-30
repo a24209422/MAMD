@@ -126,6 +126,15 @@ def test_needsYouHasReasonConflictsAndWorktrees(approvedProject):
   assert item["taskWorktree"].endswith("P0001-T1") and item["planWorktree"].endswith("P0001")
 
 
+def test_lastEventTimeTakesNewestMatchOrNone():
+  events = [{"plan": "P0001", "task": "T1", "time": "舊"}, {"plan": "P0001", "task": "T2", "time": "別的任務"},
+            {"plan": "P0002", "task": "T1", "time": "別的 plan"}, {"plan": "P0001", "task": "T1", "time": "新"},
+            {"type": "paused", "time": "沒有任務"}]
+  assert board_api.lastEventTime(events, "P0001", "T1") == "新"
+  assert board_api.lastEventTime(events, "P0001", "T3") is None
+  assert board_api.lastEventTime([], "P0001", "T1") is None
+
+
 def test_recentEventsNewestFirstWithWho(approvedProject):
   for _ in range(55):
     appendEvent(approvedProject, "testRun", plan="P0001", task="T1", agent="writer", roundNumber=1,

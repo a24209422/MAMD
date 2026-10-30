@@ -3,7 +3,7 @@ import shutil
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -90,6 +90,16 @@ def test_memoryAndDiskReportBytesForProjectVolume(tmp_path):
                               "volume": metrics.volumeLabel(projectDir.resolve())}
   # 用專案的實際位置查詢
   assert disk.calls == [(projectDir.resolve(),)]
+
+
+def test_volumeLabelWithoutDriveClimbsToMountPoint(monkeypatch):
+  mounts = {"/mnt/data"}
+  # 不依賴執行測試的主機實際有哪些掛載點
+  monkeypatch.setattr(metrics.os.path, "ismount", lambda path: str(path) in mounts)
+  assert metrics.volumeLabel(PurePosixPath("/mnt/data/proj/sub")) == "/mnt/data"
+  assert metrics.volumeLabel(PurePosixPath("/mnt/data")) == "/mnt/data"
+  # 一路都找不到掛載點時停在根目錄
+  assert metrics.volumeLabel(PurePosixPath("/home/user/proj")) == "/"
 
 
 def test_singleItemFailureKeepsOtherItemsUpdating(tmp_path):
