@@ -405,6 +405,50 @@ def test_humanOnlyCommandsRefusedWhenRedirectedToNul(gitProject):
   assert stopped.returncode == 2, stopped.stderr
 
 
+class FakeStream:
+  def __init__(self, tty):
+    self.tty = tty
+
+  def isatty(self):
+    return self.tty
+
+
+@pytest.mark.parametrize("stdinTty, stdoutTty, expected", [(True, True, True), (True, False, False), (False, True, False)])
+def test_isHumanOutsideWindowsNeedsBothStreamsToBeTerminals(monkeypatch, stdinTty, stdoutTty, expected):
+  monkeypatch.setattr(board.os, "name", "posix")
+  monkeypatch.setattr(board.sys, "stdin", FakeStream(stdinTty))
+  monkeypatch.setattr(board.sys, "stdout", FakeStream(stdoutTty))
+  assert board.isHuman() is expected
+
+
+def test_isHumanOnWindowsAsksConsoleInsteadOfIsatty(monkeypatch):
+  # isatty 都說是終端機，但只要有一端不是主控台就不算使用者
+  monkeypatch.setattr(board.os, "name", "nt")
+  stdin, stdout = FakeStream(True), FakeStream(True)
+  monkeypatch.setattr(board.sys, "stdin", stdin)
+  monkeypatch.setattr(board.sys, "stdout", stdout)
+  monkeypatch.setattr(board, "hasWindowsConsole", lambda stream: stream is stdin)
+  assert board.isHuman() is False
+  monkeypatch.setattr(board, "hasWindowsConsole", lambda stream: True)
+  assert board.isHuman() is True
+
+
+@pytest.mark.skipif(os.name != "nt", reason="hasWindowsConsole 只在 Windows 上使用")
+def test_hasWindowsConsoleFalseForStreamWithoutHandle():
+  assert board.hasWindowsConsole(FakeStream(True)) is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="hasWindowsConsole 只在 Windows 上使用")
+def test_hasWindowsConsoleFalseForRegularFile(tmp_path):
+  with open(tmp_path / "out.txt", "w", encoding="utf-8") as stream:
+    assert board.hasWindowsConsole(stream) is False
+
+
+def test_missingPackagesListsOnlyUninstalledOnes(monkeypatch):
+  monkeypatch.setattr(board, "tddPackages", ["pytest", "noSuchPackageForBoardTest"])
+  assert board.missingPackages() == ["noSuchPackageForBoardTest"]
+
+
 def test_hasTrackedChangesIgnoresUntracked(gitProject):
   (gitProject / "new.txt").write_text("x", encoding="utf-8")
   assert board_git.hasTrackedChanges(gitProject) is False
