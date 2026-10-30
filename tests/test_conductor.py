@@ -210,6 +210,21 @@ def test_newFailureGoesBackToWriterWithoutReview(startBoard, tmp_path):
   assert "FAILED tests/test_new.py::test_new - AssertionError" in calls[1]["prompt"]
 
 
+def test_testRunRecordsTestedCommitFailuresAndCommand(startBoard, tmp_path):
+  # 第 1 輪失敗、第 2 輪通過：每次都記下當時任務 worktree 的 HEAD、完整的失敗名稱和測試指令
+  body = "if written.exists() and '第 1 次' in written.read_text(encoding='utf-8'):\n  " + failNewTest.replace("\n", "\n  ")
+  command = pythonTestCommand(tmp_path, body)
+  conductor, _ = startBoard(oneTask, testCommand=command)
+  runUntil(conductor, planDone)
+  written = [event["data"]["commit"] for event in eventsOf(conductor, "taskWritten")]
+  firstRun, secondRun = eventsOf(conductor, "testRun")
+  assert (firstRun["data"]["commit"], secondRun["data"]["commit"]) == tuple(written)
+  assert firstRun["data"]["failures"] == ["tests/test_new.py::test_new"]
+  assert secondRun["data"]["failures"] == []
+  assert firstRun["data"]["command"] == secondRun["data"]["command"] == command
+  assert (firstRun["data"]["verdict"], secondRun["data"]["verdict"]) == ("newFailure", "passed")
+
+
 def test_testReturnAfterFailedReviewDropsEarlierReview(startBoard, tmp_path):
   # 第 1 輪審查不通過，第 2 輪寫出的內容測試有新增的失敗，第 3 輪只附測試的失敗
   body = "if written.exists() and '第 2 次' in written.read_text(encoding='utf-8'):\n  " + failNewTest.replace("\n", "\n  ")

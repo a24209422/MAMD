@@ -803,6 +803,9 @@ class Conductor:
       info = {"kind": "test", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
               "agent": taskState["agent"]}
       worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
+      # 記下被測的 commit 和指令：之後程式碼相同時才能沿用這次的結果
+      info["commit"] = board_git.headCommit(worktree)
+      info["command"] = self.config["testCommand"]
       info["job"] = BackgroundTestJob(self.runTestCommand, worktree).start()
       self.jobs[key] = info
 
@@ -814,7 +817,8 @@ class Conductor:
     # verdict 在這裡算好寫進事件：之後重播事件時，結果才不會因為基準或輸出不同而改變
     verdict, newFailures = compareWithBaseline(planState["testBaseline"], passed, failures, qualityChecked, qualityFailures)
     self.event("testRun", info, passed=passed, tail=tail, verdict=verdict, newFailures=newFailures,
-               qualityChecked=qualityChecked, qualityFailures=qualityFailures)
+               qualityChecked=qualityChecked, qualityFailures=qualityFailures, commit=info["commit"],
+               failures=failures, command=info["command"])
 
   def runTestCommand(self, cwd, onStarted=None):
     command = self.config["testCommand"]
