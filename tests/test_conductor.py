@@ -1108,6 +1108,18 @@ def test_formatEvent():
   assert formatEvent(fromBaseline) == "21:44:00 P0006 跑基準測試（通過，沿用 P0005 的基準測試結果）"
 
 
+def test_formatEventShowsResolveModeAndUserDecision():
+  started = makeEvent("taskStarted", plan="P0001", task="T1", roundNumber=2, agent="writer-sub1", mode="resolve")
+  started["time"] = "2026-10-25T21:45:00+08:00"
+  assert formatEvent(started) == f"21:45:00 P0001 T1 writer-sub1 {conductorModule.eventLabels['taskStarted']}（第 2 輪，解合併衝突）"
+  decision = makeEvent("userDecision", plan="P0001", task="T1", action="retry", note="兩邊都留")
+  decision["time"] = "2026-10-25T21:46:00+08:00"
+  assert formatEvent(decision).endswith("（retry，兩邊都留）")
+  unknown = makeEvent("somethingNew")
+  unknown["time"] = None
+  assert formatEvent(unknown) == " somethingNew"
+
+
 def test_failureNamesReadPytestShortSummary():
   output = ("tests/test_a.py F.E\n"
             "=========================== short test summary info ===========================\n"
@@ -1352,6 +1364,20 @@ def test_doneAfterResolvingInPlanWorktreeIgnoresHalfMerge(startBoard):
   assert board_git.runGit(conductor.projectDir, "show", "plan/P0001:shared.txt") == "人工在 plan worktree 解完"
   # 任務 worktree 裡解到一半的合併不能被 commit 進任務分支
   assert "<<<<<<<" not in board_git.runGit(conductor.projectDir, "show", f"task/P0001-{stuck['task']}:shared.txt")
+
+
+def test_doneWithManualChangesButCommitFailsNeedsYou(startBoard, gitProject):
+  conductor, _ = startBoard(oneTask, {"write": {"T1": ["blocked"]}})
+  stuckTask(conductor)
+  taskPath = board_git.taskWorktreePath(conductor.projectDir, "P0001", "T1")
+  (taskPath / "manual.txt").write_text("人工補的內容\n", encoding="utf-8")
+  # 你手動改完按完成，但 pre-commit hook 擋下 commit：不能當成合併成功
+  (gitProject / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+  board_core.appendEvent(conductor.projectDir, "userDecision", plan="P0001", task="T1", data={"action": "done"})
+  stuck = stuckTask(conductor)
+  assert stuck["needs"]["kind"] == "commitFailed"
+  assert stuck["needs"]["reason"].startswith("commit 失敗：")
+  assert eventsOf(conductor, "taskMerged") == []
 
 
 def test_stagedMarkersThenRetryStillAsksClaude(startBoard):

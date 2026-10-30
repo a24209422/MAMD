@@ -218,22 +218,21 @@ def testDetails(event, data):
   return details
 
 
-def formatEvent(event):
-  timeText = (event.get("time") or "")[11:19]
-  who = " ".join(part for part in (event.get("plan"), event.get("task"), event.get("agent")) if part)
-  data = event.get("data") or {}
-  details = []
-  if event.get("round"):
-    details.append(f"第 {event['round']} 輪")
+def eventDetails(event, data):
+  details = [f"第 {event['round']} 輪"] if event.get("round") else []
   if event["type"] == "reviewFailed":
     details.append(f"必改 {data.get('mustFix', 0)} 條")
   if event["type"] in ("testRun", "testBaseline", "mergeTestRun"):
     details += testDetails(event, data)
   if data.get("mode") == "resolve":
     details.append("解合併衝突")
-  for key in ("reason", "action", "note"):
-    if data.get(key):
-      details.append(str(data[key]))
+  return details + [str(data[key]) for key in ("reason", "action", "note") if data.get(key)]
+
+
+def formatEvent(event):
+  timeText = (event.get("time") or "")[11:19]
+  who = " ".join(part for part in (event.get("plan"), event.get("task"), event.get("agent")) if part)
+  details = eventDetails(event, event.get("data") or {})
   detailText = f"（{'，'.join(details)}）" if details else ""
   return f"{timeText} {who} {eventLabels.get(event['type'], event['type'])}{detailText}".replace("  ", " ")
 
@@ -835,18 +834,8 @@ class Conductor:
     if job.killed and not job.timedOut:
       self.event("taskInterrupted", info, stage="write")
       return
-    result, error = self.finalResult(info)
+    result = self.writeResult(info, job)
     if result is None:
-      # 額度用完不是任務的問題，不能消耗重試次數；整個暫停，等你恢復額度後 resume
-      if self.quotaSuspect(job, error):
-        self.pauseForQuota(info, "write")
-        return
-      reason = "超時" if job.timedOut else (error or f"結束代碼 {job.exitCode}")
-      self.event("agentFailed", info, stage="write", reason=f"{reason}｜{self.failureTail(job)}")
-      return
-    errors = validateWriteResult(result)
-    if errors:
-      self.event("agentFailed", info, stage="write", reason="回覆格式不符：" + "；".join(errors))
       return
     # 下一輪要接續這次的對話；Codex 的對話編號到這時才知道
     session = {"sessionId": info["sessionId"] or job.activity.get("threadId"), "cli": info["cli"],
@@ -854,27 +843,50 @@ class Conductor:
     if result["status"] == "blocked":
       self.event("taskBlocked", info, reason=result["blockedReason"], **session)
       return
+    commit = self.commitWrite(info)
+    if commit is None:
+      return
+    # 有測試指令時先進測試中，由 startTests 在背景跑，不擋其他任務
+    self.event("taskWritten", info, commit=commit, summary=result["summary"], mode=info["mode"],
+               conflicts=info.get("conflicts", []), testing=self.testsBeforeReview(info), **session)
+
+  def writeResult(self, info, job):
+    """寫程式 agent 的有效回覆；拿不到時已經記下事件，回傳 None。"""
+    result, error = self.finalResult(info)
+    if result is None:
+      # 額度用完不是任務的問題，不能消耗重試次數；整個暫停，等你恢復額度後 resume
+      if self.quotaSuspect(job, error):
+        self.pauseForQuota(info, "write")
+        return None
+      reason = "超時" if job.timedOut else (error or f"結束代碼 {job.exitCode}")
+      self.event("agentFailed", info, stage="write", reason=f"{reason}｜{self.failureTail(job)}")
+      return None
+    errors = validateWriteResult(result)
+    if errors:
+      self.event("agentFailed", info, stage="write", reason="回覆格式不符：" + "；".join(errors))
+      return None
+    return result
+
+  def commitWrite(self, info):
+    """commit 這一輪的改動；不能 commit 時已經記下事件，回傳 None。"""
     try:
       if info["mode"] == "resolve":
         remaining = board_git.filesWithConflictMarkers(info["worktree"], info["conflicts"])
         if remaining:
           # 標記還在就 commit 會把壞掉的檔案送去審查；當成這次失敗，重試時會清乾淨重新合併
           self.event("agentFailed", info, stage="write", reason="還有沒解掉的衝突標記：" + "、".join(remaining))
-          return
+          return None
         subject = "解合併衝突（" + "、".join(info["conflicts"]) + "）"
       elif not board_git.hasChanges(info["worktree"]):
         self.event("needsYou", info, kind="noChanges", reason="寫程式的 agent 回報完成，但沒有任何改動")
-        return
+        return None
       else:
         subject = info["text"]
-      commit = board_git.commitAll(info["worktree"], f"{info['plan']} {info['task']} 第{info['round']}輪：{subject}")
+      return board_git.commitAll(info["worktree"], f"{info['plan']} {info['task']} 第{info['round']}輪：{subject}")
     except board_git.GitError as error:
       # 例如專案的 pre-commit hook 失敗；不記事件的話任務會永遠停在「寫程式中」
       self.event("needsYou", info, kind="commitFailed", reason=f"commit 失敗：{error}")
-      return
-    # 有測試指令時先進測試中，由 startTests 在背景跑，不擋其他任務
-    self.event("taskWritten", info, commit=commit, summary=result["summary"], mode=info["mode"],
-               conflicts=info.get("conflicts", []), testing=self.testsBeforeReview(info), **session)
+      return None
 
   def startTests(self, state):
     if not self.config["testCommand"]:
@@ -1062,42 +1074,57 @@ class Conductor:
     # 你正在 plan worktree 解衝突時不能動它：merge --abort 會毀掉你解到一半的內容，這個 tick 先跳過
     if board_git.mergeInProgress(planPath) or board_git.hasTrackedChanges(planPath):
       return
-    worktree = board_git.taskWorktreePath(self.projectDir, planIdValue, taskId)
-    try:
-      if taskState["userDone"] and worktree.exists() and board_git.mergeInProgress(worktree):
-        # 解衝突途中停下時，任務 worktree 留著還沒結束的合併；直接 commit 會把衝突標記帶進 plan 分支
-        if board_git.isMerged(self.projectDir, planIdValue, taskId):
-          # 你在 plan worktree 解完了，任務 worktree 裡解到一半的合併已經用不到
-          self.event("taskMerged", info, commit=board_git.runGit(self.projectDir, "rev-parse", board_git.planBranch(planIdValue)),
-                     verify=self.verifyAfterMerge(taskState))
-          return
-        files = sorted(set(board_git.unmergedFiles(worktree)) | set(taskState["conflictFiles"]))
-        remaining = board_git.filesWithConflictMarkers(worktree, files)
-        if remaining:
-          self.event("needsYou", info, kind="mergeConflict", conflicts=remaining,
-                     reason=f"任務的 worktree 還有沒解掉的衝突標記：{'、'.join(remaining)}")
-          return
-      if taskState["userDone"] and worktree.exists() and board_git.hasChanges(worktree):
-        board_git.commitAll(worktree, f"{planIdValue} {taskId} 使用者手動修改")
-    except board_git.GitError as error:
-      self.event("needsYou", info, kind="commitFailed", reason=f"commit 失敗：{error}")
+    if self.settleUserDoneWorktree(taskState, info):
       return
     if board_git.isMerged(self.projectDir, planIdValue, taskId):
       # 你已經自己合併過（例如處理完衝突），只要記下來就好
-      self.event("taskMerged", info, commit=board_git.runGit(self.projectDir, "rev-parse", board_git.planBranch(planIdValue)),
-                 verify=self.verifyAfterMerge(taskState))
+      self.recordMergedByUser(taskState, info)
       return
     merged, commit, conflicts = board_git.mergeTask(self.projectDir, planIdValue, taskId,
                                                     f"合併 {planIdValue} {taskId}：{taskState['text']}")
     if merged:
       self.event("taskMerged", info, commit=commit, verify=self.verifyAfterMerge(taskState))
-    elif taskState["conflictCount"] < maxAutoResolves:
-      self.event("taskConflicted", info, conflicts=conflicts, reason="、".join(conflicts))
     else:
-      reason = "合併衝突：" + "、".join(conflicts)
-      if taskState["conflictCount"]:
-        reason += f"（已自動解過 {taskState['conflictCount']} 次）"
-      self.event("needsYou", info, kind="mergeConflict", reason=reason, conflicts=conflicts)
+      self.recordMergeConflict(taskState, info, conflicts)
+
+  def settleUserDoneWorktree(self, taskState, info):
+    """你按完成的任務先把 worktree 收乾淨再合併；回傳 True 代表這個 tick 不再往下合併。"""
+    planIdValue, taskId = taskState["plan"], taskState["task"]
+    worktree = board_git.taskWorktreePath(self.projectDir, planIdValue, taskId)
+    if not (taskState["userDone"] and worktree.exists()):
+      return False
+    try:
+      if board_git.mergeInProgress(worktree):
+        # 解衝突途中停下時，任務 worktree 留著還沒結束的合併；直接 commit 會把衝突標記帶進 plan 分支
+        if board_git.isMerged(self.projectDir, planIdValue, taskId):
+          # 你在 plan worktree 解完了，任務 worktree 裡解到一半的合併已經用不到
+          self.recordMergedByUser(taskState, info)
+          return True
+        files = sorted(set(board_git.unmergedFiles(worktree)) | set(taskState["conflictFiles"]))
+        remaining = board_git.filesWithConflictMarkers(worktree, files)
+        if remaining:
+          self.event("needsYou", info, kind="mergeConflict", conflicts=remaining,
+                     reason=f"任務的 worktree 還有沒解掉的衝突標記：{'、'.join(remaining)}")
+          return True
+      if board_git.hasChanges(worktree):
+        board_git.commitAll(worktree, f"{planIdValue} {taskId} 使用者手動修改")
+    except board_git.GitError as error:
+      self.event("needsYou", info, kind="commitFailed", reason=f"commit 失敗：{error}")
+      return True
+    return False
+
+  def recordMergedByUser(self, taskState, info):
+    commit = board_git.runGit(self.projectDir, "rev-parse", board_git.planBranch(taskState["plan"]))
+    self.event("taskMerged", info, commit=commit, verify=self.verifyAfterMerge(taskState))
+
+  def recordMergeConflict(self, taskState, info, conflicts):
+    if taskState["conflictCount"] < maxAutoResolves:
+      self.event("taskConflicted", info, conflicts=conflicts, reason="、".join(conflicts))
+      return
+    reason = "合併衝突：" + "、".join(conflicts)
+    if taskState["conflictCount"]:
+      reason += f"（已自動解過 {taskState['conflictCount']} 次）"
+    self.event("needsYou", info, kind="mergeConflict", reason=reason, conflicts=conflicts)
 
   def completeFinishedPlans(self, state):
     for planState in state["plans"].values():
