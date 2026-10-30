@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import board_agents
 import board_core
@@ -1569,3 +1570,107 @@ def test_errorResultThatLingersIsRecordedAsAgentFailed(startBoard, monkeypatch):
   failed = eventsOf(conductor, "agentFailed")
   assert len(failed) == 1 and "假的錯誤結果" in failed[0]["data"]["reason"]
   assert eventsOf(conductor, "taskInterrupted") == []
+
+
+def dispatchingConductor(tmp_path, monkeypatch, lanes, startMethod):
+  # 只看派工的取捨順序，所以把找名額、判斷基準、真正啟動都換成記錄用的替身
+  conductor = Conductor(tmp_path, fakeConfig())
+  conductor.jobs = {"P0001/T1": {"kind": "write", "agent": "writer"}}
+  laneRequests, started = [], []
+  remainingLanes = iter(lanes)
+
+  def freeLane(prefix, kind, preferred=None):
+    laneRequests.append((prefix, kind, preferred))
+    return next(remainingLanes)
+
+  monkeypatch.setattr(conductor, "needsTestBaseline", lambda planState: planState["waitingBaseline"])
+  monkeypatch.setattr(conductor, "freeLane", freeLane)
+  monkeypatch.setattr(conductor, startMethod, lambda plan, taskState, lane: started.append((plan, taskState["task"], lane)))
+  return conductor, laneRequests, started
+
+
+def dispatchState(laneKey):
+  # T1 已經有人在做、P0002 還在等基準、T2 拿到名額、T3 起沒有名額
+  tasks = [{"plan": "P0001", "task": "T1"}, {"plan": "P0002", "task": "T1"}, {"plan": "P0001", "task": "T2"},
+           {"plan": "P0001", "task": "T3"}, {"plan": "P0001", "task": "T4"}]
+  for taskState in tasks:
+    taskState[laneKey] = f"{taskState['task']}-lane"
+  plans = {"P0001": {"waitingBaseline": False}, "P0002": {"waitingBaseline": True}}
+  return {"plans": plans, "dispatchable": tasks}
+
+
+def test_startWritesSkipsBusyAndBaselineTasksAndStopsWhenNoLane(tmp_path, monkeypatch):
+  conductor, laneRequests, started = dispatchingConductor(tmp_path, monkeypatch, ["writer", None], "startWrite")
+  monkeypatch.setattr(conductorModule, "readyTasks", lambda state: state["dispatchable"])
+  conductor.startWrites({"P0001": "plan-1", "P0002": "plan-2"}, dispatchState("agent"))
+  assert started == [("plan-1", "T2", "writer")]
+  # 沒有名額就整輪停下，後面的 T4 不再要名額
+  assert laneRequests == [("writer", "write", "T2-lane"), ("writer", "write", "T3-lane")]
+
+
+def test_startReviewsSkipsBusyAndBaselineTasksAndStopsWhenNoLane(tmp_path, monkeypatch):
+  conductor, laneRequests, started = dispatchingConductor(tmp_path, monkeypatch, ["reviewer", None], "startReview")
+  statuses = []
+
+  def tasksWithStatus(state, status):
+    statuses.append(status)
+    return state["dispatchable"]
+
+  monkeypatch.setattr(conductorModule, "tasksWithStatus", tasksWithStatus)
+  conductor.startReviews({"P0001": "plan-1", "P0002": "plan-2"}, dispatchState("reviewAgent"))
+  assert statuses == [TaskStatus.toReview]
+  assert started == [("plan-1", "T2", "reviewer")]
+  assert laneRequests == [("reviewer", "review", "T2-lane"), ("reviewer", "review", "T3-lane")]
+
+
+def test_runForeverTicksUntilCtrlCThenStopsAllJobs(tmp_path, monkeypatch):
+  lines = []
+  conductor = Conductor(tmp_path, fakeConfig(pollSeconds=0), out=lines.append)
+  conductor.jobs = {"P0001/T1": {}, "P0001/T2": {}}
+  ticks, stops = [], []
+
+  def safeTick():
+    ticks.append(len(ticks) + 1)
+    if len(ticks) == 2:
+      raise KeyboardInterrupt
+
+  monkeypatch.setattr(conductor, "safeTick", safeTick)
+  monkeypatch.setattr(conductor, "stopJobs", lambda keys, recordInterruption: stops.append((keys, recordInterruption)))
+  monkeypatch.setattr(conductor, "printNewEvents", lambda: lines.append("已印出新事件"))
+  conductor.runForever()
+  assert ticks == [1, 2]
+  # Ctrl+C 結束時要記中斷，下次啟動才會把這些任務拉回排隊
+  assert stops == [(["P0001/T1", "P0001/T2"], True)]
+  assert lines == [f"Alfred 啟動：{conductor.projectDir}（Ctrl+C 結束）", "Alfred 結束中，正在停止所有 agent…", "已印出新事件"]
+
+
+def fakeOs(name, killError=None):
+  def kill(pid, signal):
+    if killError:
+      raise killError
+  return SimpleNamespace(name=name, kill=kill)
+
+
+def test_processAliveOnPosixUsesSignalZero(monkeypatch):
+  monkeypatch.setattr(conductorModule, "os", fakeOs("posix"))
+  assert conductorModule.processAlive(1234)
+  monkeypatch.setattr(conductorModule, "os", fakeOs("posix", ProcessLookupError()))
+  assert not conductorModule.processAlive(1234)
+  # 程式還在、只是屬於別的使用者：送不了訊號也算活著，不能把別人的鎖當成殘留
+  monkeypatch.setattr(conductorModule, "os", fakeOs("posix", PermissionError()))
+  assert conductorModule.processAlive(1234)
+
+
+def test_processAliveOnWindowsAsksTasklistForExactPid(monkeypatch):
+  calls = []
+
+  def run(argv, **options):
+    calls.append(argv)
+    return SimpleNamespace(stdout="python.exe  12345 Console  1  10,000 K")
+
+  monkeypatch.setattr(conductorModule, "os", fakeOs("nt", AssertionError("Windows 上不能用 os.kill 檢查")))
+  monkeypatch.setattr(conductorModule, "subprocess", SimpleNamespace(run=run))
+  assert conductorModule.processAlive(12345)
+  # 只比對完整的 PID，1234 不能因為是 12345 的開頭就算活著
+  assert not conductorModule.processAlive(1234)
+  assert calls[0] == ["tasklist", "/FI", "PID eq 12345"]
