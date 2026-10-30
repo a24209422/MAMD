@@ -135,9 +135,10 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
    ```
 
    - `maxParallel` 是寫程式、審查各自的總上限，包含 1 個主要 agent；預設 3 代表每角色「1 主要 + 最多 2 子」。任務少時優先使用主要 agent，主要忙碌且仍有可執行任務才啟動子 agent，任務完成後結束該次執行。設 1 就只使用主要 agent
+   - `maxParallelTests` 是同時最多跑幾份完整的 `testCommand`，基準、合併後測試和任務測試合計，預設 1（一次只跑一份）。同時跑好幾份時每份都變慢，瀏覽器測試也更容易不穩定；電腦核心多、記憶體夠時才調高。名額滿時其他測試排隊等待（見「測試把關」）。改了要重開 Alfred 才生效
    - 總覽第二層的大卡是 `writer`／`reviewer` 主要 agent，直接顯示自己的任務、Context 與狀態；第三層只放子 agent，小卡顯示「未啟動」代表目前沒有執行程序。主要與子卡都能點進各自的控制台
    - `writer`、`reviewer` 兩段（例如任務卡住後才加 `allowedTools`）改了之後，Alfred（指揮程式，檔名是 `conductor.py`）從下一個新啟動的 agent 開始用；其他設定改了要重開 Alfred 才生效
-   - 完整的 `testCommand` 在背景執行，不擋派工、合併和審查；新核准的 plan 在任務合併後才跑（狀態「已合併待測試」），改版前核准的 plan 在任務寫完後跑（狀態「測試中」），總覽的 Alfred 卡片會列出這些任務（見「測試把關」）
+   - 完整的 `testCommand` 在背景執行，不擋派工、合併和審查，同時跑的份數受 `maxParallelTests` 限制；新核准的 plan 在任務合併後才跑（狀態「已合併待測試」），改版前核准的 plan 在任務寫完後跑（狀態「測試中」），總覽的 Alfred 卡片會列出這些任務（見「測試把關」）
    - plan 開始時的基準測試也在背景執行，跑基準時 Alfred 照常處理其他 plan 的派工、合併和審查（見「測試把關」）
    - agent 交出最終結果後，如果它開的背景程式（例如被轉到背景的測試）讓 CLI 不退出，Alfred 等 10 秒寬限時間就結束它留下的整個程式樹，照常 commit、送測試或寫審查結果，不算中斷
    - Alfred 啟動前會檢查測試方式：沒有非空白的 `testCommand`，也沒有 `skipTests: true` 時，會先停止並提示初始化選項，不會等到 writer 執行測試才卡住
@@ -174,7 +175,7 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 - 模型名稱、版本與順序跟著 CLI；Claude 別名另顯示目前對應的完整模型 ID。只列出該模型支援的推理強度，儲存前也會檢查；切換 CLI 或模型時，推理強度會重設為沿用 CLI 設定
 - 清單快取五分鐘，可按「重新整理模型」立即重讀；CLI 未安裝、未登入、不支援查詢或查詢逾時時會顯示錯誤。清單反映 CLI 提供的選項，實際使用權限仍由 CLI／供應商決定
 - 角色有自訂 `command` 時，查詢會使用同一個指令；要換 CLI 得先改設定檔。其他欄位仍需改 `.board/config.json`
-- Alfred 每一輪都會重讀 `writer`、`reviewer`：改了之後從下一個新啟動的 agent 開始用，正在跑的不受影響。其他設定（`maxParallel`、`testCommand` 等）改了要重開 Alfred
+- Alfred 每一輪都會重讀 `writer`、`reviewer`：改了之後從下一個新啟動的 agent 開始用，正在跑的不受影響。其他設定（`maxParallel`、`maxParallelTests`、`testCommand` 等）改了要重開 Alfred
 - 換了寫程式的 CLI 或模型之後，進行中的任務下一輪會開新對話，接不回上一輪
 - 權限：
   - Claude 寫程式：只能執行 `testCommand` 和 `allowedTools` 列的指令
@@ -209,6 +210,8 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 
 新核准的 plan 走「合併後測試」：寫完直接送審，審查通過就合併，完整測試在合併後對 plan 分支跑，失敗時找出是哪次合併、只退回那個任務。改版前核准的 plan（核准事件沒有 `testTiming`）照原流程：寫完先測試，測試沒過不送審，見下面「原流程」。
 
+基準、合併後測試和任務測試都是完整測試，合計同時最多跑 `maxParallelTests` 份（預設 1）。名額滿時，新的測試不會開始，排隊等前面的跑完：要基準的 plan 先不派工，合併後測試的任務停在「已合併待測試」，原流程的任務停在「測試中」等待，等待時不寫事件。有空位時先跑基準，任務測試依進入「測試中」的先後開始。沿用之前結果的基準不跑測試，不佔名額。
+
 1. plan 核准後、派出第一個任務前，Alfred 先在 baseCommit 跑一次 `testCommand` 當基準。基準在暫時的 worktree（`<專案>-worktrees/P0007-baseline`）裡跑，跑完就移除；基準記下來之前這份 plan 不派工。基準在背景執行，不擋其他 plan。基準跑到一半時放棄這份 plan 或執行 `stop`，Alfred 會在下一輪就結束測試的整個程式樹並移除基準 worktree，不必等整套測試跑完；Ctrl+C 結束 Alfred 時也會一併結束基準。`stop` 之後 `resume`（或重開 Alfred）會重跑基準。基準在跑之前，Alfred 會先找之前記下的結果能不能沿用，來源是之前的基準、合併後對 plan 分支跑的完整測試，或任務寫完後跑的任務測試（原流程的「測試中」；改版前的紀錄沒有記被測的 commit、完整的失敗名單和測試指令，不能沿用），不論來源 plan 已經完成或放棄。被測的 commit 跟這份 plan 的 baseCommit 之間只差 `plans/` 底下的檔案（例如 submit 自動 commit 的 plan 檔），而且 `testCommand` 相同，就直接沿用那次的結果當基準，不建 worktree、不重跑，事件會標出沿用哪份 plan、哪個任務的結果。所以前一份 plan 最後測過的程式碼沒有再改動時，合併回 main 後馬上核准的下一份 plan 會沿用那次的任務測試或合併後測試結果；合併時混進其他程式改動，或最後的組合沒有測過時，一樣要重跑。另一份 plan 正在跑程式碼相同的基準時，先等它跑完再沿用，同時需要的基準只跑一次
 2. 任務寫完直接送審，審查通過就合併進 plan 分支，狀態變成「已合併待測試」，列在總覽 Alfred 卡片的「已合併待測試」那一行。依賴它的任務這時就能開始寫，不等測試
 3. Alfred 在暫時的 worktree（`<專案>-worktrees/P0007-mergetest`）測 plan 分支最新的 commit，一次涵蓋所有還沒測過的合併，跟上一個測過的版本比（第一次跟基準比，規則見下面「測試判定」）。每份 plan 同時最多一個合併後測試；測試期間才合併的任務留給下一次。暫停、放棄這份 plan、重開 Alfred 時，跑到一半的測試會結束、worktree 會移除，之後重跑
@@ -225,7 +228,7 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 
 #### 原流程（改版前核准的 plan）
 
-1. 每個任務寫完後，狀態先變成「測試中」，`testCommand` 在任務的 worktree 背景跑，結果跟基準比（規則見下面「測試判定」）；結果出來才變成待審查或退回。測試中的任務會列在總覽 Alfred 卡片的「測試中」那一行。暫停或重開 Alfred 時，跑到一半的測試會結束，繼續或重開後重跑
+1. 每個任務寫完後，狀態先變成「測試中」，`testCommand` 在任務的 worktree 背景跑，結果跟基準比（規則見下面「測試判定」）；結果出來才變成待審查或退回。測試名額滿時任務會停在「測試中」等待，有空位才開始跑（見上面 `maxParallelTests` 的說明）。測試中的任務會列在總覽 Alfred 卡片的「測試中」那一行，等待中的也一樣列在這裡。暫停或重開 Alfred 時，跑到一半的測試會結束，繼續或重開後重跑
 2. 有新增的失敗：不叫審查的 agent，直接退回寫程式的 agent，算一輪。下一輪它會收到新增失敗的測試名稱和測試輸出最後 50 行，不附更早的審查意見。輪數用完時停在「等你處理」，見「指令」的 `decide ... retry` 表
 3. 失敗都是基準本來就有的：照常送審，審查的 agent 會被告知這些失敗基準就有，不必因此退回
 

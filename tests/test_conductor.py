@@ -525,7 +525,7 @@ def taskTestStarted(logPath, count=1):
 
 def test_testsRunInBackgroundInParallelWithoutBlockingOtherTasks(startBoard, tmp_path):
   command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 6, "P0001-T2": 1.5})
-  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command)
+  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command, maxParallelTests=2)
   runUntil(conductor, taskIs(TaskStatus.testing))
   runUntil(conductor, planDone)
   assert all(event["data"]["testing"] is True for event in eventsOf(conductor, "taskWritten"))
@@ -534,6 +534,77 @@ def test_testsRunInBackgroundInParallelWithoutBlockingOtherTasks(startBoard, tmp
   assert order.index(("start", "P0001-T2")) < order.index(("end", "P0001-T1"))
   events = [(event["type"], event["task"]) for event in board_core.readEvents(conductor.projectDir)]
   assert events.index(("reviewStarted", "T2")) < events.index(("testRun", "T1"))
+
+
+def loggedTestOrder(logPath):
+  return [tuple(line.split()[:2]) for line in logPath.read_text(encoding="utf-8").splitlines()]
+
+
+def waitingForTest(conductor, taskId):
+  return lambda state: (state["tasks"][f"P0001/{taskId}"]["status"] == TaskStatus.testing
+                        and f"P0001/{taskId}" not in conductor.jobs)
+
+
+def test_oneTestAtATimeWaitsWithoutEvents(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 4, "P0001-T2": 1})
+  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command)
+  runUntil(conductor, waitingForTest(conductor, "T2"))
+  assert "P0001/T1" in conductor.jobs
+  eventCount = len(board_core.readEvents(conductor.projectDir))
+  for _ in range(3):
+    conductor.tick()
+  state = conductor.currentState()[1]
+  assert state["tasks"]["P0001/T2"]["status"] == TaskStatus.testing and "P0001/T2" not in conductor.jobs
+  assert len(board_core.readEvents(conductor.projectDir)) == eventCount
+  runUntil(conductor, planDone)
+  # 預設一次只跑一份：T2 的測試等 T1 的測試結束才開始
+  order = loggedTestOrder(logPath)
+  assert order.index(("end", "P0001-T1")) < order.index(("start", "P0001-T2"))
+  assert sorted(event["task"] for event in eventsOf(conductor, "testRun")) == ["T1", "T2"]
+
+
+def test_waitingTestsRunInOrderOfEnteringTesting(startBoard, tmp_path):
+  # 只有一個寫程式名額，照列的順序寫：T1、T3、T2；T1 測試時 T3、T2 依序進測試中等待
+  rows = oneTask + ["| R1 | | D1 | | T3 任務三 | | 驗證三 |", "| R1 | | D1 | | T2 任務二 | | 驗證二 |"]
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 4})
+  conductor, _ = startBoard(rows, testCommand=command, maxParallel=1)
+  runUntil(conductor, planDone)
+  written = [event["task"] for event in eventsOf(conductor, "taskWritten")]
+  assert written == ["T1", "T3", "T2"]
+  order = loggedTestOrder(logPath)
+  starts = [name for kind, name in order if kind == "start" and not name.endswith("-baseline")]
+  assert starts == ["P0001-T1", "P0001-T3", "P0001-T2"]
+  for earlier, later in zip(starts, starts[1:]):
+    assert order.index(("end", earlier)) < order.index(("start", later))
+
+
+def test_baselineGetsFreeTestSlotBeforeWaitingTask(startBoard, writePlan, gitProject, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 4, "P0002-baseline": 1})
+  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command)
+  runUntil(conductor, waitingForTest(conductor, "T2"))
+  # P0002 的 baseCommit 有程式碼改動，不能沿用，要自己跑基準
+  commitCode(gitProject)
+  approvePlan(gitProject, writePlan, "P0002")
+  conductor.tick()
+  assert "P0002/baseline" not in conductor.jobs and "P0001/T1" in conductor.jobs
+  runUntil(conductor, planDone)
+  order = loggedTestOrder(logPath)
+  assert order.index(("end", "P0001-T1")) < order.index(("start", "P0002-baseline"))
+  assert order.index(("end", "P0002-baseline")) < order.index(("start", "P0001-T2"))
+
+
+def test_pauseWhileWaitingForTestThenResumeRunsEachTestOnce(startBoard, tmp_path):
+  command, logPath = sleepyTestCommand(tmp_path, {"P0001-T1": 4, "P0001-T2": 1})
+  conductor, _ = startBoard(twoTasks, {"write": {"T2": ["slow"]}}, testCommand=command)
+  runUntil(conductor, waitingForTest(conductor, "T2"))
+  board_core.appendEvent(conductor.projectDir, "paused", data={"reason": "測試暫停"})
+  state = runUntil(conductor, lambda current: not conductor.jobs)
+  assert state["tasks"]["P0001/T2"]["status"] == TaskStatus.testing
+  board_core.appendEvent(conductor.projectDir, "resumed")
+  runUntil(conductor, planDone)
+  assert sorted(event["task"] for event in eventsOf(conductor, "testRun")) == ["T1", "T2"]
+  assert eventsOf(conductor, "taskInterrupted") == []
+  assert [entry[0] for entry in taskTestLog(logPath, "T2")] == ["start", "end"]
 
 
 def test_pauseWhileTestingRerunsTestsWithoutInterruption(startBoard, tmp_path):
@@ -631,7 +702,8 @@ def test_otherPlanDispatchesWhileBaselineRuns(startBoard, writePlan, gitProject,
   import board as boardCli
 
   command, logPath = sleepyTestCommand(tmp_path, {"P0002-baseline": 10})
-  conductor, _ = startBoard(oneTask, testCommand=command)
+  # 兩份基準同時跑，P0002 的基準才會在 P0001 派工前開始
+  conductor, _ = startBoard(oneTask, testCommand=command, maxParallelTests=2)
   # 兩份 plan 的 baseCommit 之間有程式碼改動，P0002 不能沿用 P0001 的基準，要自己跑
   commitCode(gitProject)
   writePlan("0002-other.md", oneTask, planId="P0002", projectDir=gitProject)
