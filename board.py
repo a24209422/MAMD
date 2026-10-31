@@ -293,39 +293,57 @@ def cmdStats(projectDir, planIdValue=None):
   return 0
 
 
-def cmdApprove(projectDir, planIdValue, confirm=input, testTiming="afterMerge"):
-  plans, state = currentState(projectDir)
+def approveRefused(projectDir, planIdValue, plans, state):
   planState = state["plans"].get(planIdValue)
   if not planState or planState["status"] != PlanStatus.pending:
     print(f"{planIdValue} 不是「待核准」，不能核准")
-    return 1
+    return True
   # submit 之後 plan 檔仍可能被改；核准時要用和 submit 相同的標準再擋一次，否則沒有編號的任務會進到快照
   blockers = planBlockers(plans[planIdValue])
   if blockers:
     print(f"{planIdValue} 送出後又被改出問題，不能核准，請寫 plan 的 agent 修好再送出：")
     for message in blockers:
       print("  紅｜" + message)
-    return 1
+    return True
   # plan 分支從 HEAD 開出來，plan 檔跟 HEAD 不同時分支裡會是舊版
   if not planFileCommitted(projectDir, plans[planIdValue]):
     print(f"{planIdValue} 的 plan 檔（{planFilePath(plans[planIdValue])}）送出後又被改過，跟目前的 commit 不同，"
           "不能核准，請寫 plan 的 agent 重新執行 submit")
-    return 1
-  graph = plans[planIdValue]["graph"]
-  warnings = approveWarnings(projectDir, plans[planIdValue])
-  if warnings:
-    print("核准前請確認：")
-    for warning in warnings:
-      print("  " + warning)
-    if confirm("確定核准？輸入 y 繼續：").strip().lower() != "y":
-      print("已取消")
-      return 1
+    return True
+  return False
+
+
+def approveConfirmed(projectDir, plan, confirm):
+  warnings = approveWarnings(projectDir, plan)
+  if not warnings:
+    return True
+  print("核准前請確認：")
+  for warning in warnings:
+    print("  " + warning)
+  if confirm("確定核准？輸入 y 繼續：").strip().lower() != "y":
+    print("已取消")
+    return False
+  return True
+
+
+def approvedData(projectDir, planIdValue, graph, testTiming):
   tasks = [{"id": task["id"], "text": task["text"], "dependsOn": task["dependsOn"],
             "requirementIds": task["requirementIds"]} for task in graph.tasks.values()]
   data = {"baseCommit": board_git.headCommit(projectDir), "branch": board_git.planBranch(planIdValue), "tasks": tasks}
   # 新核准的 plan 一律合併後才跑完整測試；沒有這個欄位的舊事件照原流程。測試可以傳 None 核准成原流程
   if testTiming:
     data["testTiming"] = testTiming
+  return data
+
+
+def cmdApprove(projectDir, planIdValue, confirm=input, testTiming="afterMerge"):
+  plans, state = currentState(projectDir)
+  if approveRefused(projectDir, planIdValue, plans, state):
+    return 1
+  plan = plans[planIdValue]
+  if not approveConfirmed(projectDir, plan, confirm):
+    return 1
+  data = approvedData(projectDir, planIdValue, plan["graph"], testTiming)
   appendEvent(projectDir, "planApproved", plan=planIdValue, data=data)
   print(f"{planIdValue} 已核准，Alfred 會開始執行。")
   return 0
