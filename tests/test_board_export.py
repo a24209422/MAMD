@@ -158,12 +158,35 @@ def conflictProgressFile(projectDir):
                   encoding="utf-8")
 
 
+def leaveMainProjectConflict(projectDir):
+  # 交接檔本身沒有衝突標記，但主專案還停在合併衝突中
+  git(projectDir, "checkout", "-q", "-b", "side")
+  commitIn(projectDir, "README.md", "side 的內容\n")
+  git(projectDir, "checkout", "-q", "main")
+  commitIn(projectDir, "README.md", "main 的內容\n")
+  subprocess.run(["git", "merge", "side"], cwd=projectDir, capture_output=True)
+  assert board_git.mergeInProgress(projectDir)
+
+
+def changeApprovedPlan(projectDir):
+  path = projectDir / "plans" / "0001-first.md"
+  path.write_text(path.read_text(encoding="utf-8") + "\n核准後偷改的內容\n", encoding="utf-8")
+
+
+def dropBranchWithWork(projectDir):
+  # T3 已有成果（lastCommit），分支不見了就沒有東西能把成果帶到另一台電腦
+  git(projectDir, "branch", "-D", "task/P0001-T3")
+
+
 @pytest.mark.parametrize("breakSource, keyword", [
   (holdAlfredLock, "Alfred"),
   (leaveHalfWork, "P0001-T1"),
   (appendBrokenEvent, "殘缺"),
   (leaveMergeConflict, "衝突"),
   (conflictProgressFile, "衝突"),
+  (leaveMainProjectConflict, "主專案"),
+  (changeApprovedPlan, "plans/0001-first.md"),
+  (dropBranchWithWork, "task/P0001-T3"),
 ])
 def test_failedChecksKeepExistingHandoffFile(legacyProject, capsys, breakSource, keyword):
   assert exportState(legacyProject) == 0
@@ -187,6 +210,20 @@ def test_firstExportFailureWritesNothing(legacyProject):
 
   assert not progressPath(legacyProject).exists()
   assert not checkpointPath(legacyProject).exists()
+
+
+def test_exportFromTaskWorktreeIsRejected(legacyProject, capsys):
+  assert exportState(legacyProject) == 0
+  before = (progressPath(legacyProject).read_bytes(), checkpointPath(legacyProject).read_bytes())
+  taskPath = board_git.taskWorktreePath(legacyProject, "P0001", "T1")
+  capsys.readouterr()
+
+  assert exportState(taskPath) == 1
+
+  assert "主專案" in capsys.readouterr().out
+  assert not progressPath(taskPath).exists()
+  assert not (taskPath / ".board").exists()
+  assert (progressPath(legacyProject).read_bytes(), checkpointPath(legacyProject).read_bytes()) == before
 
 
 def test_statusHintsUnexportedProgress(legacyProject, capsys):

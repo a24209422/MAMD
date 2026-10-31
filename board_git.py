@@ -74,6 +74,13 @@ def mergeInProgress(path):
   return runGit(path, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False) != ""
 
 
+def isLinkedWorktree(path):
+  # 主專案的 git-dir 就是共用的 .git；plan／task worktree 的 git-dir 在 .git/worktrees 底下，兩者不同
+  gitDir = runGit(path, "rev-parse", "--git-dir", check=False)
+  commonDir = runGit(path, "rev-parse", "--git-common-dir", check=False)
+  return (Path(path) / gitDir).resolve() != (Path(path) / commonDir).resolve()
+
+
 def branchExists(projectDir, branch):
   return runGit(projectDir, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False) != ""
 

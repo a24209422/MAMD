@@ -879,7 +879,9 @@ def exportProgress(projectDir, config, checkSource):
   with fileLock(directory / lockFileName):
     result = evaluateProgress(projectDir, plans, config)
     sourceProblems, branches = checkSource(result["state"])
-    problems = eventProblems(projectDir) + syncProblems(result["sync"]) + sourceProblems
+    # 已接納的基底裡 active plan 的 plan 檔被改過時，用新檔案 hash 配舊任務匯出會把不一致蓋掉
+    changedPlans = list(blockChangedPlans(result["state"], result["base"], plans).values())
+    problems = eventProblems(projectDir) + syncProblems(result["sync"]) + changedPlans + sourceProblems
     if problems:
       raise ExportError(problems)
     previous = result["base"]

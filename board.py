@@ -222,6 +222,13 @@ def activePlanIds(state):
   return [planState["id"] for planState in state["plans"].values() if planState["status"] == PlanStatus.active]
 
 
+def mainProjectProblems(projectDir):
+  # 主專案停在合併衝突時，plan 檔或其他要提交的檔案可能還是半成品
+  if board_git.mergeInProgress(projectDir) or board_git.unmergedFiles(projectDir):
+    return ["主專案有未解的合併衝突，請先解完衝突並 commit 再匯出"]
+  return []
+
+
 def worktreeProblem(path):
   if not path.exists():
     return None
@@ -241,20 +248,38 @@ def worktreeProblems(projectDir, state):
   return [problem for problem in map(worktreeProblem, paths) if problem]
 
 
+def branchNeeds(state, planIdValue):
+  # 有 lastCommit 的任務已有成果在分支上，分支不見就無法交接；還沒寫過的排隊任務本來就還沒有分支
+  tasks = planTasks(state, planIdValue)
+  needs = [(board_git.planBranch(planIdValue), any(task["lastCommit"] for task in tasks))]
+  return needs + [(board_git.taskBranch(planIdValue, task["task"]), task["lastCommit"] is not None)
+                  for task in unfinishedTasks(state, planIdValue)]
+
+
 def requiredBranches(projectDir, state):
   # 另一台電腦要從這些分支接續進行中的工作；完成或放棄的任務已合併或不再需要
-  names = []
+  branches = {}
+  missing = []
   for planIdValue in activePlanIds(state):
-    names.append(board_git.planBranch(planIdValue))
-    names += [board_git.taskBranch(planIdValue, task["task"]) for task in unfinishedTasks(state, planIdValue)]
-  return {name: board_git.runGit(projectDir, "rev-parse", f"refs/heads/{name}")
-          for name in names if board_git.branchExists(projectDir, name)}
+    for name, hasWork in branchNeeds(state, planIdValue):
+      if board_git.branchExists(projectDir, name):
+        branches[name] = board_git.runGit(projectDir, "rev-parse", f"refs/heads/{name}")
+      elif hasWork:
+        missing.append(f"分支 {name} 不存在，但任務已有成果；請找回這個分支再匯出，否則另一台電腦拿不到這些程式")
+  return missing, branches
 
 
 def cmdExportState(projectDir):
+  if board_git.isLinkedWorktree(projectDir):
+    # 交接檔只能由主專案產生；在 worktree 執行會讀錯 .board，並把交接檔寫進任務分支
+    print("無法匯出交接進度：export-state 只能在主專案執行，請改到主專案資料夾執行")
+    return 1
+
   def checkSource(state):
-    problems = alfredProblems(projectDir) + worktreeProblems(projectDir, state)
-    return problems, ({} if problems else requiredBranches(projectDir, state))
+    problems = alfredProblems(projectDir) + mainProjectProblems(projectDir) + worktreeProblems(projectDir, state)
+    if problems:
+      return problems, {}
+    return requiredBranches(projectDir, state)
 
   try:
     snapshot, changed = exportProgress(projectDir, loadConfig(projectDir), checkSource)
