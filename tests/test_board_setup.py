@@ -286,6 +286,50 @@ def test_only_runtime_assets_are_bundled():
     assert not any("tests" in path.parts or "__pycache__" in path.parts for path in files)
 
 
+runtimeDriver = """
+import http.client, json, sys, threading
+runtime, home, other = sys.argv[1:4]
+sys.path.insert(0, runtime)
+import server
+httpServer = server.makeServer(home, 0, "token")
+threading.Thread(target=httpServer.serve_forever, daemon=True).start()
+port = httpServer.server_address[1]
+def call(method, path, body=None):
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    connection.request(method, path, body=None if body is None else json.dumps(body),
+                       headers={"X-Board-Token": "token", "Content-Type": "application/json"})
+    response = connection.getresponse()
+    return response.status, response.read().decode("utf-8")
+opened = json.loads(call("POST", "/api/projects/open", {"path": other})[1])["project"]
+state = json.loads(call("GET", "/api/projects/" + opened["id"] + "/state")[1])
+pages = [call("GET", path)[0] for path in ("/?project=" + opened["id"], "/js/core.js", "/js/terminal.js", "/vendor/xterm.js")]
+httpServer.shutdown()
+httpServer.server_close()
+print(json.dumps({"server": server.__file__, "opened": opened, "state": state["project"], "pages": pages}))
+"""
+
+
+def test_initialized_runtime_can_open_another_project(pythonProject, tmp_path):
+    assert initialize(pythonProject, Options(python=sys.executable), toolRoot) == 0
+    runtime = pythonProject / ".agent-board/runtime"
+    for relative in ("board_projects.py", "server.py", "modules/terminal/service.py",
+                     "web/index.html", "web/js/core.js", "web/js/terminal.js", "web/vendor/xterm.js"):
+        assert (runtime / relative).is_file(), relative
+    other = tmp_path / "另一個 專案"
+    other.mkdir()
+    # -I 不把工具根目錄或目前目錄放進 sys.path，確定用的是複製到目標專案的 runtime
+    result = subprocess.run([sys.executable, "-I", "-c", runtimeDriver, str(runtime), str(pythonProject), str(other)],
+                            cwd=tmp_path, capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert Path(report["server"]).resolve() == (runtime / "server.py").resolve()
+    assert report["opened"]["path"] == str(other.resolve())
+    assert report["opened"]["ready"] is False and report["opened"]["problems"]
+    assert report["state"] == str(other.resolve())
+    assert report["pages"] == [200, 200, 200, 200]
+
+
 def test_cli_initializes_a_project(pythonProject):
     from board_setup.cli import main
     assert main(["--project", str(pythonProject), "--python", sys.executable]) == 0
