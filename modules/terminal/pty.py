@@ -59,6 +59,8 @@ class WindowsPty:
         shell = shutil.which('pwsh.exe') or shutil.which('powershell.exe')
         if not shell:
             raise ValueError('找不到 PowerShell')
+        # 啟動 server 的程式可能設成忽略 Ctrl+C（自動流程、背景啟動），PowerShell 會繼承，終端機裡的 Ctrl+C 就中斷不了指令
+        ctypes.WinDLL('kernel32').SetConsoleCtrlHandler(None, False)
         # Set up containment before allowing commands or user profile code to execute.
         self.process = PtyProcess.spawn([shell, '-NoLogo', '-NoProfile'], cwd=str(project),
                                        env=dict(os.environ), dimensions=(24, 80), backend=0)
