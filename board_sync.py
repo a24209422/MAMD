@@ -34,16 +34,20 @@ taskCopyFields = ("text", "dependsOn", "requirementIds", "status", "round", "max
                   "lastWriteMode", "mergeFix", "mergeFailures", "reviews", "lastReviewNotes")
 contentFields = ("format", "version", "projectId", "plans", "branches")
 
-quotedPathPattern = re.compile(r"""(['"])(?:[A-Za-z]:[\\/]|\\\\|/)[^'"\n]*\1""")
-# 前面接著網址的 :/ 或相對路徑的字元時不算絕對路徑，plan/P0001、https://… 才不會被誤遮；
-# 中文常不空格就接路徑（請看/home/…），所以前一字只排除 ASCII，不能用會吃中文的 \w；
-# 斜線後是中文時視為「前端/上傳」這類分類寫法，不是路徑；
+# 引號內的 \" 是跳脫不是收尾，否則後半段會漏遮；JSON 裡的 C:\\ 是兩個反斜線，開頭也要認得
+quotedPathPattern = re.compile(r"""(['"])(?:[A-Za-z]:(?:\\\\|[\\/])|\\\\|/)(?:\\.|(?!\1)[^\n\\])*\1""")
+pathChar = r"""[^\s'"，。；、）」]"""
+# 前面接著網址的 :/ 或相對路徑的字元時不算絕對路徑，plan/P0001、https://…、src/資料 才不會被誤遮；
+# 中文常不空格就接路徑（請看/home/…），所以中文詞後面接「/英數」也算路徑，只遮斜線之後、保留前面的詞；
+# 中文詞後面接「/中文」和「前端/上傳」這類分類寫法分不出來，視為分類不遮；
 # 全形標點視為路徑結尾，中文句子裡「路徑，後文」的後文才不會一起被吃掉
-barePathPattern = re.compile(r"""(?<![A-Za-z0-9_.~-])(?:[A-Za-z]:[\\/]|\\\\)[^\s'"，。；、）」]*"""
-                             r"""|(?<![A-Za-z0-9_.:~/-])/[A-Za-z0-9_.~-][^\s'"，。；、）」]*""")
+barePathPattern = re.compile(r"(?<![A-Za-z0-9_.~-])(?:[A-Za-z]:[\\/]|\\\\)" + pathChar + "*"
+                             r"|(?<![\w.:~/-])([^\W\d_A-Za-z]+)/[A-Za-z0-9_.~-]" + pathChar + "*"
+                             r"|(?<![\w.:~/-])/" + pathChar + "+")
 conflictMarkerPattern = re.compile(r"^(?:<{7}|={7}|>{7})(?: |$)", re.MULTILINE)
-# 遮蔽值遇到全形標點與截斷用的「…」就停，重複清理同一段文字結果才會一樣
-secretValue = r"""[^\s'"，。；、）」…]+"""
+# 遮蔽值遇到全形標點與截斷用的「…」就停，重複清理同一段文字結果才會一樣；
+# 反斜線跳脫的字元（\" 或 \ 空白）仍是值的一部分，不能在那裡停下讓後半段外洩
+secretValue = r"""(?:\\[^\n…]|[^\s'"，。；、）」…\\])+"""
 # 鍵名後可接收尾引號，JSON 與 Python dict 寫法的 "token": "…" 才遮得到
 secretKey = (r"""(?i)((?<![a-z])[a-z_-]*(?:token|secret|password|passwd|api[_-]?key)[a-z_-]*["']?"""
              r"""\s*[=:：]\s*)""")
@@ -57,11 +61,11 @@ maskRules = (
    maskPlaceholder),
   (re.compile(r"(?i)(?<![a-z])(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 " + maskPlaceholder),
   # 有引號的值整段遮到收尾引號，值裡有空白也不會漏；沒收尾的引號交給下一條照一般值遮
-  (re.compile(secretKey + r"""(["'])[^\n]*?\2"""), r"\1\2" + maskPlaceholder + r"\2"),
+  (re.compile(secretKey + r"""(["'])(?:\\.|(?!\2)[^\n\\])*\2"""), r"\1\2" + maskPlaceholder + r"\2"),
   (re.compile(secretKey + r"""(["']?)""" + secretValue), r"\1\2" + maskPlaceholder),
   (re.compile(r"(?i)(?<![a-z])(pid)(?![a-z])[\s:=#]*\d+"), r"\1 " + maskPlaceholder),
   (quotedPathPattern, lambda match: match.group(1) + pathPlaceholder + match.group(1)),
-  (barePathPattern, pathPlaceholder),
+  (barePathPattern, r"\1" + pathPlaceholder),
 )
 unclosedPlaceholderPattern = re.compile(r"<[^<>\s]*$")
 

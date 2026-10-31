@@ -223,6 +223,28 @@ def test_pathsRightAfterChineseAreMasked(tmp_path, writePlan):
   assert parseSnapshot(text.encode("utf-8")) == snapshot
 
 
+def test_chineseDirectoriesAndEscapedSecretsAreMasked(tmp_path, writePlan):
+  projectDir = makeProject(tmp_path / "proj", writePlan)
+  approval = approved("P0001")
+  approval["data"]["tasks"][0]["text"] = "讀 /專案/alice/設計.md 並改 前端/上傳"
+  note = '複製 /資料/alice/專案 到 "C:\\使用者\\alice\\a b"，設定 {"password":"prefix\\"remaining-secret"}'
+  events = [
+    makeEvent("planSubmitted", plan="P0001"), approval,
+    makeEvent("needsYou", plan="P0001", task="T1", kind="noChanges", reason="沒有改動"),
+    makeEvent("userDecision", plan="P0001", task="T1", action="retry", note=note),
+  ]
+  plans, state = eventsState(projectDir, events)
+  snapshot = buildSnapshot(state, plans, projectId)
+  task = snapshot["plans"]["P0001"]["tasks"][0]
+  assert task["text"] == "讀 <路徑> 並改 前端/上傳"
+  assert task["userNote"] == '複製 <路徑> 到 "<路徑>"，設定 {"password":"<已遮蔽>"}'
+  text = serializeSnapshot(snapshot)
+  assert "alice" not in text and "remaining-secret" not in text
+  assert parseSnapshot(text.encode("utf-8")) == snapshot
+  restored = stateFromSnapshot(snapshot, plans)
+  assert buildSnapshot(restored, plans, projectId, previous=snapshot) is snapshot
+
+
 @pytest.mark.parametrize("text, expected", [
   ("\x1b[1;31m失敗\x1b[0m\x07", "失敗"),
   ("連線 https://me:hunter2@example.com/repo 失敗", "連線 https://<已遮蔽>@example.com/repo 失敗"),
@@ -240,6 +262,16 @@ def test_pathsRightAfterChineseAreMasked(tmp_path, writePlan):
    "請看https://example.com/a/b 與 src/a.py，改前端/上傳和/或 plan/P0001"),
   ('{"token":"abc123secret", "password": "p@ssword", \'api_key\':\'k 1\'}',
    '{"token":"<已遮蔽>", "password": "<已遮蔽>", \'api_key\':\'<已遮蔽>\'}'),
+  ("見 /資料/專案/a.md，複製到「/srv/資料」或（/專案）", "見 <路徑>，複製到「<路徑>」或（<路徑>）"),
+  ("請看/home/me/資料，存到C:\\資料\\專案，共享\\\\伺服器\\共用", "請看<路徑>，存到<路徑>，共享<路徑>"),
+  ('讀 "/資料/我的 專案" 與 \'C:\\Program Files\\a\' 和 "D:\\\\a\\"b c\\\\x"',
+   '讀 "<路徑>" 與 \'<路徑>\' 和 "<路徑>"'),
+  ('{"note":"見 \\"C:\\\\Users\\\\me\\\\a b\\""}', '{"note":"見 \\"<路徑>"}'),
+  ('{"password":"prefix\\"remaining-secret"}', '{"password":"<已遮蔽>"}'),
+  ("token='a\\'b c' 與 secret: 'x\\\\'", "token='<已遮蔽>' 與 secret: '<已遮蔽>'"),
+  ('password="a\\"b 與 token=c\\ d', 'password="<已遮蔽> 與 token=<已遮蔽>'),
+  ("見 https://example.com/資料/a 與 ./資料/b、~/設定、src/資料/c，改 前端/上傳",
+   "見 https://example.com/資料/a 與 ./資料/b、~/設定、src/資料/c，改 前端/上傳"),
 ])
 def test_portableTextMasksMachineLocalData(text, expected):
   assert board_sync.portableText(text) == expected
@@ -495,6 +527,11 @@ def mutate(data, path, value):
   (("plans", "P0001", "tasks", 0, "userNote"), "請修正C:\\Users\\me\\a.py", "userNote"),
   (("plans", "P0001", "tasks", 0, "text"), "請看/home/me/a.py", "text"),
   (("plans", "P0002", "rejectReason"), "暫存在/tmp", "rejectReason"),
+  (("plans", "P0001", "tasks", 0, "userNote"), "見 /資料/專案", "userNote"),
+  (("plans", "P0001", "tasks", 0, "text"), "讀「/資料/專案」", "text"),
+  (("plans", "P0001", "tasks", 0, "userNote"), '{"password":"prefix\\"remaining-secret"}', "userNote"),
+  (("plans", "P0002", "rejectReason"), "token='a\\'b c'", "rejectReason"),
+  (("plans", "P0001", "tasks", 0, "userNote"), 'see "C:\\\\a\\"b c"', "userNote"),
   (("plans", "P0001", "tasks", 0, "text"), "讀 C:/Users/alice/private.txt", "text"),
   (("plans", "P0001", "tasks", 0, "text"), "設定 token=abc123", "text"),
   (("plans", "P0001", "tasks", 0, "requirementIds"), ["/tmp"], "requirementIds"),
