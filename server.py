@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 import board
 import board_api
 import board_models
+import board_projects
 from board_core import (BoardError, PlanStatus, cliNames, loadConfig, modelNamePattern, modelNameRule,
                         roleChoiceText, roleSpec, saveRoleChoice)
 from modules.system_monitor import SystemMonitor
@@ -51,6 +52,9 @@ postRoutes = [
   (re.compile(r"^/api/roles/(writer|reviewer)$"), "saveRole"),
   (re.compile(r"^/api/models/(writer|reviewer)$"), "models"),
 ]
+projectRoute = re.compile(r"/api/projects/([^/]+)(/.+)")
+# 這些會改看板狀態或設定；未初始化的專案只能看和用終端機，不能替使用者寫入
+boardWrites = {"approve", "reject", "abandon", "decide", "stop", "resume", "saveRole"}
 # 指令函式把結果印到 stdout；接住時 stdout 是整個程式共用的，不同專案的 Dashboard 也只能同時有一個寫入在跑
 writeLock = threading.RLock()
 
@@ -169,8 +173,13 @@ class Dashboard:
     traceback.print_exception(error)
 
 
+def projectView(project):
+  return {**project.view(), **board_projects.readiness(project.path)}
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
   dashboard = None
+  registry = None
 
   def log_message(self, format, *args):
     # 網頁每 2 秒輪詢一次，成功的請求不印；錯誤由 reportError 印
@@ -183,14 +192,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
     self.dispatch(self.routePost)
 
   def dispatch(self, route):
+    # 每個請求各自記住要操作的專案：handler 類別是所有請求共用的，改它會讓還沒做完的請求換到別的專案
+    self.requestDashboard, self.project = self.dashboard, None
     try:
       if not self.hostAllowed():
         self.sendJson(403, {"ok": False, "message": "只接受 127.0.0.1 或 localhost 的網址"})
         return
-      route(urlsplit(self.path).path)
+      path = urlsplit(self.path).path
+      match = projectRoute.fullmatch(path)
+      if match:
+        path = self.enterProject(*match.groups())
+      if path is not None:
+        route(path)
     except Exception as error:
-      self.dashboard.reportError(error)
+      self.requestDashboard.reportError(error)
       self.sendJson(500, {"ok": False, "message": f"server 錯誤：{error}"})
+
+  def enterProject(self, identifier, rest):
+    # 回傳 None 代表已經回了錯誤
+    project = self.registry.get(identifier)
+    if project is None:
+      # POST 一樣先讀完內容、驗過 token 才回 404：沒讀完會被 RST，沒有 token 的人也探不出哪些專案開著
+      if self.command != "POST" or self.readAuthorizedBody() is not None:
+        self.sendJson(404, {"ok": False, "message": "找不到這個專案：請重新開啟專案資料夾"})
+      return None
+    self.project, self.requestDashboard = project, project.dashboard
+    return "/api" + rest
 
   def hostAllowed(self):
     # 擋 DNS rebinding：別的網站把自己的網域指到 127.0.0.1 時，Host 會是那個網域
@@ -215,14 +242,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
       if filePath.is_file():
         self.sendBody(200, filePath.read_bytes(), contentType)
         return
-    mounted = self.dashboard.systemMonitor.handleGet(path)
+    mounted = self.requestDashboard.systemMonitor.handleGet(path)
     if mounted:
       self.sendBody(200, *mounted)
       return
     for pattern, handler in getRoutes:
       match = pattern.match(path)
       if match:
-        payload = handler(self.dashboard.projectDir, *match.groups())
+        payload = handler(self.requestDashboard.projectDir, *match.groups())
         if payload is not None:
           self.sendJson(200, payload)
           return
@@ -243,7 +270,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
       return None
     # token 錯也要先讀完內容：沒讀完就關連線，Windows 會送 RST，用戶端還沒讀到的 403 會被丟掉
     data = self.rfile.read(length) if length else b""
-    if not self.dashboard.tokenMatches(self.headers.get("X-Board-Token", "")):
+    if not self.requestDashboard.tokenMatches(self.headers.get("X-Board-Token", "")):
       self.sendJson(403, {"ok": False, "message": "token 不對：請用 server.py 印出的網址重新開啟"})
       return None
     try:
@@ -259,18 +286,43 @@ class DashboardHandler(BaseHTTPRequestHandler):
     body = self.readAuthorizedBody()
     if body is None:
       return
+    match = re.fullmatch(r"/api/projects/(open|list)", path)
+    # 專案範圍裡不再開啟或列出專案，網址只有一種寫法
+    if match and self.project is None:
+      self.sendJson(*getattr(self, match[1] + "Projects")(body))
+      return
     match = re.fullmatch(r"/api/terminals/(list|create|connect|close)", path)
     if match:
-      status, payload = self.dashboard.terminal.request(match[1], body, self.server.server_address[1])
+      status, payload = self.requestDashboard.terminal.request(match[1], body, self.server.server_address[1])
       self.sendJson(status, payload)
       return
     for pattern, methodName in postRoutes:
       match = pattern.match(path)
       if match:
-        status, payload = getattr(self.dashboard, methodName)(*match.groups(), body)
-        self.sendJson(status, payload)
+        self.sendJson(*(self.writeRefusal(methodName) or getattr(self.requestDashboard, methodName)(*match.groups(), body)))
         return
     self.sendJson(404, {"ok": False, "message": "找不到"})
+
+  def openProjects(self, body):
+    try:
+      project = self.registry.open(body.get("path"))
+    except BoardError as error:
+      return 400, {"ok": False, "message": str(error)}
+    return 200, {"ok": True, "project": projectView(project)}
+
+  def listProjects(self, body):
+    return 200, {"ok": True, "defaultId": self.registry.defaultId,
+                 "projects": [projectView(project) for project in self.registry.all()]}
+
+  def writeRefusal(self, methodName):
+    # 舊 API 維持原本的行為；專案範圍的寫入每次重新檢查，使用者在終端機 init 完就能直接操作
+    if self.project is None or methodName not in boardWrites:
+      return None
+    status = board_projects.readiness(self.project.path)
+    if status["ready"]:
+      return None
+    return 409, {"ok": False, "message": "這個專案還不能用看板操作：" + "；".join(status["problems"]),
+                 "problems": status["problems"]}
 
 
 class DashboardServer(ThreadingHTTPServer):
@@ -279,12 +331,16 @@ class DashboardServer(ThreadingHTTPServer):
   daemon_threads = True
 
   def server_close(self):
-    self.RequestHandlerClass.dashboard.terminal.close()
+    for project in self.RequestHandlerClass.registry.all():
+      project.dashboard.terminal.close()
     super().server_close()
 
 
 def makeServer(projectDir, port, token):
-  handler = type("BoundDashboardHandler", (DashboardHandler,), {"dashboard": Dashboard(projectDir, token)})
+  registry = board_projects.ProjectRegistry(projectDir, lambda path: Dashboard(path, token))
+  # 舊 API 和既有呼叫端都用 dashboard，固定指向啟動時的專案
+  handler = type("BoundDashboardHandler", (DashboardHandler,),
+                 {"dashboard": registry.get(registry.defaultId).dashboard, "registry": registry})
   return DashboardServer(("127.0.0.1", port), handler)
 
 

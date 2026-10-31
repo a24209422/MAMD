@@ -5,9 +5,11 @@ from pathlib import Path
 
 import pytest
 
+import board_core
 import board_projects
 import server
 from board_core import BoardError
+from conftest import git
 
 
 @pytest.fixture
@@ -138,3 +140,27 @@ def test_driveRootUsesPathAsName(folders):
 def test_invalidDefaultPathRaises(tmp_path):
   with pytest.raises(BoardError, match="找不到專案資料夾"):
     board_projects.ProjectRegistry(tmp_path / "missing", lambda path: object())
+
+
+def test_readinessListsEveryMissingSetup(tmp_path):
+  plain = board_projects.readiness(tmp_path)
+  assert plain["ready"] is False and len(plain["problems"]) == 2
+  assert "不是 git repo" in plain["problems"][0] and "board.py init" in plain["problems"][1]
+  # 只檢查，不替使用者建立任何東西
+  assert list(tmp_path.iterdir()) == []
+
+
+def test_readinessNeedsCommitAndValidConfig(tmp_path):
+  git(tmp_path, "init", "-q", "-b", "main")
+  configFile = tmp_path / ".board" / "config.json"
+  configFile.parent.mkdir()
+  configFile.write_text("{壞掉", encoding="utf-8")
+  problems = board_projects.readiness(tmp_path)["problems"]
+  assert "還沒有任何 commit" in problems[0] and "config.json 讀不懂" in problems[1]
+  configFile.write_text("{}", encoding="utf-8")
+  assert "尚未設定測試方式" in board_projects.readiness(tmp_path)["problems"][1]
+
+
+def test_readinessPassesForInitializedProject(gitProject):
+  board_core.writeUserConfig(gitProject, {"skipTests": True})
+  assert board_projects.readiness(gitProject) == {"ready": True, "problems": []}
