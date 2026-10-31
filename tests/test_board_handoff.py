@@ -9,6 +9,7 @@ import board
 import board_agents
 import board_api
 import board_git
+import board_setup.project
 import conductor as conductorModule
 from board_core import PlanStatus, TaskStatus, deriveState, loadConfig, loadPlans, readEvents, tasksWithStatus
 from board_setup.project import Options, initialize
@@ -146,6 +147,17 @@ def test_alfredRunningKeepsOldProgressAndExplains(pulledWhileAlfredRuns, capsys)
   assert view["sync"]["status"] == "waiting" and view["sync"]["incomingRevision"] == updated["revision"]
   assert any("請停止 Alfred" in warning for warning in view["warnings"])
   assert checkpointPath(clone).read_bytes() == checkpoint
+
+
+def test_initReportsUnreadableHandoffWithoutFailing(computers, monkeypatch):
+  _, clone, _ = computers
+
+  def unreadable(*args, **kwargs):
+    raise OSError("交接檔被其他程式鎖住")
+  monkeypatch.setattr(board_setup.project, "loadProgress", unreadable)
+
+  assert board_setup.project.acceptHandoff(clone) == "交接進度沒有接納：交接檔被其他程式鎖住"
+  assert not checkpointPath(clone).exists()
 
 
 def test_reinitWhileAlfredRunsDoesNotSwitchBase(pulledWhileAlfredRuns, capsys):
