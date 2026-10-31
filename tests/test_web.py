@@ -735,10 +735,10 @@ def test_narrowWindowStacksMonitorCardsWithoutOverflow(dashboard, browserPages, 
   assert len(probe["chartTops"]) == 2
 
 
-def test_assistantGreetsAndOffersQuickAsks(dashboard, browserPages):
-  dom = browserPages.renderUntil(dashboard, domHas("你好，我是儀表板助手"))
-  assert "你好，我是儀表板助手" in dom
-  assert 'data-ask="等你處理的有哪些？"' in dom and 'data-ask="writer 在做什麼？"' in dom
+def test_terminalReplacesAssistantAndRequiresToken(dashboard, browserPages):
+  dom = browserPages.renderUntil(dashboard, domHas("請用 server.py 印出的網址開啟，以操作終端機"))
+  assert 'id="terminalNew"' in dom and 'id="terminalTabs"' in dom
+  assert 'id="botComposer"' not in dom
 
 
 def test_modelsPageShowsRoleSettings(dashboard, browserPages):

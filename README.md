@@ -7,9 +7,23 @@
 - 任務在各自的 git worktree 裡平行進行，合併衝突由寫程式的 agent 自動解、再送審
 - 瀏覽器儀表板可以看即時狀態，也能在網頁上核准、退回和處理卡住的任務
 
+## 終端機
+
+右側提供可收合的多分頁終端機（Windows）。使用啟動 server 的同一個 Python 安裝選用套件：
+
+```powershell
+python -m pip install -r requirements-terminal.txt
+```
+
+用帶有 token 的儀表板網址開啟，按右側「＋」啟動 PowerShell。可拖曳左邊界調寬、放大或還原；分頁的「×」會結束 shell 與其中的程序。優先使用 PowerShell 7，沒有時使用 Windows PowerShell，以 `-NoProfile` 啟動，起始目錄為專案根目錄。
+
+最多保留 8 個終端分頁。切換頁面、收合、關閉瀏覽器或重新整理時，程序繼續執行；重新開啟授權網址可接回。每個分頁重播最近 1 MiB 輸出，超量會顯示省略提示，互動式畫面可能需要重新繪製。同一分頁同時只有一個視窗能操作，新連線會接管舊連線。關閉或重新啟動 server 會結束所有工作階段。
+
+終端使用的 WebSocket 埠由 server 自動選擇、僅監聽本機，不需要另外啟動服務。缺套件或非 Windows 平台時會顯示原因，其他儀表板功能仍可使用。初始化至其他專案時，需求檔位於 `.agent-board/runtime/requirements-terminal.txt`；使用啟動該專案 server 的 Python 安裝。xterm.js 5.5.0、FitAddon 0.10.0 與授權檔已隨專案提供，不需要 Node.js 或 CDN。
+
 ## 需求
 
-- Python 3.11 以上（在 3.12、3.13 測過）；主程式使用標準函式庫，TDD 初始化會安裝測試套件
+- Python 3.11 以上（在 3.12、3.13 測過）；核心程式使用標準函式庫，終端機另裝選用套件，TDD 初始化會安裝測試套件
 - git
 - [Claude Code](https://claude.com/claude-code) 和 [Codex CLI](https://github.com/openai/codex)，都要先登入
 - 目前只在 Windows 測過

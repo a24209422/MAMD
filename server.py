@@ -22,12 +22,15 @@ import board_models
 from board_core import (BoardError, PlanStatus, cliNames, loadConfig, modelNamePattern, modelNameRule,
                         roleChoiceText, roleSpec, saveRoleChoice)
 from modules.system_monitor import SystemMonitor
+from modules.terminal.service import TerminalService
 
 webDir = Path(__file__).resolve().parent / "web"
-scriptNames = ["core", "overview", "plan", "ops", "console", "assistant", "models", "main"]
+scriptNames = ["core", "overview", "plan", "ops", "console", "terminal", "models", "main"]
 staticFiles = {"/": ("index.html", "text/html; charset=utf-8")}
 staticFiles.update({f"/js/{name}.js": (f"js/{name}.js", "text/javascript; charset=utf-8") for name in scriptNames})
 maxBodyBytes = 64 * 1024
+for name, mime in (("xterm.js", "text/javascript"), ("xterm.css", "text/css"), ("addon-fit.js", "text/javascript")):
+  staticFiles[f"/vendor/{name}"] = (f"vendor/{name}", mime + "; charset=utf-8")
 maxDiscardBytes = 1024 * 1024
 decideActions = ("retry", "done", "abandon")
 idText = r"[A-Za-z]+\d+"
@@ -60,6 +63,7 @@ class Dashboard:
     self.reportedErrors = set()
     self.modelCatalog = board_models.ModelCatalog(self.projectDir)
     self.systemMonitor = SystemMonitor(self.projectDir)
+    self.terminal = TerminalService(self.projectDir)
 
   def tokenMatches(self, given):
     return hmac.compare_digest(given.encode("utf-8"), self.token.encode("utf-8"))
@@ -254,6 +258,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
     body = self.readAuthorizedBody()
     if body is None:
       return
+    match = re.fullmatch(r"/api/terminals/(list|create|connect|close)", path)
+    if match:
+      status, payload = self.dashboard.terminal.request(match[1], body, self.server.server_address[1])
+      self.sendJson(status, payload)
+      return
     for pattern, methodName in postRoutes:
       match = pattern.match(path)
       if match:
@@ -267,6 +276,10 @@ class DashboardServer(ThreadingHTTPServer):
   # Windows 的 SO_REUSEADDR 會讓第二個 server 也綁上同一個埠、卻收不到請求；關掉才會得到「埠被佔用」
   allow_reuse_address = False
   daemon_threads = True
+
+  def server_close(self):
+    self.RequestHandlerClass.dashboard.terminal.close()
+    super().server_close()
 
 
 def makeServer(projectDir, port, token):

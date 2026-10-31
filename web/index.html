@@ -1231,9 +1231,28 @@ button, input, select { font: inherit; color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* Persistent terminal sidebar; each xterm instance survives page navigation. */
+.chatbar { width: var(--terminal-width, 480px); transition: none; }
+#terminalResize { position: absolute; left: -4px; top: 0; bottom: 0; width: 8px; cursor: ew-resize; z-index: 10; touch-action: none; }
+.chatbar:not(.is-open) #terminalResize { display: none; }
+.chatbar.maximized { position: fixed; inset: 0; width: auto; height: 100dvh; z-index: 40; }
+.chatbar.maximized #terminalResize { display: none; }
+#terminalTabs { display: flex; overflow-x: auto; flex: none; border-bottom: 1px solid var(--line); }
+.terminal-tab { display: flex; flex: none; align-items: center; }
+.terminal-tab button { background: transparent; color: var(--fg-2); border: 0; padding: 8px; cursor: pointer; }
+.terminal-tab[aria-selected="true"] { border-bottom: 2px solid var(--green); }
+#terminalStatus { margin: 0; padding: 8px 14px; font-size: 12px; color: var(--fg-2); overflow-wrap: anywhere; }
+#terminalScreens { position: relative; flex: 1; min-height: 0; margin: 0 8px 8px 12px; }
+.terminal-screen { position: absolute; inset: 0; }
+.terminal-screen[hidden] { display: none; }
+.terminal-screen .xterm { height: 100%; }
+@media (max-width: 760px) { .chatbar { width: auto; } #terminalResize { display: none; } }
+
 </style>
 <!-- 系統監控模組（modules/system_monitor）的樣式，沿用上面的色彩與字型變數 -->
 <link rel="stylesheet" href="modules/system-monitor/monitor.css">
+<link rel="stylesheet" href="vendor/xterm.css">
 </head>
 <body>
 <div class="app">
@@ -1242,7 +1261,7 @@ button, input, select { font: inherit; color: inherit; }
       <span data-icon="expand"></span><span class="rail-lbl">收合</span>
     </button>
     <div class="rail-links" id="railLinks"></div>
-    <button class="rail-btn rail-chat" type="button" data-chat-toggle aria-expanded="false" title="儀表板助手">
+    <button class="rail-btn rail-chat" type="button" data-chat-toggle aria-expanded="false" title="終端機">
       <span data-icon="chat"></span><span class="rail-lbl">聊天</span>
     </button>
   </nav>
@@ -1385,25 +1404,18 @@ button, input, select { font: inherit; color: inherit; }
     </main>
   </div>
 
-  <aside class="chatbar" id="chatbar" aria-label="儀表板助手">
-    <div class="chatbar-strip">
-      <button class="rail-btn" type="button" data-chat-toggle aria-expanded="false" title="展開儀表板助手"><span data-icon="chat"></span></button>
-    </div>
+  <aside class="chatbar" id="chatbar" aria-label="終端機">
+    <div id="terminalResize" role="separator" aria-label="調整終端機寬度" tabindex="0" aria-orientation="vertical"></div>
+    <div class="chatbar-strip"><button class="rail-btn" type="button" data-chat-toggle title="展開終端機">&gt;_</button></div>
     <section class="chatbar-panel">
-      <header class="chatbar-head">
-        <span class="agent-icon"><span data-icon="chat"></span></span>
-        <h2>儀表板助手</h2>
-        <span class="state" data-state="done">線上</span>
-        <button class="icon-btn" type="button" data-chat-toggle aria-expanded="true" title="收合儀表板助手">
-          <span class="ico-desktop" data-icon="expand"></span><span class="ico-mobile" data-icon="close"></span>
-        </button>
+      <header class="chatbar-head"><h2>終端機</h2>
+        <button class="icon-btn" id="terminalNew" title="新增終端機" type="button">＋</button>
+        <button class="icon-btn" id="terminalMax" title="放大／還原終端機" type="button">⛶</button>
+        <button class="icon-btn" data-chat-toggle title="收合終端機" type="button">›</button>
       </header>
-      <ol class="thread bot-thread" id="botThread" aria-live="polite"></ol>
-      <div class="quick" id="botQuick" aria-label="常用問題"></div>
-      <form class="composer" id="botComposer">
-        <input id="botInput" type="text" autocomplete="off" placeholder="問儀表板助手…" aria-label="輸入訊息給儀表板助手">
-        <button class="send send-bot" type="submit" aria-label="送出"><span data-icon="send"></span></button>
-      </form>
+      <div id="terminalTabs" role="tablist" aria-label="終端分頁"></div>
+      <p id="terminalStatus" role="status">請按 ＋ 新增終端機</p>
+      <div id="terminalScreens"></div>
     </section>
   </aside>
 </div>
@@ -1414,7 +1426,9 @@ button, input, select { font: inherit; color: inherit; }
 <script src="js/plan.js"></script>
 <script src="js/ops.js"></script>
 <script src="js/console.js"></script>
-<script src="js/assistant.js"></script>
+<script src="vendor/xterm.js"></script>
+<script src="vendor/addon-fit.js"></script>
+<script src="js/terminal.js"></script>
 <script src="js/models.js"></script>
 <script src="js/main.js"></script>
 </body>

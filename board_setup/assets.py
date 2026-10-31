@@ -30,7 +30,8 @@ def resourceFiles(root):
 
 def runtimeFiles(toolRoot):
     names = [*toolRoot.glob("board*.py"), toolRoot / "conductor.py", toolRoot / "rtm_graph.py",
-             toolRoot / "server.py", toolRoot / "install_skill.py", toolRoot / "LICENSE"]
+             toolRoot / "server.py", toolRoot / "install_skill.py", toolRoot / "LICENSE",
+             toolRoot / "requirements-terminal.txt"]
     result = {Path(path.name): path.read_bytes() for path in names}
     result[Path("docs/AGENTS-snippet.md")] = (toolRoot / "docs/AGENTS-snippet.md").read_bytes()
     for name in ("board_setup", "web", "modules", "skills/agent-board-init", "skills/tdd-crap"):

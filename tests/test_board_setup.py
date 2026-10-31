@@ -279,6 +279,10 @@ def test_only_runtime_assets_are_bundled():
     files = runtimeFiles(toolRoot)
     assert Path("board_setup/project.py") in files
     assert Path("skills/tdd-crap/scripts/quality.py") in files
+    assert Path("requirements-terminal.txt") in files
+    assert Path("modules/terminal/service.py") in files
+    assert Path("web/vendor/xterm.js") in files
+    assert Path("web/js/terminal.js") in files
     assert not any("tests" in path.parts or "__pycache__" in path.parts for path in files)
 
 
