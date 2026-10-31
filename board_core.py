@@ -610,6 +610,21 @@ retryTargets = {
 }
 
 
+def retryAfterNeeds(taskState, needs, note):
+  kind = needs.get("kind")
+  if kind in ("rounds", "tests"):
+    taskState["maxRounds"] += 1
+    taskState["round"] += 1
+  if kind == "agentFailed":
+    returnToStage(taskState, needs.get("stage", "write"))
+  elif kind == "mergeConflict":
+    # 自動解衝突的次數用完後，你選「再跑一輪」代表再交給 Claude 解一次
+    startResolving(taskState, needs.get("conflicts", []))
+  else:
+    taskState["status"] = retryTargets.get(kind, TaskStatus.queued)
+  taskState["userNote"] = note
+
+
 def onUserDecision(taskState, event):
   if taskState["status"] != TaskStatus.needsYou:
     return
@@ -624,17 +639,7 @@ def onUserDecision(taskState, event):
     taskState["status"] = TaskStatus.merging
     taskState["userDone"] = True
   elif action == "retry":
-    if needs.get("kind") in ("rounds", "tests"):
-      taskState["maxRounds"] += 1
-      taskState["round"] += 1
-    if needs.get("kind") == "agentFailed":
-      returnToStage(taskState, needs.get("stage", "write"))
-    elif needs.get("kind") == "mergeConflict":
-      # 自動解衝突的次數用完後，你選「再跑一輪」代表再交給 Claude 解一次
-      startResolving(taskState, needs.get("conflicts", []))
-    else:
-      taskState["status"] = retryTargets.get(needs.get("kind"), TaskStatus.queued)
-    taskState["userNote"] = event["data"].get("note", "")
+    retryAfterNeeds(taskState, needs, event["data"].get("note", ""))
   else:
     return
   taskState["needs"] = None

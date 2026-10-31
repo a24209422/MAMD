@@ -6,6 +6,7 @@ import time
 import pytest
 
 import board_core
+from helpers import approvedEvent, makeEvent, makePlans, testConfig
 
 
 def test_appendAndReadEvents(tmp_path):
@@ -17,6 +18,26 @@ def test_appendAndReadEvents(tmp_path):
   assert events[1]["agent"] == "claude"
   assert events[0]["data"] == {"red": 0}
   assert events[0]["time"]
+
+
+def test_userDecisionsReplayFromFileLikeInMemory(tmp_path):
+  tasks = [("T1", []), ("T2", []), ("T3", [])]
+  events = [approvedEvent("P0001", tasks),
+            makeEvent("needsYou", plan="P0001", task="T1", kind="rounds", reason="審查 1 次不通過"),
+            makeEvent("userDecision", plan="P0001", task="T1", action="retry", note="改小一點"),
+            makeEvent("needsYou", plan="P0001", task="T2", kind="mergeConflict", reason="衝突", conflicts=["a.txt"]),
+            makeEvent("userDecision", plan="P0001", task="T2", action="retry"),
+            makeEvent("needsYou", plan="P0001", task="T3", kind="blocked", reason="缺資料"),
+            makeEvent("userDecision", plan="P0001", task="T3", action="done")]
+  for event in events:
+    board_core.appendEvent(tmp_path, event["type"], plan=event["plan"], task=event["task"], data=event["data"])
+  replayed = board_core.deriveState(board_core.readEvents(tmp_path), makePlans("P0001"), testConfig)
+  assert replayed["tasks"] == board_core.deriveState(events, makePlans("P0001"), testConfig)["tasks"]
+  first, second, third = (replayed["tasks"][f"P0001/{taskId}"] for taskId, _ in tasks)
+  assert (first["status"], first["round"], first["maxRounds"], first["userNote"]) == (
+    board_core.TaskStatus.queued, 2, 4, "改小一點")
+  assert (second["resolving"], second["conflictFiles"], second["round"]) == (True, ["a.txt"], 2)
+  assert (third["status"], third["userDone"], third["needs"]) == (board_core.TaskStatus.merging, True, None)
 
 
 def test_concurrentAppendsKeepWholeLines(tmp_path):

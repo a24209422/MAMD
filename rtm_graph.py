@@ -289,57 +289,44 @@ class RtmGraph:
     self.nodes[key] = {"key": key, "kind": "verify", "text": text}
     return key
 
-  def addRow(self, rowNumber, cells):
-    reqId, reqText = parseIdCell(cells.get("requirement", ""))
-    decId, decText = parseIdCell(cells.get("decision", ""))
-    taskId, taskText = parseIdCell(cells.get("task", ""))
-    understanding = cleanCell(cells.get("understanding", ""))
-    rejected = cleanCell(cells.get("rejected", ""))
-    verify = cleanCell(cells.get("verify", ""))
-    hasRequirement = bool(reqId or reqText)
-    where = f"（第 {rowNumber} 列）"
+  def upsertOptionalNode(self, kind, nodeId, text, note, rowNumber, withRequirement):
+    if not (nodeId or text):
+      return None
+    return self.upsertNode(kind, nodeId, text, note, rowNumber, withRequirement)
 
+  def addHead(self, rowNumber, reqId, reqText, understanding, otherIds):
     # 根節點像 git 的 main，需求是從它分出去的分支；沒有需求的改動像沒開分支直接 commit 到 main，用虛線從根節點拉下來
-    if hasRequirement:
+    if reqId or reqText:
       headKey = self.upsertNode("requirement", reqId, reqText, understanding, rowNumber, True)
       self.edges[("root", headKey)] = "solid"
-      subject = reqId or "需求"
-    else:
-      headKey = self.addGap("orange", "沒有對應需求")
-      self.edges[("root", headKey)] = "extra"
-      subject = " → ".join(nodeId for nodeId in (decId, taskId) if nodeId) or "這列"
-      self.problems["orange"].append(f"{subject} 沒有對應需求{where}")
-    chain = [headKey]
+      return headKey, reqId or "需求"
+    headKey = self.addGap("orange", "沒有對應需求")
+    self.edges[("root", headKey)] = "extra"
+    subject = " → ".join(nodeId for nodeId in otherIds if nodeId) or "這列"
+    self.problems["orange"].append(f"{subject} 沒有對應需求（第 {rowNumber} 列）")
+    return headKey, subject
 
-    decKey = self.upsertNode("decision", decId, decText, rejected, rowNumber, hasRequirement) if (decId or decText) else None
-    taskKey = self.upsertNode("task", taskId, taskText, "", rowNumber, hasRequirement) if (taskId or taskText) else None
-    self.rows.append({
-      "rowNumber": rowNumber,
-      "requirement": cleanCell(cells.get("requirement", "")),
-      "understanding": understanding,
-      "decision": cleanCell(cells.get("decision", "")),
-      "rejected": rejected,
-      "task": cleanCell(cells.get("task", "")),
-      "dependsOn": cleanCell(cells.get("dependsOn", "")),
-      "verify": verify,
-    })
-    if taskKey:
-      task = self.tasks.setdefault(taskKey, {"id": taskId, "text": "", "dependsOn": [],
-                                             "rowNumbers": [], "requirementIds": []})
-      task["text"] = task["text"] or taskText
-      task["rowNumbers"].append(rowNumber)
-      if reqId and reqId not in task["requirementIds"]:
-        task["requirementIds"].append(reqId)
-      for dependencyId in parseIdList(cells.get("dependsOn", "")):
-        if dependencyId not in task["dependsOn"]:
-          task["dependsOn"].append(dependencyId)
+  def recordRow(self, rowNumber, cells):
+    fields = ("requirement", "understanding", "decision", "rejected", "task", "dependsOn", "verify")
+    self.rows.append({"rowNumber": rowNumber, **{field: cleanCell(cells.get(field, "")) for field in fields}})
 
-    segments = [("做法", decKey), ("任務", taskKey)]
+  def recordTask(self, taskKey, taskId, taskText, reqId, rowNumber, dependsOnCell):
+    task = self.tasks.setdefault(taskKey, {"id": taskId, "text": "", "dependsOn": [],
+                                           "rowNumbers": [], "requirementIds": []})
+    task["text"] = task["text"] or taskText
+    task["rowNumbers"].append(rowNumber)
+    if reqId and reqId not in task["requirementIds"]:
+      task["requirementIds"].append(reqId)
+    for dependencyId in parseIdList(dependsOnCell):
+      if dependencyId not in task["dependsOn"]:
+        task["dependsOn"].append(dependencyId)
+
+  def addSegments(self, subject, rowNumber, segments):
     missingNames = [name for name, key in segments if key is None]
     if missingNames:
-      self.problems["red"].append(f"{subject} 缺{'、'.join(missingNames)}{where}")
+      self.problems["red"].append(f"{subject} 缺{'、'.join(missingNames)}（第 {rowNumber} 列）")
     # 連續缺的段落合成一個色塊，一條線上只會出現一個紅塊，比較好讀
-    pendingGaps = []
+    chain, pendingGaps = [], []
     for name, key in segments:
       if key is None:
         pendingGaps.append(name)
@@ -350,26 +337,54 @@ class RtmGraph:
       chain.append(key)
     if pendingGaps:
       chain.append(self.addGap("red", "缺：" + "、".join(pendingGaps)))
+    return chain
 
+  def addVerifyTail(self, rowNumber, verify, taskKey, taskId):
     if verify:
-      chain.append(self.addVerify(rowNumber, verify))
-    elif taskKey:
-      chain.append(self.addGap("yellow", "缺：驗證"))
-      self.problems["yellow"].append(f"{taskId or '任務'} 缺驗證{where}")
+      return [self.addVerify(rowNumber, verify)]
+    if not taskKey:
+      return []
+    gapKey = self.addGap("yellow", "缺：驗證")
+    self.problems["yellow"].append(f"{taskId or '任務'} 缺驗證（第 {rowNumber} 列）")
+    return [gapKey]
 
+  def addRow(self, rowNumber, cells):
+    reqId, reqText = parseIdCell(cells.get("requirement", ""))
+    decId, decText = parseIdCell(cells.get("decision", ""))
+    taskId, taskText = parseIdCell(cells.get("task", ""))
+    understanding = cleanCell(cells.get("understanding", ""))
+    verify = cleanCell(cells.get("verify", ""))
+    hasRequirement = bool(reqId or reqText)
+
+    headKey, subject = self.addHead(rowNumber, reqId, reqText, understanding, (decId, taskId))
+    decKey = self.upsertOptionalNode("decision", decId, decText, cleanCell(cells.get("rejected", "")),
+                                     rowNumber, hasRequirement)
+    taskKey = self.upsertOptionalNode("task", taskId, taskText, "", rowNumber, hasRequirement)
+    self.recordRow(rowNumber, cells)
+    if taskKey:
+      self.recordTask(taskKey, taskId, taskText, reqId, rowNumber, cells.get("dependsOn", ""))
+
+    chain = [headKey] + self.addSegments(subject, rowNumber, [("做法", decKey), ("任務", taskKey)])
+    chain += self.addVerifyTail(rowNumber, verify, taskKey, taskId)
     for fromKey, toKey in zip(chain, chain[1:]):
       self.edges[(fromKey, toKey)] = "solid"
 
-  def finish(self):
+  def checkUnderstanding(self):
     # AI 理解可能只寫在需求第一次出現的那列，所以等全部列讀完才檢查
     for node in self.nodes.values():
       if node["kind"] == "requirement" and not node["note"]:
         self.problems["yellow"].append(f"{node['id'] or node['text']} 缺 AI 理解（第 {node['rows'][0]} 列）")
+
+  def checkDependencies(self):
     knownTaskIds = {task["id"] for task in self.tasks.values() if task["id"]}
     for task in self.tasks.values():
       for dependencyId in task["dependsOn"]:
         if dependencyId not in knownTaskIds:
           self.problems["red"].append(f"{task['id'] or '任務'} 的前置 {dependencyId} 不存在（第 {task['rowNumbers'][0]} 列）")
+
+  def finish(self):
+    self.checkUnderstanding()
+    self.checkDependencies()
     cycle = findDependencyCycle(self.tasks)
     if cycle:
       self.problems["red"].append("任務互相等待：" + " → ".join(cycle))
@@ -423,16 +438,11 @@ def planId(plan):
   return formatList(plan["meta"].get("id")) or plan["path"].stem
 
 
-def analyzePlan(planPath):
-  lines = planPath.read_text(encoding="utf-8-sig").splitlines()
-  meta, body = parseFrontMatter(lines)
-  heading = next((line[2:].strip() for line in body if line.startswith("# ")), None)
-  plan = {"path": planPath, "meta": meta, "title": heading or planPath.stem, "hasTitle": bool(heading),
-          "graph": None, "rowCount": 0, "extraText": extractExtraText(body)}
-  header, rows = findRtmTable(body)
-  if header is None:
-    return plan
+def findHeading(body):
+  return next((line[2:].strip() for line in body if line.startswith("# ")), None)
 
+
+def collectTableRows(header, rows):
   columnIndex = mapColumns(header)
   tableRows = []
   for rowNumber, row in enumerate(rows, start=1):
@@ -442,10 +452,22 @@ def analyzePlan(planPath):
     tableRows.append((rowNumber, cells))
   # 沒有對應需求的列排到最後，橘色那條固定在最右邊，不管 AI 寫在表格第幾列，審查時都知道去哪找
   tableRows.sort(key=lambda item: isEmpty(item[1].get("requirement", "")))
+  return tableRows
+
+
+def analyzePlan(planPath):
+  lines = planPath.read_text(encoding="utf-8-sig").splitlines()
+  meta, body = parseFrontMatter(lines)
+  heading = findHeading(body)
+  plan = {"path": planPath, "meta": meta, "title": heading or planPath.stem, "hasTitle": bool(heading),
+          "graph": None, "rowCount": 0, "extraText": extractExtraText(body)}
+  header, rows = findRtmTable(body)
+  if header is None:
+    return plan
 
   rootLabel = " ".join(part for part in (formatList(meta.get("id")), plan["title"]) if part)
   graph = RtmGraph(rootLabel)
-  for rowNumber, cells in tableRows:
+  for rowNumber, cells in collectTableRows(header, rows):
     graph.addRow(rowNumber, cells)
   graph.finish()
   plan["graph"] = graph

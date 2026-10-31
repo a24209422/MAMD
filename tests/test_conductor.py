@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import board_agents
 import board_core
@@ -10,7 +11,7 @@ import board_git
 from board_core import PlanStatus, TaskStatus
 import conductor as conductorModule
 from conductor import Conductor, compareWithBaseline, failureNames, formatEvent, qualityResults
-from helpers import fakeConfig, fakeRole, makeEvent, readCalls, runUntil
+from helpers import fakeConfig, fakeRole, fakesDir, makeEvent, readCalls, runUntil
 
 oneTask = ["| R1 需求一 | 理解一 | D1 做法一 | - | T1 任務一 | | 驗證一 |"]
 chainedTasks = oneTask + ["| R1 | | D1 | | T2 任務二 | T1 | 驗證二 |"]
@@ -406,12 +407,47 @@ def test_noDispatchUntilBaselineIsRecorded(startBoard, monkeypatch):
   assert types.index("testBaseline") < types.index("taskStarted")
 
 
-def test_noReviewUntilBaselineForChangedCommandIsRecorded(startBoard, monkeypatch):
-  firstConductor, _ = startBoard(oneTask, {"review": {"T1": ["hang", "pass"]}}, testCommand="git --version")
-  runUntil(firstConductor, taskIs(TaskStatus.reviewing))
+def killJobs(conductor):
+  for info in list(conductor.jobs.values()):
+    info["job"].kill()
+
+
+def firstReviewCallRecorded(scenarioDir):
+  # 假 agent 用 write_text 寫紀錄，檔案建立時內容可能還沒寫完；在那時暫停會留下殘缺紀錄，
+  # 所以要能完整解析才算記下，寫入中的讀取失敗（含 Windows 的共用鎖定）都當成還沒好
+  try:
+    json.loads((scenarioDir / "call-review-P0001-T1-1.json").read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return False
+  return True
+
+
+def test_firstReviewCallRecordedNeedsCompleteJson(tmp_path):
+  callPath = tmp_path / "call-review-P0001-T1-1.json"
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_text("", encoding="utf-8")
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_text('{"argv": ["exec"], "prompt": "審', encoding="utf-8")
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_bytes('{"prompt": "審'.encode("utf-8")[:-1])
+  assert not firstReviewCallRecorded(tmp_path)
+  callPath.write_text('{"argv": ["exec"], "prompt": "審查"}', encoding="utf-8")
+  assert firstReviewCallRecorded(tmp_path)
+
+
+def pauseAfterFirstReviewCall(conductor, scenarioDir):
+  runUntil(conductor, taskIs(TaskStatus.reviewing))
+  # 審查中是父程序派工時就寫入的狀態，假 reviewer 要等子程序真的啟動才記下第一次呼叫；
+  # 在那之前暫停，重啟後會再拿到情境裡的第一次 hang
+  runUntil(conductor, lambda state: firstReviewCallRecorded(scenarioDir))
   # 暫停會中斷審查，任務回到待審查
-  board_core.appendEvent(firstConductor.projectDir, "paused", data={"reason": "測試暫停"})
-  runUntil(firstConductor, lambda current: not firstConductor.jobs and taskIs(TaskStatus.toReview)(current))
+  board_core.appendEvent(conductor.projectDir, "paused", data={"reason": "測試暫停"})
+  runUntil(conductor, lambda current: not conductor.jobs and taskIs(TaskStatus.toReview)(current))
+
+
+def test_noReviewUntilBaselineForChangedCommandIsRecorded(startBoard, monkeypatch):
+  firstConductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["hang", "pass"]}}, testCommand="git --version")
+  pauseAfterFirstReviewCall(firstConductor, scenarioDir)
   board_core.appendEvent(firstConductor.projectDir, "resumed")
   lines = []
   restarted = Conductor(firstConductor.projectDir, config=fakeConfig(testCommand="git rev-parse HEAD"), out=lines.append)
@@ -421,19 +457,64 @@ def test_noReviewUntilBaselineForChangedCommandIsRecorded(startBoard, monkeypatc
 
   realBaseline = board_git.addBaselineWorktree
   monkeypatch.setattr(board_git, "addBaselineWorktree", failingBaseline)
-  for _ in range(3):
-    restarted.tick()
-  assert lines.count("P0001 的基準測試 worktree 建立失敗：模擬基準 worktree 失敗") == 1
-  assert len(eventsOf(restarted, "reviewStarted")) == 1
-  assert not restarted.jobs
-  assert restarted.currentState()[1]["tasks"]["P0001/T1"]["status"] == TaskStatus.toReview
-  monkeypatch.setattr(board_git, "addBaselineWorktree", realBaseline)
-  runUntil(restarted, planDone)
+  try:
+    for _ in range(3):
+      restarted.tick()
+    assert lines.count("P0001 的基準測試 worktree 建立失敗：模擬基準 worktree 失敗") == 1
+    assert len(eventsOf(restarted, "reviewStarted")) == 1
+    assert not restarted.jobs
+    assert restarted.currentState()[1]["tasks"]["P0001/T1"]["status"] == TaskStatus.toReview
+    monkeypatch.setattr(board_git, "addBaselineWorktree", realBaseline)
+    runUntil(restarted, planDone)
+  finally:
+    # 重啟的 conductor 不在 fixture 的清理清單裡，失敗時要自己結束它的子程序
+    killJobs(restarted)
   events = board_core.readEvents(restarted.projectDir)
   baselines = [index for index, event in enumerate(events) if event["type"] == "testBaseline"]
   reviews = [index for index, event in enumerate(events) if event["type"] == "reviewStarted"]
   assert [events[index]["data"]["command"] for index in baselines] == ["git --version", "git rev-parse HEAD"]
   assert baselines[1] < reviews[1]
+
+
+gatedReviewerScript = """import runpy
+import sys
+import time
+from pathlib import Path
+
+gate = Path(sys.argv.pop(1))
+fakeCodex = sys.argv.pop(1)
+# 有上限的等待，測試忘了開閘時也不會留下永遠不結束的子程序
+deadline = time.time() + 60
+while not gate.exists() and time.time() < deadline:
+  time.sleep(0.02)
+sys.argv[0] = fakeCodex
+runpy.run_path(fakeCodex, run_name="__main__")
+"""
+
+
+def gatedReviewer(scriptDir, gatePath):
+  # 子程序啟動後先停在閘門前，還沒遞增呼叫次數，用來穩定重現「已派工但 reviewer 尚未初始化」的時間窗
+  scriptPath = scriptDir / "gated_reviewer.py"
+  scriptPath.write_text(gatedReviewerScript, encoding="utf-8")
+  return {"cli": "codex", "command": [sys.executable, str(scriptPath), str(gatePath), str(fakesDir / "fake_codex.py")]}
+
+
+def test_pauseAfterDelayedReviewerStartRecordsFirstCall(startBoard, tmp_path):
+  gatePath = tmp_path / "reviewer-gate"
+  firstConductor, scenarioDir = startBoard(oneTask, {"review": {"T1": ["hang", "pass"]}},
+                                           reviewer=gatedReviewer(tmp_path, gatePath))
+  runUntil(firstConductor, taskIs(TaskStatus.reviewing))
+  assert not (scenarioDir / "call-review-P0001-T1-1.json").exists()
+  gatePath.touch()
+  pauseAfterFirstReviewCall(firstConductor, scenarioDir)
+  board_core.appendEvent(firstConductor.projectDir, "resumed")
+  restarted = Conductor(firstConductor.projectDir, config=fakeConfig(), out=lambda line: None)
+  try:
+    runUntil(restarted, planDone)
+  finally:
+    killJobs(restarted)
+  # 第一次 hang 已被暫停中斷，重啟只多一次呼叫，用的是情境裡的 pass
+  assert len(readCalls(scenarioDir, "review")) == 2
 
 
 def test_tddCrapAddsStepsToPromptsAndAllowsPytest(startBoard):
@@ -1108,6 +1189,18 @@ def test_formatEvent():
   assert formatEvent(fromBaseline) == "21:44:00 P0006 跑基準測試（通過，沿用 P0005 的基準測試結果）"
 
 
+def test_formatEventShowsResolveModeAndUserDecision():
+  started = makeEvent("taskStarted", plan="P0001", task="T1", roundNumber=2, agent="writer-sub1", mode="resolve")
+  started["time"] = "2026-10-25T21:45:00+08:00"
+  assert formatEvent(started) == f"21:45:00 P0001 T1 writer-sub1 {conductorModule.eventLabels['taskStarted']}（第 2 輪，解合併衝突）"
+  decision = makeEvent("userDecision", plan="P0001", task="T1", action="retry", note="兩邊都留")
+  decision["time"] = "2026-10-25T21:46:00+08:00"
+  assert formatEvent(decision).endswith("（retry，兩邊都留）")
+  unknown = makeEvent("somethingNew")
+  unknown["time"] = None
+  assert formatEvent(unknown) == " somethingNew"
+
+
 def test_failureNamesReadPytestShortSummary():
   output = ("tests/test_a.py F.E\n"
             "=========================== short test summary info ===========================\n"
@@ -1163,6 +1256,20 @@ def test_compareWithBaselineComparesQualityFailures():
   assert compareWithBaseline({"passed": True, "failures": [], "qualityChecked": False}, False, [], True, [new]) \
     == ("unknown", [])
   assert compareWithBaseline({"passed": True, "failures": []}, False, [], True, [new]) == ("unknown", [])
+
+
+def test_compareWithBaselineWithoutBaselineOrMixedParts():
+  old = ["品質門檻 a.py::one"]
+  new = "品質門檻 c.py::four"
+  # 沒有基準：通過仍是通過，失敗不擋、交給審查
+  assert compareWithBaseline(None, True, []) == ("passed", [])
+  assert compareWithBaseline(None, False, ["t::x"], True, [new]) == ("unknown", [])
+  # 雙方都檢查品質時，pytest 部分的判定與新增名稱要保留，品質新增名稱接在後面
+  mixedBaseline = {"passed": False, "failures": ["t::old"], "qualityChecked": True, "qualityFailures": old}
+  assert compareWithBaseline(mixedBaseline, False, ["t::old"], True, old) == ("preexisting", [])
+  assert compareWithBaseline(mixedBaseline, False, ["t::old", "t::new"], True, old) == ("newFailure", ["t::new"])
+  assert compareWithBaseline(mixedBaseline, False, ["t::old", "t::new"], True, old + [new]) \
+    == ("newFailure", ["t::new", new])
 
 
 def conflictedTask(conductor):
@@ -1354,6 +1461,20 @@ def test_doneAfterResolvingInPlanWorktreeIgnoresHalfMerge(startBoard):
   assert "<<<<<<<" not in board_git.runGit(conductor.projectDir, "show", f"task/P0001-{stuck['task']}:shared.txt")
 
 
+def test_doneWithManualChangesButCommitFailsNeedsYou(startBoard, gitProject):
+  conductor, _ = startBoard(oneTask, {"write": {"T1": ["blocked"]}})
+  stuckTask(conductor)
+  taskPath = board_git.taskWorktreePath(conductor.projectDir, "P0001", "T1")
+  (taskPath / "manual.txt").write_text("人工補的內容\n", encoding="utf-8")
+  # 你手動改完按完成，但 pre-commit hook 擋下 commit：不能當成合併成功
+  (gitProject / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+  board_core.appendEvent(conductor.projectDir, "userDecision", plan="P0001", task="T1", data={"action": "done"})
+  stuck = stuckTask(conductor)
+  assert stuck["needs"]["kind"] == "commitFailed"
+  assert stuck["needs"]["reason"].startswith("commit 失敗：")
+  assert eventsOf(conductor, "taskMerged") == []
+
+
 def test_stagedMarkersThenRetryStillAsksClaude(startBoard):
   conductor, scenarioDir = startBoard(twoTasks, {"write": {"T1": ["conflict", "blocked", "resolve"],
                                                            "T2": ["conflict", "blocked", "resolve"]}})
@@ -1543,3 +1664,107 @@ def test_errorResultThatLingersIsRecordedAsAgentFailed(startBoard, monkeypatch):
   failed = eventsOf(conductor, "agentFailed")
   assert len(failed) == 1 and "假的錯誤結果" in failed[0]["data"]["reason"]
   assert eventsOf(conductor, "taskInterrupted") == []
+
+
+def dispatchingConductor(tmp_path, monkeypatch, lanes, startMethod):
+  # 只看派工的取捨順序，所以把找名額、判斷基準、真正啟動都換成記錄用的替身
+  conductor = Conductor(tmp_path, fakeConfig())
+  conductor.jobs = {"P0001/T1": {"kind": "write", "agent": "writer"}}
+  laneRequests, started = [], []
+  remainingLanes = iter(lanes)
+
+  def freeLane(prefix, kind, preferred=None):
+    laneRequests.append((prefix, kind, preferred))
+    return next(remainingLanes)
+
+  monkeypatch.setattr(conductor, "needsTestBaseline", lambda planState: planState["waitingBaseline"])
+  monkeypatch.setattr(conductor, "freeLane", freeLane)
+  monkeypatch.setattr(conductor, startMethod, lambda plan, taskState, lane: started.append((plan, taskState["task"], lane)))
+  return conductor, laneRequests, started
+
+
+def dispatchState(laneKey):
+  # T1 已經有人在做、P0002 還在等基準、T2 拿到名額、T3 起沒有名額
+  tasks = [{"plan": "P0001", "task": "T1"}, {"plan": "P0002", "task": "T1"}, {"plan": "P0001", "task": "T2"},
+           {"plan": "P0001", "task": "T3"}, {"plan": "P0001", "task": "T4"}]
+  for taskState in tasks:
+    taskState[laneKey] = f"{taskState['task']}-lane"
+  plans = {"P0001": {"waitingBaseline": False}, "P0002": {"waitingBaseline": True}}
+  return {"plans": plans, "dispatchable": tasks}
+
+
+def test_startWritesSkipsBusyAndBaselineTasksAndStopsWhenNoLane(tmp_path, monkeypatch):
+  conductor, laneRequests, started = dispatchingConductor(tmp_path, monkeypatch, ["writer", None], "startWrite")
+  monkeypatch.setattr(conductorModule, "readyTasks", lambda state: state["dispatchable"])
+  conductor.startWrites({"P0001": "plan-1", "P0002": "plan-2"}, dispatchState("agent"))
+  assert started == [("plan-1", "T2", "writer")]
+  # 沒有名額就整輪停下，後面的 T4 不再要名額
+  assert laneRequests == [("writer", "write", "T2-lane"), ("writer", "write", "T3-lane")]
+
+
+def test_startReviewsSkipsBusyAndBaselineTasksAndStopsWhenNoLane(tmp_path, monkeypatch):
+  conductor, laneRequests, started = dispatchingConductor(tmp_path, monkeypatch, ["reviewer", None], "startReview")
+  statuses = []
+
+  def tasksWithStatus(state, status):
+    statuses.append(status)
+    return state["dispatchable"]
+
+  monkeypatch.setattr(conductorModule, "tasksWithStatus", tasksWithStatus)
+  conductor.startReviews({"P0001": "plan-1", "P0002": "plan-2"}, dispatchState("reviewAgent"))
+  assert statuses == [TaskStatus.toReview]
+  assert started == [("plan-1", "T2", "reviewer")]
+  assert laneRequests == [("reviewer", "review", "T2-lane"), ("reviewer", "review", "T3-lane")]
+
+
+def test_runForeverTicksUntilCtrlCThenStopsAllJobs(tmp_path, monkeypatch):
+  lines = []
+  conductor = Conductor(tmp_path, fakeConfig(pollSeconds=0), out=lines.append)
+  conductor.jobs = {"P0001/T1": {}, "P0001/T2": {}}
+  ticks, stops = [], []
+
+  def safeTick():
+    ticks.append(len(ticks) + 1)
+    if len(ticks) == 2:
+      raise KeyboardInterrupt
+
+  monkeypatch.setattr(conductor, "safeTick", safeTick)
+  monkeypatch.setattr(conductor, "stopJobs", lambda keys, recordInterruption: stops.append((keys, recordInterruption)))
+  monkeypatch.setattr(conductor, "printNewEvents", lambda: lines.append("已印出新事件"))
+  conductor.runForever()
+  assert ticks == [1, 2]
+  # Ctrl+C 結束時要記中斷，下次啟動才會把這些任務拉回排隊
+  assert stops == [(["P0001/T1", "P0001/T2"], True)]
+  assert lines == [f"Alfred 啟動：{conductor.projectDir}（Ctrl+C 結束）", "Alfred 結束中，正在停止所有 agent…", "已印出新事件"]
+
+
+def fakeOs(name, killError=None):
+  def kill(pid, signal):
+    if killError:
+      raise killError
+  return SimpleNamespace(name=name, kill=kill)
+
+
+def test_processAliveOnPosixUsesSignalZero(monkeypatch):
+  monkeypatch.setattr(conductorModule, "os", fakeOs("posix"))
+  assert conductorModule.processAlive(1234)
+  monkeypatch.setattr(conductorModule, "os", fakeOs("posix", ProcessLookupError()))
+  assert not conductorModule.processAlive(1234)
+  # 程式還在、只是屬於別的使用者：送不了訊號也算活著，不能把別人的鎖當成殘留
+  monkeypatch.setattr(conductorModule, "os", fakeOs("posix", PermissionError()))
+  assert conductorModule.processAlive(1234)
+
+
+def test_processAliveOnWindowsAsksTasklistForExactPid(monkeypatch):
+  calls = []
+
+  def run(argv, **options):
+    calls.append(argv)
+    return SimpleNamespace(stdout="python.exe  12345 Console  1  10,000 K")
+
+  monkeypatch.setattr(conductorModule, "os", fakeOs("nt", AssertionError("Windows 上不能用 os.kill 檢查")))
+  monkeypatch.setattr(conductorModule, "subprocess", SimpleNamespace(run=run))
+  assert conductorModule.processAlive(12345)
+  # 只比對完整的 PID，1234 不能因為是 12345 的開頭就算活著
+  assert not conductorModule.processAlive(1234)
+  assert calls[0] == ["tasklist", "/FI", "PID eq 12345"]

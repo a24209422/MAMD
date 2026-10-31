@@ -2,9 +2,11 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 import board_core
 import board_git
-from board_core import PlanStatus, TaskStatus
+from board_core import BoardError, PlanStatus, TaskStatus
 import conductor as conductorModule
 from conductor import Conductor, formatEvent, mergeTestOutcome
 from helpers import fakeConfig, readCalls, runUntil
@@ -76,6 +78,228 @@ def test_outcomeQualityNamesFollowBaselineRules():
 def test_outcomeClearsSplitWhenReachingItsCommit():
   assert mergeTestOutcome(passedBefore, record(commit="m3", passed=True), ["T3"], {}, splitCommit="m3")["split"] == "clear"
   assert mergeTestOutcome(passedBefore, record(commit="m1", passed=True), ["T1"], {}, splitCommit="m3")["split"] is None
+
+
+def test_outcomeContractForRemainingBranches():
+  # 沒有比較對象：全部 unknown，不前進；有拆分時要清掉
+  unknown = mergeTestOutcome(None, record(failures=["t::a"]), ["T1"], {}, splitCommit="m3")
+  assert unknown == {"verdict": "unknown", "newFailures": [], "outcomes": {"T1": {"result": "unknown", "names": []}},
+                     "advance": False, "split": "clear"}
+  # 品質未檢查的基準遇到只有品質超標：unknown
+  qualityOnly = mergeTestOutcome(passedBefore, record(qualityChecked=True, qualityFailures=["品質門檻 a.py::x"]), ["T1"], {})
+  assert (qualityOnly["verdict"], qualityOnly["outcomes"], qualityOnly["advance"]) == \
+    ("unknown", {"T1": {"result": "unknown", "names": []}}, False)
+  # 已經在拆分中又涵蓋多次合併：重新開始拆分
+  split = mergeTestOutcome(passedBefore, record(failures=["t::a"]), ["T1", "T2"], {}, splitCommit="m3", staleSplit=True)
+  assert split == {"verdict": "newFailure", "newFailures": ["t::a"],
+                   "outcomes": {"T1": {"result": "split", "names": []}, "T2": {"result": "split", "names": []}},
+                   "advance": False, "split": "start"}
+  # 前進時 staleSplit 也要清掉
+  stale = mergeTestOutcome(passedBefore, record(passed=True), ["T1"], {}, staleSplit=True)
+  assert stale == {"verdict": "passed", "newFailures": [], "outcomes": {"T1": {"result": "verified", "names": []}},
+                   "advance": True, "split": "clear"}
+  # 之前退回的品質名稱仍超標：stillFailing
+  before = {**passedBefore, "qualityChecked": True, "qualityFailures": ["品質門檻 a.py::old"]}
+  quality = mergeTestOutcome(before, record(qualityChecked=True, qualityFailures=["品質門檻 a.py::old"]),
+                             ["T1"], {"T1": ["品質門檻 a.py::old"]})
+  assert quality["verdict"] == "preexisting"
+  assert quality["outcomes"] == {"T1": {"result": "stillFailing", "names": ["品質門檻 a.py::old"]}}
+
+
+def mergePlanState(planIdValue, status=PlanStatus.active, testTiming="afterMerge", waitingBaseline=False, split=None):
+  return {"id": planIdValue, "status": status, "testTiming": testTiming, "waitingBaseline": waitingBaseline,
+          "testBaseline": {"commit": "base", "command": "pytest"}, "mergeTest": {"lastTested": None, "split": split}}
+
+
+def mergeTask(planIdValue, taskId, status=TaskStatus.mergedUntested, needs=None):
+  return {"plan": planIdValue, "task": taskId, "status": status, "needs": needs,
+          "mergedCommit": f"m-{taskId}", "mergeFailures": [f"t::{taskId}"]}
+
+
+def schedulingConductor(tmp_path, monkeypatch, **config):
+  # 只看排程的取捨，判斷基準、略過與真正啟動都換成記錄用的替身
+  lines, started, skipped = [], [], []
+  conductor = Conductor(tmp_path, fakeConfig(**config), out=lines.append)
+  monkeypatch.setattr(conductor, "needsTestBaseline", lambda planState: planState["waitingBaseline"])
+  monkeypatch.setattr(conductor, "skipMergeTests", lambda planState, state: skipped.append(planState["id"]))
+  def startMergeTest(planState, pending, key):
+    started.append((planState["id"], [taskState["task"] for taskState in pending], key))
+
+  monkeypatch.setattr(conductor, "startMergeTest", startMergeTest)
+  return conductor, lines, started, skipped
+
+
+def test_startMergeTestsStartsOnlyPlansReadyToTest(tmp_path, monkeypatch):
+  conductor, _, started, skipped = schedulingConductor(tmp_path, monkeypatch, testCommand="pytest")
+  conductor.jobs = {conductorModule.mergeTestKey("P0002"): {"kind": "mergeTest"}}
+  plans = {"P0001": mergePlanState("P0001"), "P0002": mergePlanState("P0002"),
+           "P0003": mergePlanState("P0003", status=PlanStatus.completed),
+           "P0004": mergePlanState("P0004", testTiming="beforeMerge"),
+           "P0005": mergePlanState("P0005", waitingBaseline=True),
+           "P0006": mergePlanState("P0006"), "P0007": mergePlanState("P0007"), "P0008": mergePlanState("P0008")}
+  tasks = [mergeTask("P0001", "T1"), mergeTask("P0001", "T2", status=TaskStatus.done), mergeTask("P0001", "T3"),
+           mergeTask("P0002", "T1"), mergeTask("P0003", "T1"), mergeTask("P0004", "T1"), mergeTask("P0005", "T1"),
+           # 分不出結果的那次等你決定時，後面的合併不測；其他原因的等你處理不擋
+           mergeTask("P0006", "T1", status=TaskStatus.needsYou, needs={"kind": "mergeTest"}), mergeTask("P0006", "T2"),
+           mergeTask("P0007", "T1", status=TaskStatus.needsYou, needs={"kind": "merge"}),
+           mergeTask("P0007", "T2", status=TaskStatus.needsYou), mergeTask("P0007", "T3"),
+           mergeTask("P0008", "T1", status=TaskStatus.done)]
+  state = {"plans": plans, "tasks": {f"{taskState['plan']}/{taskState['task']}": taskState for taskState in tasks}}
+  conductor.startMergeTests(state)
+  assert started == [("P0001", ["T1", "T3"], "P0001/mergetest"), ("P0007", ["T3"], "P0007/mergetest")]
+  assert skipped == []
+
+
+def test_startMergeTestsSkipsWhenTestsOffAndReportsStartError(tmp_path, monkeypatch):
+  conductor, lines, started, skipped = schedulingConductor(tmp_path, monkeypatch)
+  state = {"plans": {"P0001": mergePlanState("P0001")}, "tasks": {"P0001/T1": mergeTask("P0001", "T1")}}
+  conductor.startMergeTests(state)
+  assert (started, skipped) == ([], ["P0001"])
+  conductor, lines, started, skipped = schedulingConductor(tmp_path, monkeypatch, testCommand="pytest")
+
+  def failingStart(planState, pending, key):
+    raise RuntimeError("壞掉")
+
+  monkeypatch.setattr(conductor, "startMergeTest", failingStart)
+  conductor.startMergeTests(state)
+  conductor.startMergeTests(state)
+  assert lines == ["P0001 的合併後測試無法開始：壞掉"]
+
+
+def targetConductor(tmp_path, monkeypatch, freeSlots=1):
+  # 合併順序是 m-T1、m-T2、m-T3；記下要測哪個 commit、涵蓋誰，不真的建立 worktree 或跑測試
+  conductor = Conductor(tmp_path, fakeConfig(testCommand="pytest"), out=lambda line: None)
+  written, worktrees = [], []
+  monkeypatch.setattr(board_git, "firstParentCommits", lambda projectDir, planIdValue: ["m-T1", "m-T2", "m-T3"])
+  monkeypatch.setattr(board_git, "addMergeTestWorktree",
+                      lambda projectDir, planIdValue, commit: worktrees.append(commit) or "worktree")
+  monkeypatch.setattr(conductorModule, "BackgroundTestJob", lambda runTestCommand, worktree: type(
+    "FakeJob", (), {"start": lambda self: "job"})())
+  monkeypatch.setattr(conductor, "freeTestSlots", lambda: freeSlots)
+  monkeypatch.setattr(conductor, "writeMergeTestRun",
+                      lambda info, record, reused: written.append((dict(info), record, reused)))
+  return conductor, written, worktrees
+
+
+def startedTarget(conductor):
+  info = conductor.jobs["P0001/mergetest"]
+  return info["commit"], info["covers"], info["splitCommit"], info["staleSplit"], info["mergeFailures"]
+
+
+def test_startMergeTestBatchesPendingInMergeOrder(tmp_path, monkeypatch):
+  conductor, written, worktrees = targetConductor(tmp_path, monkeypatch)
+  pending = [mergeTask("P0001", "T3"), mergeTask("P0001", "T2")]
+  conductor.startMergeTest(mergePlanState("P0001"), pending, "P0001/mergetest")
+  assert startedTarget(conductor) == ("m-T3", ["T2", "T3"], None, False, {"T2": ["t::T2"], "T3": ["t::T3"]})
+  assert conductor.jobs["P0001/mergetest"]["predecessor"] == {"commit": "base", "command": "pytest"}
+  assert conductor.jobs["P0001/mergetest"]["job"] == "job"
+  assert (written, worktrees) == ([], ["m-T3"])
+
+
+def test_startMergeTestSplitTestsOneMergeAtATimeAndReusesSplitCommit(tmp_path, monkeypatch):
+  split = {"commit": "m-T3", "command": "pytest", "passed": False, "failures": ["t::a"]}
+  conductor, written, worktrees = targetConductor(tmp_path, monkeypatch)
+  pending = [mergeTask("P0001", "T2"), mergeTask("P0001", "T1"), mergeTask("P0001", "T3")]
+  conductor.startMergeTest(mergePlanState("P0001", split=split), pending, "P0001/mergetest")
+  assert startedTarget(conductor) == ("m-T1", ["T1"], "m-T3", False,
+                                      {"T1": ["t::T1"], "T2": ["t::T2"], "T3": ["t::T3"]})
+  assert worktrees == ["m-T1"]
+  # 輪到拆分的 commit：沿用一開始一起測的結果，不建立 worktree、不佔名額
+  conductor, written, worktrees = targetConductor(tmp_path, monkeypatch, freeSlots=0)
+  conductor.startMergeTest(mergePlanState("P0001", split=split), [mergeTask("P0001", "T3")], "P0001/mergetest")
+  assert conductor.jobs == {} and worktrees == []
+  [(info, record, reused)] = written
+  assert (info["commit"], info["covers"], info["splitCommit"], info["staleSplit"], reused) == \
+    ("m-T3", ["T3"], "m-T3", False, True)
+  assert record == {field: split.get(field) for field in conductorModule.mergeTestRecordFields}
+
+
+def test_startMergeTestStaleSplitTestsAllPending(tmp_path, monkeypatch):
+  # 指令改了、拆分的 commit 不在 plan 分支上、或待測的合併在拆分範圍之後：拆分作廢，一起測到最新
+  stale = [{"commit": "m-T3", "command": "old"}, {"commit": "gone", "command": "pytest"},
+           {"commit": "m-T1", "command": "pytest"}]
+  for split in stale:
+    conductor, written, worktrees = targetConductor(tmp_path, monkeypatch)
+    pending = [mergeTask("P0001", "T2"), mergeTask("P0001", "T3")]
+    conductor.startMergeTest(mergePlanState("P0001", split=split), pending, "P0001/mergetest")
+    assert startedTarget(conductor)[:4] == ("m-T3", ["T2", "T3"], None, True)
+    assert (written, worktrees) == ([], ["m-T3"])
+
+
+def test_startMergeTestWaitsWhenTestSlotsAreFull(tmp_path, monkeypatch):
+  conductor, written, worktrees = targetConductor(tmp_path, monkeypatch, freeSlots=0)
+  conductor.startMergeTest(mergePlanState("P0001"), [mergeTask("P0001", "T1")], "P0001/mergetest")
+  assert (conductor.jobs, written, worktrees) == ({}, [], [])
+
+
+def finishingConductor(tmp_path, monkeypatch, removeError=None, writeError=None):
+  # 不真的跑測試、不動 worktree：記下寫入的紀錄與移除的 worktree，錯誤由參數決定
+  lines, written, removed = [], [], []
+  conductor = Conductor(tmp_path, fakeConfig(testCommand="pytest"), out=lines.append)
+
+  def removeWorktree(projectDir, planIdValue):
+    removed.append(planIdValue)
+    if removeError is not None:
+      raise removeError
+
+  def writeMergeTestRun(info, record, reused):
+    if writeError is not None:
+      raise writeError
+    written.append((info, record, reused))
+
+  monkeypatch.setattr(board_git, "removeMergeTestWorktree", removeWorktree)
+  monkeypatch.setattr(conductor, "writeMergeTestRun", writeMergeTestRun)
+  return conductor, lines, written, removed
+
+
+def finishedMergeTest(result=None, error=None):
+  job = type("FakeJob", (), {"result": result, "error": error})()
+  return {"kind": "mergeTest", "plan": "P0001", "commit": "m-T1", "covers": ["T1"], "job": job}
+
+
+def test_finishMergeTestWritesRecordAndRemovesWorktree(tmp_path, monkeypatch):
+  conductor, lines, written, removed = finishingConductor(tmp_path, monkeypatch)
+  info = finishedMergeTest(result=(False, "結尾", ["t::a"], True, ["品質門檻 a.py::x"]))
+  conductor.finishMergeTest(info)
+  assert written == [(info, {"commit": "m-T1", "command": "pytest", "passed": False, "failures": ["t::a"],
+                             "qualityChecked": True, "qualityFailures": ["品質門檻 a.py::x"], "tail": "結尾"}, False)]
+  assert (removed, lines) == (["P0001"], [])
+
+
+def test_finishMergeTestFailureNotifiesOnceWithoutRecord(tmp_path, monkeypatch):
+  conductor, lines, written, removed = finishingConductor(tmp_path, monkeypatch)
+  for _ in range(2):
+    conductor.finishMergeTest(finishedMergeTest(error=OSError("模擬測試啟動失敗")))
+  # 結果格式不對也一樣只通知，不捏造測試結果
+  conductor.finishMergeTest(finishedMergeTest(result=("不完整",)))
+  assert written == []
+  assert lines[0] == "P0001 的合併後測試執行失敗：模擬測試啟動失敗" and len(lines) == 2
+  assert lines[1].startswith("P0001 的合併後測試執行失敗：")
+  assert removed == ["P0001"] * 3
+
+
+def test_finishMergeTestPropagatesBoardErrorAfterRemovingWorktree(tmp_path, monkeypatch):
+  conductor, lines, written, removed = finishingConductor(tmp_path, monkeypatch)
+  with pytest.raises(BoardError, match="模擬看板錯誤"):
+    conductor.finishMergeTest(finishedMergeTest(error=BoardError("模擬看板錯誤")))
+  assert (written, lines, removed) == ([], [], ["P0001"])
+  # 寫事件失敗也要往外丟，讓整輪停下來，不能當成測試失敗吞掉
+  conductor, lines, written, removed = finishingConductor(tmp_path, monkeypatch, writeError=BoardError("寫入失敗"))
+  with pytest.raises(BoardError, match="寫入失敗"):
+    conductor.finishMergeTest(finishedMergeTest(result=(True, "", [], False, [])))
+  assert (written, lines, removed) == ([], [], ["P0001"])
+
+
+def test_mergeTestWorktreeRemovalFailureNotifiesOnceAndKeepsResult(tmp_path, monkeypatch):
+  conductor, lines, written, removed = finishingConductor(tmp_path, monkeypatch,
+                                                          removeError=board_git.GitError("模擬移除失敗"))
+  for _ in range(2):
+    conductor.finishMergeTest(finishedMergeTest(result=(True, "", [], False, [])))
+  assert [record["passed"] for _, record, _ in written] == [True, True]
+  assert removed == ["P0001", "P0001"]
+  assert lines == ["P0001 的合併後測試 worktree 移除失敗：模擬移除失敗"]
+  conductor.finishMergeTest(finishedMergeTest(error=OSError("模擬測試啟動失敗")))
+  assert lines == ["P0001 的合併後測試 worktree 移除失敗：模擬移除失敗", "P0001 的合併後測試執行失敗：模擬測試啟動失敗"]
 
 
 def eventsOf(conductor, eventType):

@@ -84,30 +84,49 @@ def contentBlocks(record):
   return [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
 
 
+def claudeRecordSummary(record, action, tokens):
+  if record.get("type") != "assistant":
+    return action, tokens
+  for block in contentBlocks(record):
+    # StructuredOutput 是交回結果用的內部工具，不算 agent 在做的事
+    if block.get("type") == "tool_use" and block.get("name") != "StructuredOutput":
+      action = f"{block.get('name', '')} {toolTarget(block.get('input'))}".strip()
+  usage = (record.get("message") or {}).get("usage")
+  if isinstance(usage, dict):
+    tokens = claudeContextTokens(usage)
+  return action, tokens
+
+
+def codexItemAction(item, kind):
+  itemType = item.get("type")
+  if itemType == "command_execution":
+    return f"執行 {shortCommand(item.get('command', ''))}".strip()
+  if itemType == "file_change":
+    return f"修改 {fileChangeNames(item)}".strip()
+  if itemType == "agent_message":
+    return codexReplyActions[kind]
+  return None
+
+
+def codexRecordSummary(record, kind, action, tokens):
+  recordType = record.get("type")
+  if recordType == "item.completed":
+    # 其他種類的 item 不改變卡片上的動作，沿用前一個
+    action = codexItemAction(record.get("item") or {}, kind) or action
+  elif recordType == "turn.completed":
+    usage = record.get("usage")
+    if isinstance(usage, dict) and usage.get("input_tokens") is not None:
+      tokens = usage["input_tokens"]
+  return action, tokens
+
+
 def summarizeRecords(records, cli, kind):
   action, tokens = None, None
   for record in records:
-    recordType = record.get("type")
-    if cli == "claude" and recordType == "assistant":
-      for block in contentBlocks(record):
-        # StructuredOutput 是交回結果用的內部工具，不算 agent 在做的事
-        if block.get("type") == "tool_use" and block.get("name") != "StructuredOutput":
-          action = f"{block.get('name', '')} {toolTarget(block.get('input'))}".strip()
-      usage = (record.get("message") or {}).get("usage")
-      if isinstance(usage, dict):
-        tokens = claudeContextTokens(usage)
-    elif cli == "codex" and recordType == "item.completed":
-      item = record.get("item") or {}
-      if item.get("type") == "command_execution":
-        action = f"執行 {shortCommand(item.get('command', ''))}".strip()
-      elif item.get("type") == "file_change":
-        action = f"修改 {fileChangeNames(item)}".strip()
-      elif item.get("type") == "agent_message":
-        action = codexReplyActions[kind]
-    elif cli == "codex" and recordType == "turn.completed":
-      usage = record.get("usage")
-      if isinstance(usage, dict) and usage.get("input_tokens") is not None:
-        tokens = usage["input_tokens"]
+    if cli == "claude":
+      action, tokens = claudeRecordSummary(record, action, tokens)
+    elif cli == "codex":
+      action, tokens = codexRecordSummary(record, kind, action, tokens)
   if cli == "codex" and action is None:
     action = codexIdleActions[kind]
   return action, tokens
@@ -136,34 +155,49 @@ def toolResultText(content):
   return ""
 
 
+def addAssistantBlocks(record, messages, tools, toolsById):
+  for block in contentBlocks(record):
+    if block.get("type") == "text" and str(block.get("text", "")).strip():
+      messages.append({"text": block["text"]})
+    elif block.get("type") == "tool_use" and block.get("name") != "StructuredOutput":
+      inputText, inputCut = clip(block.get("input"))
+      tool = {"name": block.get("name", ""), "target": toolTarget(block.get("input")), "input": inputText,
+              "result": "", "truncated": inputCut}
+      tools.append(tool)
+      toolsById[block.get("id")] = tool
+
+
+def attachToolResults(record, toolsById):
+  for block in contentBlocks(record):
+    tool = toolsById.get(block.get("tool_use_id")) if block.get("type") == "tool_result" else None
+    if tool is not None:
+      tool["result"], resultCut = clip(toolResultText(block.get("content")))
+      tool["truncated"] = tool["truncated"] or resultCut
+
+
+def resultMessage(record):
+  structured = record.get("structured_output")
+  structured = structured if isinstance(structured, dict) else {}
+  if structured.get("summary"):
+    return {"text": structured["summary"]}
+  if structured:
+    # 審查的結果沒有 summary，整份列出來，和 Codex 審查時看到的回覆一樣
+    return {"text": json.dumps(structured, ensure_ascii=False)}
+  return None
+
+
 def claudeDetail(records):
   messages, tools, toolsById = [], [], {}
   for record in records:
     recordType = record.get("type")
     if recordType == "assistant":
-      for block in contentBlocks(record):
-        if block.get("type") == "text" and str(block.get("text", "")).strip():
-          messages.append({"text": block["text"]})
-        elif block.get("type") == "tool_use" and block.get("name") != "StructuredOutput":
-          inputText, inputCut = clip(block.get("input"))
-          tool = {"name": block.get("name", ""), "target": toolTarget(block.get("input")), "input": inputText,
-                  "result": "", "truncated": inputCut}
-          tools.append(tool)
-          toolsById[block.get("id")] = tool
+      addAssistantBlocks(record, messages, tools, toolsById)
     elif recordType == "user":
-      for block in contentBlocks(record):
-        tool = toolsById.get(block.get("tool_use_id")) if block.get("type") == "tool_result" else None
-        if tool is not None:
-          tool["result"], resultCut = clip(toolResultText(block.get("content")))
-          tool["truncated"] = tool["truncated"] or resultCut
+      attachToolResults(record, toolsById)
     elif recordType == "result":
-      structured = record.get("structured_output")
-      structured = structured if isinstance(structured, dict) else {}
-      if structured.get("summary"):
-        messages.append({"text": structured["summary"]})
-      elif structured:
-        # 審查的結果沒有 summary，整份列出來，和 Codex 審查時看到的回覆一樣
-        messages.append({"text": json.dumps(structured, ensure_ascii=False)})
+      message = resultMessage(record)
+      if message:
+        messages.append(message)
   return messages, tools
 
 

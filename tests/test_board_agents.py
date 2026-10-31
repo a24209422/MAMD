@@ -129,6 +129,86 @@ def test_stopAfterResultFallsBackToKillWhenTreeDoesNotExit(tmp_path, monkeypatch
   assert job.stoppedAfterResult is True and job.killed is False
 
 
+class FakeProcess:
+  pid = 12345
+
+  def __init__(self, returncode=None, exitsOnWait=True):
+    self.returncode = returncode
+    self.exitsOnWait = exitsOnWait
+    self.killedDirectly = False
+
+  def poll(self):
+    return self.returncode
+
+  def wait(self, timeout):
+    if not self.exitsOnWait:
+      raise subprocess.TimeoutExpired("agent", timeout)
+    self.returncode = -9
+
+  def kill(self):
+    self.killedDirectly = True
+
+
+def fakeJob(tmp_path, monkeypatch, process):
+  treeKills = []
+  monkeypatch.setattr(board_agents, "killProcessTree", treeKills.append)
+  job = board_agents.AgentJob(["agent"], tmp_path, "", tmp_path / "log.txt", board_agents.parseClaudeLine, 30)
+  job.process = process
+  return job, treeKills
+
+
+def test_killIgnoresProcessThatAlreadyExited(tmp_path, monkeypatch):
+  job, treeKills = fakeJob(tmp_path, monkeypatch, FakeProcess(returncode=0))
+  job.kill()
+  # 已經結束的程式不算被中斷，conductor 才會照常收下這一輪的結果
+  assert job.killed is False and treeKills == []
+
+
+def test_killStopsTreeAndWaitsForAgent(tmp_path, monkeypatch):
+  job, treeKills = fakeJob(tmp_path, monkeypatch, FakeProcess())
+  job.kill()
+  assert job.killed is True and treeKills == [12345]
+  assert job.process.killedDirectly is False
+
+
+def test_killFallsBackToKillWhenTreeDoesNotExit(tmp_path, monkeypatch):
+  job, treeKills = fakeJob(tmp_path, monkeypatch, FakeProcess(exitsOnWait=False))
+  job.kill()
+  assert job.killed is True and treeKills == [12345]
+  assert job.process.killedDirectly is True
+
+
+def test_killProcessTreeUsesTaskkillOnWindows(monkeypatch):
+  calls = []
+  monkeypatch.setattr(board_agents.os, "name", "nt")
+  monkeypatch.setattr(board_agents.subprocess, "run", lambda argv, **options: calls.append(argv))
+  board_agents.killProcessTree(321)
+  assert calls == [["taskkill", "/PID", "321", "/T", "/F"]]
+
+
+def test_killProcessTreeKillsProcessGroupOnPosix(monkeypatch):
+  killed = []
+  monkeypatch.setattr(board_agents.os, "name", "posix")
+  monkeypatch.setattr(board_agents.os, "getpgid", lambda pid: pid + 1, raising=False)
+  monkeypatch.setattr(board_agents.os, "killpg", lambda group, sig: killed.append((group, sig)), raising=False)
+  monkeypatch.setattr(board_agents.signal, "SIGKILL", 9, raising=False)
+  board_agents.killProcessTree(321)
+  assert killed == [(322, 9)]
+
+
+def test_killProcessTreeIgnoresProcessThatIsGoneOnPosix(monkeypatch):
+  def missingGroup(pid):
+    raise ProcessLookupError(pid)
+
+  monkeypatch.setattr(board_agents.os, "name", "posix")
+  monkeypatch.setattr(board_agents.os, "getpgid", missingGroup, raising=False)
+  # Windows 沒有 killpg、SIGKILL，取屬性在算參數之前，不補會先丟 AttributeError
+  monkeypatch.setattr(board_agents.os, "killpg", lambda group, sig: None, raising=False)
+  monkeypatch.setattr(board_agents.signal, "SIGKILL", 9, raising=False)
+  # 程式已經結束時不算錯誤，呼叫端不必另外處理
+  assert board_agents.killProcessTree(321) is None
+
+
 def test_jobThatExitsAfterResultIsNotMarkedStopped(tmp_path, monkeypatch):
   monkeypatch.setattr(board_agents, "resultGraceSeconds", 0.5)
   script = "import json; print(json.dumps({'type': 'result', 'is_error': False, 'structured_output': {}}))"
@@ -203,6 +283,14 @@ def test_parseCodexLinesAndResult(tmp_path):
   assert board_agents.codexFinalResult(outPath) == (None, "沒有產生 -o 輸出檔")
   outPath.write_text('{"verdict": "pass", "mustFix": [], "suggest": []}', encoding="utf-8")
   assert board_agents.codexFinalResult(outPath)[0]["verdict"] == "pass"
+
+
+def test_codexFinalResultRejectsNonJsonAndNonObject(tmp_path):
+  outPath = tmp_path / "out.json"
+  outPath.write_text("  不是 JSON  \n", encoding="utf-8")
+  assert board_agents.codexFinalResult(outPath) == (None, "輸出不是 JSON：不是 JSON")
+  outPath.write_text('["pass"]', encoding="utf-8")
+  assert board_agents.codexFinalResult(str(outPath)) == (None, "輸出不是 JSON 物件")
 
 
 def test_looksLikeQuota():

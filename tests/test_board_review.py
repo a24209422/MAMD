@@ -46,6 +46,21 @@ def test_nonObjectReview():
   assert validateReview(["pass"], ["R1"]) == ["回覆不是 JSON 物件"]
 
 
+def test_invalidVerdictAndNonListMustFixStopEarly():
+  assert validateReview({"verdict": "maybe", "mustFix": "R1", "suggest": []}, ["R1"]) == [
+    "verdict 只能是 pass 或 fail", "mustFix 必須是陣列"]
+
+
+def test_nonObjectMustFixItemIsTreatedAsEmpty():
+  errors = validateReview({"verdict": "fail", "mustFix": ["R1"], "suggest": []}, ["R1"])
+  assert len(errors) == 2 and "ref「」" in errors[0]
+  assert errors[1] == "必改的 text 不能是空的"
+
+
+def test_nonListSuggestIsRejected():
+  assert validateReview({"verdict": "pass", "mustFix": [], "suggest": "可以更短"}, ["R1"]) == ["suggest 必須是陣列"]
+
+
 def test_renderReviewMarkdown():
   markdown = renderReviewMarkdown("P0001", "T2", 1, failResult(("R1", "沒有提示"), suggest=["文字改短"]))
   assert markdown == (

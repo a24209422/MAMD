@@ -181,6 +181,65 @@ def test_writePromptAddsTddCrapStepsOnlyWhenEnabled(writePlan):
   assert "tdd-crap" not in buildWritePrompt(samplePlan(writePlan), "T1", 1)
 
 
+reviewHeaderLines = [
+  "審查 plan P0001「測試 plan」的任務 T1：任務一（第 1 輪）", "",
+  "這個任務要滿足的需求（必改的 ref 只能用這些編號或「驗證」）：", "- R1：需求一（AI 理解：理解一）", "",
+  "plan 裡和這個任務有關的列：",
+  "| 需求 | AI 理解 | 做法（ADR） | 不採用 | 任務 | 前置 | 驗證 |", "|---|---|---|---|---|---|---|",
+  "| R1 需求一 | 理解一 | D1 做法一 |  | T1 任務一 |  | 驗證一 |",
+]
+tddReviewTextLines = [
+  "這個專案照 tdd-crap 開發，自動測試就是品質檢查（每個函式的覆蓋率與循環複雜度）。",
+  "- 品質檢查沒通過時，讀 worktree 裡的 .quality/report.json 找出超標的函式；上面附的輸出只有最後 50 行。",
+  "- 確認測試真的在驗證行為：用放寬斷言、刪除測試、加 # pragma: no cover 排除程式碼等方式通過門檻的，列為必改，ref 填「驗證」。",
+]
+
+
+def test_reviewPromptFullOutputForOldFlowStaysUnchanged(tmp_path):
+  # 鎖住舊流程每個可選區段的文字與順序，重構時提示詞不能有任何差異
+  prompt = buildReviewPrompt(tableOnlyPlan(tmp_path), "T1", 1, "x" * (maxDiffChars + 10),
+                             testRun={"passed": False, "tail": "1 failed", "verdict": "preexisting"},
+                             previousErrors=["錯誤一", "錯誤二"], resolvedConflicts=["calc.py", "test_calc.py"],
+                             tddCrap=True, baselineFailures=["t.py::test_old"])
+  assert prompt.splitlines() == [
+    *reviewHeaderLines, "",
+    "這一輪是解合併衝突：其他任務先合併進 plan 分支，和這個任務都改了 calc.py、test_calc.py。",
+    "這個任務已經把最新的 plan 分支合併進來並解掉衝突。請確認這個任務原本的改動還在，"
+    "也沒有刪掉或改壞其他任務已經合併的內容。下面的 diff 是這個任務相對於最新 plan 分支的改動。", "",
+    "自動測試結果：失敗", "```", "1 failed", "```",
+    "這些失敗基準就有（plan 開始時在 baseCommit 跑測試就失敗），不是這個任務造成的，不必因為它們退回：",
+    "- t.py::test_old", "",
+    *tddReviewTextLines, "",
+    "這個任務的 diff：", "```diff", "x" * maxDiffChars, f"（diff 太長，只附前 {maxDiffChars} 個字元）", "```", "",
+    "你上一次的審查結果不符合規則，請修正後重新回覆：", "- 錯誤一", "- 錯誤二",
+  ]
+
+
+def test_reviewPromptFullOutputForAfterMergeStaysUnchanged(tmp_path):
+  prompt = buildReviewPrompt(tableOnlyPlan(tmp_path), "T1", 1, "+x", tddCrap=True, afterMerge=True,
+                             mergeFailures=["t.py::test_new"])
+  assert prompt.splitlines() == [
+    *reviewHeaderLines, "",
+    "這個 plan 的完整測試在審查通過、合併進 plan 分支後才跑，這裡沒有自動測試結果；"
+    "不要因為沒有測試結果而退回，也不要自己跑完整測試。",
+    "驗證欄裡的完整測試（例如執行 python -m pytest -q 通過）由合併後的測試把關，不是這次審查要確認的項目；"
+    "驗證欄的其他項目照常確認。",
+    "這一輪是修正合併後測試出現的新增失敗，請確認 diff 針對這些失敗：", "- t.py::test_new", "",
+    *tddReviewTextLines, "",
+    "這個任務的 diff：", "```diff", "+x", "```",
+  ]
+
+
+def test_reviewPromptFullOutputWithoutOptionsStaysUnchanged(tmp_path):
+  prompt = buildReviewPrompt(tableOnlyPlan(tmp_path), "T1", 1, "",
+                             testRun={"passed": True, "tail": "ok", "verdict": "passed"})
+  assert prompt.splitlines() == [
+    *reviewHeaderLines, "",
+    "自動測試結果：通過", "```", "ok", "```", "",
+    "這個任務的 diff：", "```diff", "（沒有 diff）", "```",
+  ]
+
+
 def test_reviewPromptAddsTestQualityRuleOnlyWhenEnabled(writePlan):
   prompt = buildReviewPrompt(samplePlan(writePlan), "T1", 1, "+x", testRun={"passed": False, "tail": "FAILED"},
                              tddCrap=True)
