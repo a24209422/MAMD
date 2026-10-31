@@ -269,6 +269,18 @@ def mergeTestKey(planIdValue):
   return f"{planIdValue}/mergetest"
 
 
+def waitsForMergeTestDecision(tasks):
+  return any(taskState["status"] == TaskStatus.needsYou and (taskState["needs"] or {}).get("kind") == "mergeTest"
+             for taskState in tasks)
+
+
+def mergeTestTarget(pending, commits, split):
+  if split:
+    # 逐一測：照合併順序一次只測一個任務的合併 commit
+    return pending[0]["mergedCommit"], [pending[0]["task"]]
+  return commits[-1], [taskState["task"] for taskState in pending]
+
+
 # 任務測試與合併後測試都要有被測的 commit、完整失敗名單和指令，才能拿來當基準
 reusableTestRunFields = ("commit", "failures", "command")
 
@@ -634,27 +646,37 @@ class Conductor:
 
   def startMergeTests(self, state):
     for planState in state["plans"].values():
-      key = mergeTestKey(planState["id"])
-      if planState["status"] != PlanStatus.active or key in self.jobs or planState["testTiming"] != "afterMerge":
+      pending = self.pendingMergeTests(planState, state)
+      if not pending:
         continue
-      if not self.runsMergeTests(planState):
-        self.skipMergeTests(planState, state)
-        continue
-      if self.needsTestBaseline(planState):
-        # 第一次合併後測試要跟基準比；testCommand 改掉後也要等新的基準
-        continue
-      tasks = [taskState for taskState in state["tasks"].values() if taskState["plan"] == planState["id"]]
-      if any(taskState["status"] == TaskStatus.needsYou and (taskState["needs"] or {}).get("kind") == "mergeTest"
-             for taskState in tasks):
-        # 分不出結果的那次等你決定；先測後面的合併，範圍會包含它的改動，可能算錯是誰造成的
-        continue
-      pending = [taskState for taskState in tasks if taskState["status"] == TaskStatus.mergedUntested]
-      if pending:
-        try:
-          self.startMergeTest(planState, pending, key)
-        except Exception as error:
-          # plan 沒有「等你處理」狀態可以記；下一輪會自動再試
-          self.notifyOnce(f"{planState['id']} 的合併後測試無法開始：{error}")
+      try:
+        self.startMergeTest(planState, pending, mergeTestKey(planState["id"]))
+      except Exception as error:
+        # plan 沒有「等你處理」狀態可以記；下一輪會自動再試
+        self.notifyOnce(f"{planState['id']} 的合併後測試無法開始：{error}")
+
+  def pendingMergeTests(self, planState, state):
+    if not self.readyForMergeTests(planState, state):
+      return []
+    tasks = [taskState for taskState in state["tasks"].values() if taskState["plan"] == planState["id"]]
+    if waitsForMergeTestDecision(tasks):
+      # 分不出結果的那次等你決定；先測後面的合併，範圍會包含它的改動，可能算錯是誰造成的
+      return []
+    return [taskState for taskState in tasks if taskState["status"] == TaskStatus.mergedUntested]
+
+  def readyForMergeTests(self, planState, state):
+    if not self.awaitsMergeTests(planState):
+      return False
+    if not self.runsMergeTests(planState):
+      self.skipMergeTests(planState, state)
+      return False
+    # 第一次合併後測試要跟基準比；testCommand 改掉後也要等新的基準
+    return not self.needsTestBaseline(planState)
+
+  def awaitsMergeTests(self, planState):
+    # 每份 plan 同時只跑一個合併後測試
+    return (planState["status"] == PlanStatus.active and mergeTestKey(planState["id"]) not in self.jobs
+            and planState["testTiming"] == "afterMerge")
 
   def skipMergeTests(self, planState, state):
     # 合併後才把測試關掉時，已合併待測試的任務沒有測試可等；記下來讓重播也得到同樣結果
@@ -672,33 +694,37 @@ class Conductor:
     return planState["testBaseline"]
 
   def startMergeTest(self, planState, pending, key):
-    planIdValue = planState["id"]
-    commits = board_git.firstParentCommits(self.projectDir, planIdValue)
-    position = {commit: index for index, commit in enumerate(commits)}
-    pending = sorted(pending, key=lambda taskState: position.get(taskState["mergedCommit"], len(commits)))
-    split = planState["mergeTest"]["split"]
-    first = position.get(pending[0]["mergedCommit"], len(commits))
-    splitUsable = bool(split) and split.get("command") == self.config["testCommand"] \
-      and split.get("commit") in position and first <= position[split["commit"]]
-    info = {"kind": "mergeTest", "plan": planIdValue, "task": None, "agent": None,
-            "predecessor": self.mergeTestPredecessor(planState),
-            "splitCommit": split["commit"] if splitUsable else None, "staleSplit": bool(split) and not splitUsable}
-    if splitUsable:
-      # 逐一測：照合併順序一次只測一個任務的合併 commit
-      info["commit"], info["covers"] = pending[0]["mergedCommit"], [pending[0]["task"]]
-    else:
-      info["commit"], info["covers"] = commits[-1], [taskState["task"] for taskState in pending]
-    info["mergeFailures"] = {taskState["task"]: list(taskState["mergeFailures"]) for taskState in pending}
-    if splitUsable and info["commit"] == split["commit"]:
+    commits = board_git.firstParentCommits(self.projectDir, planState["id"])
+    info = self.mergeTestInfo(planState, pending, commits)
+    if info["splitCommit"] is not None and info["commit"] == info["splitCommit"]:
       # 這個 commit 就是一開始一起測的那次，結果已經有了，不必重跑
+      split = planState["mergeTest"]["split"]
       self.writeMergeTestRun(info, {field: split.get(field) for field in mergeTestRecordFields}, reused=True)
       return
     if self.freeTestSlots() <= 0:
       # 名額滿了先不跑，任務維持已合併待測試，留到之後的 tick
       return
-    worktree = board_git.addMergeTestWorktree(self.projectDir, planIdValue, info["commit"])
+    worktree = board_git.addMergeTestWorktree(self.projectDir, planState["id"], info["commit"])
     info["job"] = BackgroundTestJob(self.runTestCommand, worktree).start()
     self.jobs[key] = info
+
+  def mergeTestInfo(self, planState, pending, commits):
+    position = {commit: index for index, commit in enumerate(commits)}
+    pending = sorted(pending, key=lambda taskState: position.get(taskState["mergedCommit"], len(commits)))
+    split = self.usableSplit(planState, position.get(pending[0]["mergedCommit"], len(commits)), position)
+    commit, covers = mergeTestTarget(pending, commits, split)
+    return {"kind": "mergeTest", "plan": planState["id"], "task": None, "agent": None,
+            "predecessor": self.mergeTestPredecessor(planState),
+            "splitCommit": split["commit"] if split else None,
+            "staleSplit": bool(planState["mergeTest"]["split"]) and not split, "commit": commit, "covers": covers,
+            "mergeFailures": {taskState["task"]: list(taskState["mergeFailures"]) for taskState in pending}}
+
+  def usableSplit(self, planState, first, position):
+    split = planState["mergeTest"]["split"]
+    if not split or split.get("command") != self.config["testCommand"] or split.get("commit") not in position:
+      return None
+    # 最早的待測合併在拆分範圍之後，就不屬於一開始一起測的那次
+    return split if first <= position[split["commit"]] else None
 
   def finishMergeTest(self, info):
     job = info["job"]
