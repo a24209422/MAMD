@@ -28,7 +28,13 @@ const iconPaths = {
   chat: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9.5h8M8 12.5h5"/>',
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
 };
-const app = { state: null, stateText: '', token: '', online: true, page: 'overview', selectedAgent: null, selectedPlan: null };
+// 這一頁看哪個專案在載入時就由網址固定，之後不再改；換專案一律整頁重新載入，還在跑的請求不會改送到別的專案
+const app = {
+  state: null, stateText: '', token: '', online: true, page: 'overview', selectedAgent: null, selectedPlan: null,
+  project: new URLSearchParams(location.search).get('project') || '', projectMissing: false,
+};
+const recentProjectsKey = 'boardRecentProjects';
+const recentProjectsLimit = 10;
 const stateRenderers = [];
 const pollRenderers = [];
 const pageRenderers = [];
@@ -140,8 +146,14 @@ function readToken() {
   }
 }
 
+// 各面板照舊寫 /api/...，在這裡統一加上本頁的專案；開啟、列出專案本來就不屬於任何專案
+function apiUrl(path) {
+  if (!app.project || !path.startsWith('/api/') || path.startsWith('/api/projects/')) return path;
+  return `/api/projects/${encodeURIComponent(app.project)}${path.slice(4)}`;
+}
+
 async function apiGetText(path) {
-  const response = await fetch(path, { cache: 'no-store' });
+  const response = await fetch(apiUrl(path), { cache: 'no-store' });
   const text = await response.text();
   if (!response.ok) {
     let message = `HTTP ${response.status}`;
@@ -150,7 +162,10 @@ async function apiGetText(path) {
     } catch (error) {
       // 不是 JSON 就用狀態碼當訊息
     }
-    throw new Error(message);
+    const failure = new Error(message);
+    // 輪詢要分得出是 server 連不到，還是 server 重新啟動後還沒登錄這個專案（404）
+    failure.status = response.status;
+    throw failure;
   }
   return text;
 }
@@ -161,7 +176,7 @@ async function apiGet(path) {
 
 async function apiPost(path, body = {}) {
   try {
-    const response = await fetch(path, {
+    const response = await fetch(apiUrl(path), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Board-Token': app.token },
       body: JSON.stringify(body),
@@ -182,8 +197,121 @@ function renderChrome() {
   if (!app.token) notes.push('唯讀：請用 server.py 印出的網址重新開啟');
   if (!app.online) notes.push('連不到 server，畫面停在最後一次讀到的資料，每 2 秒重試');
   if (app.state) app.state.warnings.forEach(warning => notes.push(`警告｜${warning}`));
-  $('#notice').innerHTML = notes.map(note => `<p>${escapeHtml(note)}</p>`).join('');
-  $('#notice').hidden = !notes.length;
+  const missing = app.projectMissing ? `<p>server 還沒登錄這個專案（可能重新啟動過）。
+    <a class="mini-btn" href="/#overview">返回預設專案</a>
+    <button class="mini-btn" type="button" data-project-reopen${writeDisabled()}>重新開啟</button></p>` : '';
+  $('#notice').innerHTML = missing + notes.map(note => `<p>${escapeHtml(note)}</p>`).join('');
+  $('#notice').hidden = !missing && !notes.length;
+  renderProjectBar();
+}
+
+function projectName(path) {
+  return path.split(/[\\/]/).filter(Boolean).pop() || path;
+}
+
+function renderProjectBar() {
+  const path = app.state ? app.state.project : '';
+  const name = path ? projectName(path) : app.projectMissing ? '找不到這個專案' : '讀取中…';
+  // 資料夾名稱和路徑來自使用者的磁碟，一律當純文字放
+  $('#projectName').textContent = name;
+  $('#projectPath').textContent = path;
+  $('#projectPath').title = path;
+  $('#projectOpen').hidden = !app.token;
+}
+
+// 讀不到（瀏覽器不給用或內容壞掉）回傳 null，和「還沒有紀錄」分開提示；兩種情況都還能直接輸入路徑
+function readRecentProjects() {
+  try {
+    const records = JSON.parse(localStorage.getItem(recentProjectsKey) || '[]');
+    if (!Array.isArray(records)) return null;
+    return records.filter(record => record && typeof record.id === 'string' && typeof record.path === 'string')
+      .slice(0, recentProjectsLimit);
+  } catch (error) {
+    return null;
+  }
+}
+
+function rememberProject(project) {
+  const records = (readRecentProjects() || []).filter(record => record.id !== project.id);
+  records.unshift({ id: project.id, name: project.name, path: project.path });
+  try {
+    localStorage.setItem(recentProjectsKey, JSON.stringify(records.slice(0, recentProjectsLimit)));
+  } catch (error) {
+    // 存不了只是少一筆最近紀錄，不影響這次開啟
+  }
+}
+
+function renderRecentProjects() {
+  const records = readRecentProjects();
+  const list = $('#projectRecent');
+  list.replaceChildren();
+  if (!records || !records.length) {
+    const empty = document.createElement('li');
+    empty.className = 'op-hint';
+    empty.textContent = records ? '還沒有最近紀錄' : '讀不到最近紀錄，請直接輸入路徑';
+    list.append(empty);
+    return;
+  }
+  for (const record of records) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'project-recent-btn';
+    const name = document.createElement('strong');
+    name.textContent = record.name || projectName(record.path);
+    const path = document.createElement('span');
+    path.textContent = record.path;
+    button.append(name, path);
+    // 紀錄可能已經過時（資料夾搬走、server 重新啟動），每次都交給 server 重新驗證
+    button.addEventListener('click', () => openProject(record.path));
+    const item = document.createElement('li');
+    item.append(button);
+    list.append(item);
+  }
+}
+
+function openProjectDialog(path = '') {
+  if (!app.token) return;
+  $('#projectPathInput').value = path;
+  $('#projectOpenMessage').textContent = '';
+  renderRecentProjects();
+  if (!$('#projectDialog').open) $('#projectDialog').showModal();
+  $('#projectPathInput').focus();
+}
+
+// server 重新啟動後舊 id 還沒登錄；id 由路徑算出，從最近紀錄找回路徑重新開啟就會拿回同一個 id
+function missingProjectPath() {
+  const record = (readRecentProjects() || []).find(item => item.id === app.project);
+  return record ? record.path : '';
+}
+
+async function openProject(path) {
+  const target = path.trim();
+  if (!target) {
+    $('#projectOpenMessage').textContent = '請輸入專案資料夾的完整路徑';
+    return;
+  }
+  $('#projectOpenSubmit').disabled = true;
+  const result = await apiPost('/api/projects/open', { path: target });
+  $('#projectOpenSubmit').disabled = false;
+  if (!result.ok) {
+    $('#projectOpenMessage').textContent = result.message || '開啟失敗';
+    return;
+  }
+  rememberProject(result.project);
+  goToProject(result.project.id);
+}
+
+// 整頁重新載入，舊頁的 plan、agent、草稿、模型清單、log 和錯誤提示都不會帶到新專案
+function goToProject(id) {
+  const search = `?project=${encodeURIComponent(id)}`;
+  const target = `/${search}#overview`;
+  // 網址只差在 # 後面時瀏覽器不會重新載入，重新開啟同一個專案要自己重新整理
+  if (location.search === search) {
+    history.replaceState(null, '', target);
+    location.reload();
+  } else {
+    location.assign(target);
+  }
 }
 
 function renderAll() {
@@ -202,6 +330,7 @@ async function pollState() {
   try {
     const text = await apiGetText('/api/state');
     app.online = true;
+    app.projectMissing = false;
     if (text !== app.stateText) {
       app.stateText = text;
       app.state = JSON.parse(text);
@@ -211,7 +340,9 @@ async function pollState() {
     }
     pollRenderers.forEach(render => safeRun(render, app.state));
   } catch (error) {
-    app.online = false;
+    app.projectMissing = Boolean(app.project) && error.status === 404;
+    // 回 404 代表 server 還在，只是不認得這個專案，不算離線
+    app.online = app.projectMissing;
     renderChrome();
   } finally {
     polling = false;
