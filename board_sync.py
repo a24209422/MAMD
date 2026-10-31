@@ -8,18 +8,24 @@ import uuid
 from pathlib import Path
 
 from board_core import BoardError, PlanStatus, TaskStatus, deriveState, newTaskState, taskKey
+from board_review import renderReviewMarkdown
 
 progressDirName = ".agent-board"
 progressFileName = "progress.json"
 formatName = "agent-board-progress"
 formatVersion = 1
 maxReasonLength = 500
+maxNoteLength = 2000
 pathPlaceholder = "<路徑>"
+maskPlaceholder = "<已遮蔽>"
+# conductor 記 agent 失敗時用這個符號接上 agent 輸出尾段，尾段是終端內容，不能交接
+agentOutputSeparator = "｜"
 
 # 測試紀錄只留結論：指令與輸出是本機的，新電腦的 conductor 看到沒有指令會自己重跑基準
 testSummaryFields = ("commit", "passed", "failures", "qualityChecked", "qualityFailures", "comparedTo", "covers")
 lastTestFields = ("source", "verdict", "newFailures", "commit", "passed", "failures", "qualityChecked",
                   "qualityFailures")
+failureListFields = {"failures", "qualityFailures", "newFailures"}
 needsFields = ("kind", "reason", "stage", "conflicts")
 planCopyFields = ("status", "rejectReason", "baseCommit", "testTiming")
 # 對話編號、agent 名稱、CLI 與 worktree 清理狀態只在原本那台電腦有意義，不放進交接檔
@@ -29,9 +35,29 @@ taskCopyFields = ("text", "dependsOn", "requirementIds", "status", "round", "max
 contentFields = ("format", "version", "projectId", "plans", "branches")
 
 quotedPathPattern = re.compile(r"""(['"])(?:[A-Za-z]:[\\/]|\\\\|/)[^'"\n]*\1""")
-# 前面接著網址的 :/ 或相對路徑的字元時不算絕對路徑，plan/P0001、https://… 才不會被誤遮
-barePathPattern = re.compile(r"""(?<![\w.~-])(?:[A-Za-z]:[\\/]|\\\\)[^\s'"]*|(?<![\w.:~/-])/[^\s'"/]+/[^\s'"]*""")
+# 前面接著網址的 :/ 或相對路徑的字元時不算絕對路徑，plan/P0001、https://… 才不會被誤遮；
+# 全形標點視為路徑結尾，中文句子裡「路徑，後文」的後文才不會一起被吃掉
+barePathPattern = re.compile(r"""(?<![\w.~-])(?:[A-Za-z]:[\\/]|\\\\)[^\s'"，。；、）」]*"""
+                             r"""|(?<![\w.:~/-])/[^\s'"/，。；、）」]+/[^\s'"，。；、）」]*""")
 conflictMarkerPattern = re.compile(r"^(?:<{7}|={7}|>{7})(?: |$)", re.MULTILINE)
+# 遮蔽值遇到全形標點與截斷用的「…」就停，重複清理同一段文字結果才會一樣
+secretValue = r"""[^\s'"，。；、）」…]+"""
+# 依序套用：先去掉終端控制碼，再遮蔽憑證與 PID，最後才遮路徑，避免路徑規則先吃掉 token 的前後文
+maskRules = (
+  (re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]"), ""),
+  (re.compile(r"[\x00-\x08\x0b-\x1f\x7f]"), ""),
+  (re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), r"\1" + maskPlaceholder + "@"),
+  (re.compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+              r"|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{20,})"),
+   maskPlaceholder),
+  (re.compile(r"(?i)(?<![a-z])(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 " + maskPlaceholder),
+  (re.compile(r"(?i)((?<![a-z])[a-z_-]*(?:token|secret|password|passwd|api[_-]?key)[a-z_-]*\s*[=:：]\s*)"
+              + secretValue), r"\1" + maskPlaceholder),
+  (re.compile(r"(?i)(?<![a-z])(pid)(?![a-z])[\s:=#]*\d+"), r"\1 " + maskPlaceholder),
+  (quotedPathPattern, lambda match: match.group(1) + pathPlaceholder + match.group(1)),
+  (barePathPattern, pathPlaceholder),
+)
+unclosedPlaceholderPattern = re.compile(r"<[^<>\s]*$")
 
 
 class SyncError(BoardError):
@@ -46,12 +72,21 @@ def newProjectId():
   return uuid.uuid4().hex
 
 
-def briefReason(text):
-  text = quotedPathPattern.sub(lambda match: match.group(1) + pathPlaceholder + match.group(1), text)
-  text = barePathPattern.sub(pathPlaceholder, text)
-  if len(text) > maxReasonLength:
-    text = text[:maxReasonLength - 1] + "…"
+def portableText(text, limit=maxNoteLength):
+  for pattern, replacement in maskRules:
+    text = pattern.sub(replacement, text)
+  if len(text) > limit:
+    # 截在遮蔽標記中間會讓下次清理又補回標記，結果對不上，所以連同半個標記一起丟掉
+    text = unclosedPlaceholderPattern.sub("", text[:limit - 1]) + "…"
   return text
+
+
+def portableList(items):
+  return None if items is None else [portableText(item) for item in items]
+
+
+def briefReason(text):
+  return portableText(text.split(agentOutputSeparator, 1)[0], maxReasonLength)
 
 
 def canonicalJson(data):
@@ -76,6 +111,14 @@ def pickFields(data, fields):
   return {field: data[field] for field in fields if field in data}
 
 
+def testSummary(data, fields):
+  picked = pickFields(data, fields)
+  # 失敗清單可能帶著本機的測試路徑，和使用者文字一樣要清理
+  for field in failureListFields.intersection(picked or {}):
+    picked[field] = portableList(picked[field])
+  return picked
+
+
 def portableNeeds(needs):
   picked = pickFields(needs, needsFields)
   if picked and "reason" in picked:
@@ -83,10 +126,88 @@ def portableNeeds(needs):
   return picked
 
 
-def taskEntry(taskState):
+reviewHeaderPattern = re.compile(r"# \S+ \S+ 第 ([1-9]\d*) 輪審查：(通過|不通過)")
+mustFixItemPattern = re.compile(r"\[([^\]\n]*)\] (.*)", re.DOTALL)
+
+
+def reviewSections(lines):
+  sections = {}
+  current = None
+  for line in lines:
+    if line.startswith("## "):
+      current = sections.setdefault(line[3:].strip(), [])
+    elif current is not None:
+      current.append(line)
+  return sections
+
+
+def reviewItems(lines):
+  items = []
+  for line in lines:
+    if line.startswith("- "):
+      items.append(line[2:])
+    elif items:
+      items[-1] += "\n" + line
+  items = [item.rstrip("\n") for item in items]
+  return [] if items == ["（無）"] else items
+
+
+def parseReviewMarkdown(text):
+  # 解析 renderReviewMarkdown 的格式；不是這個格式就當讀不到，不猜內容
+  lines = text.replace("\r\n", "\n").split("\n")
+  header = reviewHeaderPattern.fullmatch(lines[0])
+  sections = reviewSections(lines[1:])
+  if header is None or not {"必改", "建議"} <= sections.keys():
+    return None
+  mustFix = [mustFixItemPattern.fullmatch(item) for item in reviewItems(sections["必改"])]
+  if not all(mustFix):
+    return None
+  return {"round": int(header.group(1)), "verdict": "pass" if header.group(2) == "通過" else "fail",
+          "mustFix": [{"ref": match.group(1), "text": match.group(2)} for match in mustFix],
+          "suggest": reviewItems(sections["建議"])}
+
+
+def portableConclusion(conclusion):
+  return {**conclusion, "suggest": portableList(conclusion["suggest"]),
+          "mustFix": [{"ref": portableText(item["ref"]), "text": portableText(item["text"])}
+                      for item in conclusion["mustFix"]]}
+
+
+def reviewReader(boardDirectory):
+  def read(notes):
+    try:
+      return (Path(boardDirectory) / notes).read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+      return None
+  return read
+
+
+def reviewLookup(readReview, previous):
+  # 新電腦沒有原機的審查檔，讀不到時沿用上一版交接檔的結論，重新匯出才不會把必改弄丟
+  known = {notes: conclusion for plan in (previous or {}).get("plans", {}).values()
+           for task in plan["tasks"] for notes, conclusion in task["reviewConclusions"].items()}
+
+  def lookup(notes):
+    text = readReview(notes) if readReview else None
+    conclusion = parseReviewMarkdown(text) if text is not None else None
+    return portableConclusion(conclusion) if conclusion else known.get(notes)
+  return lookup
+
+
+def reviewConclusions(taskState, lookup):
+  # 只帶最後一次審查：writer 重寫時讀的是 lastReviewNotes，看板顯示的是最後一輪
+  notesNames = {taskState["lastReviewNotes"], *taskState["reviews"][-1:]} - {None}
+  conclusions = {notes: lookup(notes) for notes in sorted(notesNames)}
+  return {notes: conclusion for notes, conclusion in conclusions.items() if conclusion is not None}
+
+
+def taskEntry(taskState, lookup):
   entry = {"id": taskState["task"], **{field: taskState[field] for field in taskCopyFields}}
-  entry["lastTest"] = pickFields(taskState["lastTest"], lastTestFields)
+  entry["userNote"] = portableText(entry["userNote"])
+  entry["mergeFailures"] = portableList(entry["mergeFailures"])
+  entry["lastTest"] = testSummary(taskState["lastTest"], lastTestFields)
   entry["needs"] = portableNeeds(taskState["needs"])
+  entry["reviewConclusions"] = reviewConclusions(taskState, lookup)
   return entry
 
 
@@ -100,13 +221,14 @@ def planFileInfo(planIdValue, plans, previous):
   raise SyncError(f"找不到 {planIdValue} 的 plan 檔，無法記錄它的進度")
 
 
-def planEntry(state, planState, fileInfo):
+def planEntry(state, planState, fileInfo, lookup):
   mergeTest = planState["mergeTest"]
   return {**{field: planState[field] for field in planCopyFields}, **fileInfo,
-          "testBaseline": pickFields(planState["testBaseline"], testSummaryFields),
-          "mergeTest": {"lastTested": pickFields(mergeTest["lastTested"], testSummaryFields),
-                        "split": pickFields(mergeTest["split"], testSummaryFields)},
-          "tasks": [taskEntry(taskState) for taskState in state["tasks"].values()
+          "rejectReason": portableText(planState["rejectReason"]),
+          "testBaseline": testSummary(planState["testBaseline"], testSummaryFields),
+          "mergeTest": {"lastTested": testSummary(mergeTest["lastTested"], testSummaryFields),
+                        "split": testSummary(mergeTest["split"], testSummaryFields)},
+          "tasks": [taskEntry(taskState, lookup) for taskState in state["tasks"].values()
                     if taskState["plan"] == planState["id"]]}
 
 
@@ -117,8 +239,8 @@ def chainAfter(body, previous):
   return body
 
 
-def portablePlans(state, plans, previous):
-  return {planIdValue: planEntry(state, planState, planFileInfo(planIdValue, plans, previous))
+def portablePlans(state, plans, previous, lookup):
+  return {planIdValue: planEntry(state, planState, planFileInfo(planIdValue, plans, previous), lookup)
           for planIdValue, planState in state["plans"].items() if planState["status"] != PlanStatus.draft}
 
 
@@ -126,13 +248,13 @@ def sameContent(previous, body):
   return previous is not None and all(previous[field] == body[field] for field in contentFields)
 
 
-def buildSnapshot(state, plans, projectId, previous=None, branches=None):
+def buildSnapshot(state, plans, projectId, previous=None, branches=None, readReview=None):
   if previous is not None and previous["projectId"] != projectId:
     raise SyncError("交接檔的專案識別和這個專案不同，不能接在它後面")
   if branches is None:
     branches = previous["branches"] if previous else {}
   body = {"format": formatName, "version": formatVersion, "projectId": projectId, "branches": dict(branches),
-          "plans": portablePlans(state, plans, previous)}
+          "plans": portablePlans(state, plans, previous, reviewLookup(readReview, previous))}
   # 經過一次 JSON 轉換：不和 state 共用物件，也確定內容寫得進檔案
   body = json.loads(canonicalJson(body))
   # 內容沒變就沿用上一版，重複匯出不會一直長出新的 revision
@@ -171,10 +293,13 @@ def isPositive(value, path):
     fail(path, "必須是正整數")
 
 
-def isPortableReason(value, path):
-  isText(value, path)
-  if briefReason(value) != value:
-    fail(path, "含有本機路徑或太長")
+def portableCheck(clean):
+  # 匯出時已清理過，所以清理後還會變的內容一定是外部塞進來的本機資料
+  def check(value, path):
+    isText(value, path)
+    if clean(value) != value:
+      fail(path, "含有本機資料（絕對路徑、token、PID 或終端輸出）或太長")
+  return check
 
 
 def matches(pattern, description):
@@ -242,7 +367,13 @@ idText = matches(r"[A-Za-z0-9][A-Za-z0-9_.-]*", "不含路徑的編號")
 # 只接受專案內的相對路徑：不能是絕對路徑，也不能用 .. 跳出專案
 relativePath = matches(r"(?![A-Za-z]:|[\\/~])(?!(?:.*[\\/])?\.\.(?:[\\/]|$)).+", "專案內的相對路徑")
 reviewNote = matches(r"reviews/[^/\\:]+\.md", " reviews/ 底下的審查意見檔")
-textList = optional(listOf(isText))
+noteText = portableCheck(portableText)
+reasonText = portableCheck(briefReason)
+textList = optional(listOf(noteText))
+conclusionSpec = objectOf({
+  "round": isPositive, "verdict": oneOf(("pass", "fail")),
+  "mustFix": listOf(objectOf({"ref": noteText, "text": noteText})), "suggest": listOf(noteText),
+})
 
 testSummarySpec = objectOf({}, {
   "commit": optional(shaText), "passed": optional(isBool), "failures": textList,
@@ -253,21 +384,22 @@ lastTestSpec = objectOf({}, {
   "source": optional(isText), "verdict": optional(isText), "newFailures": textList, "commit": optional(shaText),
   "passed": optional(isBool), "failures": textList, "qualityChecked": optional(isBool), "qualityFailures": textList,
 })
-needsSpec = objectOf({"kind": isText, "reason": isPortableReason},
+needsSpec = objectOf({"kind": isText, "reason": reasonText},
                      {"stage": optional(isText), "conflicts": listOf(relativePath)})
 taskStatuses = tuple(value for name, value in vars(TaskStatus).items() if not name.startswith("_"))
 planStatuses = tuple(value for name, value in vars(PlanStatus).items()
                      if not name.startswith("_") and value != PlanStatus.draft)
 taskSpec = objectOf({
   "id": idText, "text": isText, "dependsOn": listOf(idText), "requirementIds": listOf(isText),
-  "status": oneOf(taskStatuses), "round": isPositive, "maxRounds": isPositive, "userNote": isText,
+  "status": oneOf(taskStatuses), "round": isPositive, "maxRounds": isPositive, "userNote": noteText,
   "userDone": isBool, "failStreak": isCount, "lastCommit": optional(shaText), "mergedCommit": optional(shaText),
   "resolving": isBool, "conflictFiles": listOf(relativePath), "conflictCount": isCount, "lastWriteMode": isText,
-  "mergeFix": isBool, "mergeFailures": listOf(isText), "reviews": listOf(optional(reviewNote)),
+  "mergeFix": isBool, "mergeFailures": listOf(noteText), "reviews": listOf(optional(reviewNote)),
   "lastReviewNotes": optional(reviewNote), "lastTest": optional(lastTestSpec), "needs": optional(needsSpec),
+  "reviewConclusions": mapOf(reviewNote, conclusionSpec),
 })
 planSpec = objectOf({
-  "status": oneOf(planStatuses), "rejectReason": isText, "baseCommit": optional(shaText),
+  "status": oneOf(planStatuses), "rejectReason": noteText, "baseCommit": optional(shaText),
   "testTiming": oneOf((None, "afterMerge")), "file": matches(r"plans/[^/\\:]+\.md", " plans/ 底下的 .md 檔"),
   "sha256": hashText, "testBaseline": optional(testSummarySpec),
   "mergeTest": objectOf({"lastTested": optional(testSummarySpec), "split": optional(testSummarySpec)}),
@@ -297,12 +429,46 @@ def checkLineage(snapshot):
     raise SyncError("交接檔的前序版本鏈不一致：previousRevision 和 ancestors 對不上或有重複")
 
 
+# 這些狀態在還原後會被 conductor 直接拿來用，缺了對應欄位就無法往下走
+requiredByStatus = {
+  TaskStatus.needsYou: ("needs", "是等你處理，卻沒有記錄原因"),
+  TaskStatus.mergedUntested: ("mergedCommit", "是已合併待測試，卻沒有記錄 mergedCommit"),
+}
+
+
 def checkTask(task, path, taskIds):
   missing = [dependencyId for dependencyId in task["dependsOn"] if dependencyId not in taskIds]
   if missing:
     fail(path, "的前置任務不存在：" + "、".join(missing))
-  if task["status"] == TaskStatus.needsYou and task["needs"] is None:
-    fail(path, "是等你處理，卻沒有記錄原因")
+  field, message = requiredByStatus.get(task["status"], (None, None))
+  if field and task[field] is None:
+    fail(path, message)
+  unknown = [notes for notes in task["reviewConclusions"]
+             if notes not in task["reviews"] and notes != task["lastReviewNotes"]]
+  if unknown:
+    fail(path, "的審查結論對不到審查紀錄：" + "、".join(unknown))
+
+
+def cycleFrom(node, graph, trail, finished):
+  if node in trail:
+    return trail[trail.index(node):] + [node]
+  if node in finished:
+    return None
+  for dependencyId in graph[node]:
+    cycle = cycleFrom(dependencyId, graph, [*trail, node], finished)
+    if cycle:
+      return cycle
+  finished.add(node)
+  return None
+
+
+def findCycle(graph):
+  finished = set()
+  for node in graph:
+    cycle = cycleFrom(node, graph, [], finished)
+    if cycle:
+      return cycle
+  return None
 
 
 def checkPlanTasks(planIdValue, plan):
@@ -315,6 +481,10 @@ def checkPlanTasks(planIdValue, plan):
     fail(path, "的任務編號重複")
   for index, task in enumerate(tasks):
     checkTask(task, f"{path}.tasks[{index}]", taskIds)
+  # 循環相依的任務永遠等不到前置完成，還原後會整批卡住
+  cycle = findCycle({task["id"]: task["dependsOn"] for task in tasks})
+  if cycle:
+    fail(path, "的前置任務形成循環：" + " → ".join(cycle))
 
 
 def validateSnapshot(snapshot):
@@ -408,6 +578,22 @@ def restorePlan(state, planState, entry):
     planState[field] = copy.deepcopy(entry[field])
   for task in entry["tasks"]:
     state["tasks"][taskKey(planState["id"], task["id"])] = restoreTask(planState, task)
+
+
+def writeReviewNote(path, planIdValue, taskId, conclusion):
+  # 本機已有的審查檔是原稿，比交接檔裡遮蔽過的結論完整，不覆蓋
+  if path.exists():
+    return
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text(renderReviewMarkdown(planIdValue, taskId, conclusion["round"], conclusion), encoding="utf-8")
+
+
+def restoreReviewNotes(snapshot, boardDirectory):
+  # writer 重寫時從 .board/reviews 讀必改，新電腦沒有這些檔就從交接檔的結論補回來
+  for planIdValue, plan in snapshot["plans"].items():
+    for task in plan["tasks"]:
+      for notes, conclusion in task["reviewConclusions"].items():
+        writeReviewNote(Path(boardDirectory) / notes, planIdValue, task["id"], conclusion)
 
 
 def stateFromSnapshot(snapshot, plans):

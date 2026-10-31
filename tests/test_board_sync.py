@@ -5,6 +5,7 @@ import pytest
 
 import board_sync
 from board_core import PlanStatus, TaskStatus, deriveState, loadPlans
+from board_review import renderReviewMarkdown
 from board_sync import (SyncError, buildSnapshot, newProjectId, parseSnapshot, progressPath, readSnapshot,
                         serializeSnapshot, stateFromSnapshot, writeSnapshot)
 from helpers import makeEvent, testConfig
@@ -137,6 +138,136 @@ def test_longReasonIsShortened():
   assert len(board_sync.briefReason("x" * 5000)) <= board_sync.maxReasonLength
   assert board_sync.briefReason("見 /home/me/proj/a.txt 與 C:\\Users\\me\\b.txt") == "見 <路徑> 與 <路徑>"
   assert board_sync.briefReason("合併 plan/P0001 與 reviews/P0001-T1-r1.md") == "合併 plan/P0001 與 reviews/P0001-T1-r1.md"
+
+
+def eventsState(projectDir, events):
+  plans = loadPlans(projectDir)
+  return plans, deriveState(events, plans, testConfig)
+
+
+def test_agentFailureReasonDropsAgentOutputTail(tmp_path, writePlan):
+  projectDir = makeProject(tmp_path / "proj", writePlan)
+  # 照 conductor 記 agentFailed 的格式：原因｜agent 輸出尾段
+  tail = ("\x1b[31mError\x1b[0m: token=abcd1234secret\npid 4242 at C:\\Users\\me\\proj\\a.py\n"
+          "sk-abcdefghijklmnopqrstuv session-secret-9")
+  failed = makeEvent("agentFailed", plan="P0001", task="T3", stage="write", reason=f"超時｜{tail}")
+  plans, state = eventsState(projectDir, [makeEvent("planSubmitted", plan="P0001"), approved("P0001"), failed, failed])
+  snapshot = buildSnapshot(state, plans, projectId)
+  assert snapshot["plans"]["P0001"]["tasks"][2]["needs"] == {"kind": "agentFailed", "stage": "write",
+                                                             "reason": "agent 連續失敗：超時"}
+  text = serializeSnapshot(snapshot)
+  for forbidden in ("4242", "abcd1234secret", "sk-", "session-secret", "Users", "Error"):
+    assert forbidden not in text
+
+
+def test_userTextMasksPathsTokensAndPids(tmp_path, writePlan):
+  projectDir = makeProject(tmp_path / "proj", writePlan)
+  events = [
+    makeEvent("planSubmitted", plan="P0001"), approved("P0001"),
+    makeEvent("testBaseline", plan="P0001", commit=baseSha, passed=False,
+              failures=["C:\\Users\\me\\proj\\tests\\test_a.py::test_x"], qualityChecked=False, qualityFailures=[]),
+    makeEvent("needsYou", plan="P0001", task="T1", kind="noChanges", reason="沒有改動"),
+    makeEvent("userDecision", plan="P0001", task="T1", action="retry",
+              note=f"參考 {projectDir}\\a.py 與 token=abcd1234secret，PID: 4242"),
+    makeEvent("planSubmitted", plan="P0002"),
+    makeEvent("planRejected", plan="P0002", reason="見 /home/me/proj/x.md，Bearer abcdefghijklmnop"),
+  ]
+  plans, state = eventsState(projectDir, events)
+  snapshot = buildSnapshot(state, plans, projectId)
+  assert snapshot["plans"]["P0001"]["tasks"][0]["userNote"] == "參考 <路徑> 與 token=<已遮蔽>，PID <已遮蔽>"
+  assert snapshot["plans"]["P0002"]["rejectReason"] == "見 <路徑>，Bearer <已遮蔽>"
+  assert snapshot["plans"]["P0001"]["testBaseline"]["failures"] == ["<路徑>"]
+  restored = stateFromSnapshot(snapshot, plans)
+  assert buildSnapshot(restored, plans, projectId, previous=snapshot) is snapshot
+
+
+@pytest.mark.parametrize("text, expected", [
+  ("\x1b[1;31m失敗\x1b[0m\x07", "失敗"),
+  ("連線 https://me:hunter2@example.com/repo 失敗", "連線 https://<已遮蔽>@example.com/repo 失敗"),
+  ("金鑰 ghp_abcdefghijklmnopqrstuvwxyz0123 外洩", "金鑰 <已遮蔽> 外洩"),
+  ("Authorization: Bearer abc.def-ghijklmn", "Authorization: Bearer <已遮蔽>"),
+  ("API_KEY=xyz123 與 password: p@ss", "API_KEY=<已遮蔽> 與 password: <已遮蔽>"),
+  ("程序 pid=31337 卡住", "程序 pid <已遮蔽> 卡住"),
+  ("rapid 3 次重試", "rapid 3 次重試"),
+])
+def test_portableTextMasksMachineLocalData(text, expected):
+  assert board_sync.portableText(text) == expected
+  assert board_sync.portableText(expected) == expected
+
+
+def writeReview(projectDir, roundNumber, result, taskId="T1"):
+  reviewsDir = projectDir / ".board" / "reviews"
+  reviewsDir.mkdir(parents=True, exist_ok=True)
+  text = renderReviewMarkdown("P0001", taskId, roundNumber, result)
+  (reviewsDir / f"P0001-{taskId}-r{roundNumber}.md").write_text(text, encoding="utf-8")
+  return text
+
+
+failedReview = {"verdict": "fail", "mustFix": [{"ref": "R1", "text": "請補 A 的測試\n並處理空字串"},
+                                               {"ref": "驗證", "text": "token=abcd1234secret 不能出現在輸出"}],
+                "suggest": ["改名", "參考 C:\\Users\\me\\proj\\a.py"]}
+
+
+def test_reviewConclusionsTravelWithoutReviewFiles(tmp_path, writePlan):
+  first = makeProject(tmp_path / "電腦1", writePlan)
+  second = makeProject(tmp_path / "電腦2", writePlan)
+  original = writeReview(first, 1, failedReview)
+  writeReview(first, 1, {"verdict": "pass", "mustFix": [], "suggest": []}, taskId="T3")
+  plans, state = projectState(first)
+  snapshot = buildSnapshot(state, plans, projectId, readReview=board_sync.reviewReader(first / ".board"))
+  tasks = snapshot["plans"]["P0001"]["tasks"]
+  assert tasks[0]["reviewConclusions"] == {"reviews/P0001-T1-r1.md": {
+    "round": 1, "verdict": "fail", "suggest": ["改名", "參考 <路徑>"],
+    "mustFix": [{"ref": "R1", "text": "請補 A 的測試\n並處理空字串"},
+                {"ref": "驗證", "text": "token=<已遮蔽> 不能出現在輸出"}]}}
+  assert tasks[2]["reviewConclusions"]["reviews/P0001-T3-r1.md"]["verdict"] == "pass"
+  writeSnapshot(first, snapshot)
+  progressPath(second).parent.mkdir()
+  shutil.copyfile(progressPath(first), progressPath(second))
+
+  board_sync.restoreReviewNotes(readSnapshot(second), second / ".board")
+
+  restored = (second / ".board" / "reviews" / "P0001-T1-r1.md").read_text(encoding="utf-8")
+  expected = original.replace("abcd1234secret", "<已遮蔽>").replace("C:\\Users\\me\\proj\\a.py", "<路徑>")
+  assert restored == expected
+  secondPlans = loadPlans(second)
+  again = buildSnapshot(stateFromSnapshot(snapshot, secondPlans), secondPlans, projectId, previous=snapshot,
+                        readReview=board_sync.reviewReader(second / ".board"))
+  assert again is snapshot
+
+
+def test_missingReviewFileKeepsPreviousConclusion(tmp_path, writePlan):
+  projectDir = makeProject(tmp_path / "proj", writePlan)
+  writeReview(projectDir, 1, failedReview)
+  plans, state = projectState(projectDir)
+  first = buildSnapshot(state, plans, projectId, readReview=board_sync.reviewReader(projectDir / ".board"))
+  emptyBoard = tmp_path / "empty"
+  assert buildSnapshot(state, plans, projectId, previous=first,
+                       readReview=board_sync.reviewReader(emptyBoard)) is first
+  assert buildSnapshot(state, plans, projectId)["plans"]["P0001"]["tasks"][0]["reviewConclusions"] == {}
+
+
+def test_unreadableReviewFileIsSkipped(tmp_path, writePlan):
+  projectDir = makeProject(tmp_path / "proj", writePlan)
+  reviewsDir = projectDir / ".board" / "reviews"
+  reviewsDir.mkdir(parents=True)
+  (reviewsDir / "P0001-T1-r1.md").write_text("隨便寫的內容", encoding="utf-8")
+  (reviewsDir / "P0001-T3-r1.md").write_text("# P0001 T3 第 1 輪審查：不通過\n\n## 必改\n- 沒有 ref\n\n## 建議\n- （無）\n",
+                                             encoding="utf-8")
+  plans, state = projectState(projectDir)
+  snapshot = buildSnapshot(state, plans, projectId, readReview=board_sync.reviewReader(projectDir / ".board"))
+  assert [task["reviewConclusions"] for task in snapshot["plans"]["P0001"]["tasks"]] == [{}, {}, {}]
+
+
+def test_restoreReviewNotesKeepsExistingLocalFile(tmp_path, writePlan):
+  projectDir = makeProject(tmp_path / "proj", writePlan)
+  writeReview(projectDir, 1, failedReview)
+  plans, state = projectState(projectDir)
+  snapshot = buildSnapshot(state, plans, projectId, readReview=board_sync.reviewReader(projectDir / ".board"))
+  localFile = projectDir / ".board" / "reviews" / "P0001-T1-r1.md"
+  localFile.write_text("本機的版本", encoding="utf-8")
+  board_sync.restoreReviewNotes(snapshot, projectDir / ".board")
+  assert localFile.read_text(encoding="utf-8") == "本機的版本"
 
 
 def test_testResultsKeepConclusionWithoutCommandOrOutput(tmp_path, writePlan):
@@ -282,6 +413,24 @@ def mutate(data, path, value):
   (("plans", "P0001", "tasks", 1, "needs", "reason"), "見 C:\\Users\\me\\a.txt", "reason"),
   (("plans", "P0001", "tasks", 0, "conflictFiles"), ["/etc/passwd"], "conflictFiles"),
   (("plans", "P0001", "tasks", 0, "reviews"), ["../secret.md"], "reviews"),
+  (("plans", "P0001", "tasks", 1, "needs", "reason"), "超時｜Traceback (most recent call last)", "reason"),
+  (("plans", "P0001", "tasks", 1, "needs", "reason"), "失敗 pid 4242", "reason"),
+  (("plans", "P0001", "tasks", 0, "userNote"), "見 C:\\Users\\me\\a.txt", "userNote"),
+  (("plans", "P0001", "tasks", 0, "userNote"), "token=abcd1234secret", "userNote"),
+  (("plans", "P0001", "tasks", 0, "userNote"), "x" * 5000, "userNote"),
+  (("plans", "P0002", "rejectReason"), "見 /home/me/proj/x.md", "rejectReason"),
+  (("plans", "P0001", "tasks", 0, "mergeFailures"), ["\x1b[31mFAILED\x1b[0m"], "mergeFailures"),
+  (("plans", "P0001", "testBaseline", "failures"), ["/home/me/t.py::x"], "failures"),
+  (("plans", "P0001", "tasks", 0, "reviewConclusions"), {"reviews/P0001-T1-r9.md": {
+    "round": 9, "verdict": "fail", "mustFix": [], "suggest": []}}, "r9"),
+  (("plans", "P0001", "tasks", 0, "reviewConclusions"), {"reviews/P0001-T1-r1.md": {
+    "round": 1, "verdict": "fail", "mustFix": [{"ref": "R1", "text": "Bearer abcdefghijklmnop"}], "suggest": []}},
+   "mustFix"),
+  (("plans", "P0001", "tasks", 0, "reviewConclusions"), {"reviews/P0001-T1-r1.md": {
+    "round": 1, "verdict": "亂寫", "mustFix": [], "suggest": []}}, "verdict"),
+  (("plans", "P0001", "tasks", 0, "reviewConclusions"), KeyError, "缺少欄位：reviewConclusions"),
+  (("plans", "P0001", "tasks", 0, "dependsOn"), ["T1"], "循環"),
+  (("plans", "P0001", "tasks", 0, "status"), TaskStatus.mergedUntested, "mergedCommit"),
   (("plans", "P0001", "tasks", 0, "dependsOn"), ["T9"], "T9"),
   (("plans", "P0001", "tasks", 1, "needs"), None, "等你處理"),
   (("plans", "P0001", "tasks", 2, "id"), "T1", "重複"),
@@ -307,6 +456,24 @@ def test_invalidFieldsAreRejected(tmp_path, writePlan, path, value, message):
     assert parseSnapshot(resign(data))["plans"]["P0002"]["tasks"] == []
     return
   with pytest.raises(SyncError, match=message):
+    parseSnapshot(resign(data))
+
+
+def test_dependencyCycleIsRejected(tmp_path, writePlan):
+  data = snapshotBytes(tmp_path, writePlan)
+  tasks = data["plans"]["P0001"]["tasks"]
+  tasks[0]["dependsOn"] = ["T3"]
+  tasks[2]["dependsOn"] = ["T2"]
+  with pytest.raises(SyncError, match="循環.*T1"):
+    parseSnapshot(resign(data))
+
+
+def test_mergedUntestedWithCommitIsAccepted(tmp_path, writePlan):
+  data = snapshotBytes(tmp_path, writePlan)
+  task = data["plans"]["P0001"]["tasks"][2]
+  assert (task["status"], task["mergedCommit"]) == (TaskStatus.mergedUntested, "4" * 40)
+  task["mergedCommit"] = None
+  with pytest.raises(SyncError, match="mergedCommit"):
     parseSnapshot(resign(data))
 
 
