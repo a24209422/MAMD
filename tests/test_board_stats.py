@@ -268,3 +268,21 @@ def test_mergeTestCountsOncePerRunReturnsPerTaskAndReusedSeparately():
   stats = statsOf(timeline.events)["plans"]["P0001"]
   assert stats["tests"] == {"runs": 3, "failed": 2, "returned": 1, "reused": 1}
   assert stats["returnedAfterWrite"] == {"returned": 1, "written": 3}
+
+
+def test_testStatsMixesOldAndMergeEventsWithEachReturnPerTask():
+  timeline = Timeline()
+  timeline.approve([("T1", []), ("T2", [])])
+  for taskId in ("T1", "T2"):
+    timeline.write(taskId, 1)
+  timeline.add("testRun", "T1", 1, passed=False, verdict="newFailure", newFailures=["tests/test_a.py::test_a"])
+  timeline.add("testRun", "T2", 1, passed=True, verdict="passed", newFailures=[])
+  # 一次完整測試涵蓋兩個任務，各自退回都要算，但執行只算一次
+  mergeTestRun(timeline, {"T1": "newFailure", "T2": "stillFailing"}, passed=False)
+  # 舊的 mergeTestRun 可能沒有 outcomes，仍算執行與失敗
+  timeline.add("mergeTestRun", passed=False, covers=["T1"], outcomes=None)
+  # 沿用的結果不算執行，但帶著的退回仍照舊計入
+  mergeTestRun(timeline, {"T2": "newFailure"}, passed=False, reused=True)
+  stats = statsOf(timeline.events)["plans"]["P0001"]
+  assert stats["tests"] == {"runs": 4, "failed": 3, "returned": 4, "reused": 1}
+  assert stats["returnedAfterWrite"] == {"returned": 4, "written": 2}
