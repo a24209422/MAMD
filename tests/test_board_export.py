@@ -7,7 +7,7 @@ import pytest
 
 import board
 import board_git
-from board_core import PlanStatus, deriveState, loadConfig, loadPlans, readEvents
+from board_core import PlanStatus, TaskStatus, deriveState, loadConfig, loadPlans, readEvents
 from board_sync import checkpointPath, loadProgress, progressPath, readSnapshot
 from conftest import git
 from helpers import makeEvent, testConfig
@@ -21,7 +21,9 @@ doneEvents = [
   makeEvent("userDecision", plan="P0004", task="T1", action="done", note=""),
   makeEvent("planCompleted", plan="P0004"),
 ]
-expectedFiles = [".agent-board/progress.json", "plans/0001-first.md", "plans/0002-second.md", "plans/0004-done.md"]
+expectedFiles = [".agent-board/progress.json", "plans/0001-first.md", "plans/0002-second.md", "plans/0004-done.md",
+                 "plans/0005-old-merge.md", "plans/0006-unmerged.md"]
+expectedBranches = ("plan/P0001", "plan/P0005", "plan/P0006", "task/P0001-T1", "task/P0001-T3")
 
 
 def revParse(projectDir, branch):
@@ -32,6 +34,32 @@ def commitIn(path, fileName, text):
   (path / fileName).write_text(text, encoding="utf-8")
   git(path, "add", fileName)
   git(path, "commit", "-q", "-m", f"改 {fileName}")
+
+
+def mergeTaskInMain(projectDir, planIdValue, fileName):
+  # 用真的 commit 與 --no-ff 合併做出已合併的任務；回傳任務成果和合併 commit
+  planBranch, taskBranch = f"plan/{planIdValue}", f"task/{planIdValue}-T1"
+  git(projectDir, "branch", planBranch, "main")
+  git(projectDir, "checkout", "-q", "-b", taskBranch, planBranch)
+  commitIn(projectDir, fileName, f"{planIdValue} 的成果\n")
+  git(projectDir, "checkout", "-q", planBranch)
+  git(projectDir, "merge", "-q", "--no-ff", "-m", f"合併 {taskBranch}", taskBranch)
+  git(projectDir, "checkout", "-q", "main")
+  return revParse(projectDir, taskBranch), revParse(projectDir, planBranch)
+
+
+def oldMergeEvents(planIdValue, taskCommit, mergeCommit):
+  # 舊流程的 taskMerged 沒帶 verify：任務直接完成，不記 mergedCommit
+  return [
+    makeEvent("planSubmitted", plan=planIdValue),
+    makeEvent("planApproved", plan=planIdValue, baseCommit=baseSha, tasks=[
+      {"id": "T1", "text": "舊流程合併的任務", "dependsOn": [], "requirementIds": ["R1"]}]),
+    makeEvent("taskStarted", plan=planIdValue, task="T1", roundNumber=1, agent="claude"),
+    makeEvent("taskWritten", plan=planIdValue, task="T1", commit=taskCommit, summary="完成"),
+    makeEvent("reviewStarted", plan=planIdValue, task="T1", roundNumber=1, agent="codex"),
+    makeEvent("reviewPassed", plan=planIdValue, task="T1", roundNumber=1, notes=f"reviews/{planIdValue}-T1-r1.md"),
+    makeEvent("taskMerged", plan=planIdValue, task="T1", commit=mergeCommit),
+  ]
 
 
 def withRealCommits(events, commits):
@@ -49,6 +77,12 @@ def legacyProject(gitProject, writePlan):
   writePlan("0002-second.md", rows[:1], planId="P0002", projectDir=gitProject)
   writePlan("0003-draft.md", rows[:1], planId="P0003", projectDir=gitProject)
   writePlan("0004-done.md", rows[:1], planId="P0004", projectDir=gitProject)
+  # P0005 進行中、任務已用舊流程合併且 task 分支已刪；P0006 已完成但還沒合併進主分支
+  writePlan("0005-old-merge.md", rows[:1], planId="P0005", projectDir=gitProject)
+  writePlan("0006-unmerged.md", rows[:1], planId="P0006", projectDir=gitProject)
+  oldMerged = mergeTaskInMain(gitProject, "P0005", "t5.txt")
+  git(gitProject, "branch", "-D", "task/P0005-T1")
+  unmerged = mergeTaskInMain(gitProject, "P0006", "t6.txt")
   git(gitProject, "branch", "plan/P0001")
   planPath = board_git.planWorktreePath(gitProject, "P0001")
   git(gitProject, "worktree", "add", "-q", str(planPath), "plan/P0001")
@@ -61,7 +95,9 @@ def legacyProject(gitProject, writePlan):
   git(planPath, "merge", "-q", "--no-ff", "-m", "合併 T3", "task/P0001-T3")
   commits = {"2" * 40: revParse(gitProject, "task/P0001-T1"), "3" * 40: revParse(gitProject, "task/P0001-T3"),
              "4" * 40: revParse(gitProject, "plan/P0001")}
-  writeEvents(gitProject, withRealCommits(projectEvents(gitProject) + doneEvents, commits))
+  writeEvents(gitProject, withRealCommits(projectEvents(gitProject) + doneEvents, commits)
+              + oldMergeEvents("P0005", *oldMerged) + oldMergeEvents("P0006", *unmerged)
+              + [makeEvent("planCompleted", plan="P0006")])
   git(gitProject, "branch", "task/P0004-T1")
   return gitProject
 
@@ -107,7 +143,7 @@ def test_legacyProjectExportRestoresInBlankEnvironment(legacyProject, tmp_path, 
 
 
 def test_exportListsExactCommitPathsAndBranches(legacyProject, capsys):
-  branches = {branch: revParse(legacyProject, branch) for branch in ("plan/P0001", "task/P0001-T1", "task/P0001-T3")}
+  branches = {branch: revParse(legacyProject, branch) for branch in expectedBranches}
 
   assert exportState(legacyProject) == 0
 
@@ -116,6 +152,77 @@ def test_exportListsExactCommitPathsAndBranches(legacyProject, capsys):
   assert section(output, "請 push 這些分支：") == [f"{branch} {sha}" for branch, sha in branches.items()]
   assert readSnapshot(legacyProject)["branches"] == branches
   assert "P0003" not in readSnapshot(legacyProject)["plans"]
+
+
+def test_fixtureCoversOldAndNewMergeStates(legacyProject):
+  state = deriveState(readEvents(legacyProject), loadPlans(legacyProject), testConfig)
+  tasks, plans = state["tasks"], state["plans"]
+
+  assert tasks["P0001/T3"]["mergedCommit"] == revParse(legacyProject, "plan/P0001")
+  assert (tasks["P0005/T1"]["status"], tasks["P0005/T1"]["mergedCommit"]) == (TaskStatus.done, None)
+  assert not board_git.branchExists(legacyProject, "task/P0005-T1")
+  assert (plans["P0005"]["status"], plans["P0006"]["status"]) == (PlanStatus.active, PlanStatus.completed)
+
+
+def recordedResults(snapshot):
+  # 交接檔記下的成果：進行中與完成 plan 裡沒放棄的任務，另一台電腦都要拿得到
+  return {commit for plan in snapshot["plans"].values() if plan["status"] in (PlanStatus.active, PlanStatus.completed)
+          for task in plan["tasks"] if task["status"] != TaskStatus.abandoned
+          for commit in (task["lastCommit"], task["mergedCommit"]) if commit}
+
+
+def pushListed(projectDir, output, remote):
+  # 照輸出實際 push：交接檔所在的主分支加上列出的分支，送到空的 bare repo
+  git(remote.parent, "init", "-q", "--bare", remote.name)
+  refs = ["HEAD:refs/heads/main"] + [f"refs/heads/{line.split()[0]}" for line in section(output, "請 push 這些分支：")]
+  git(projectDir, "push", "-q", str(remote), *refs)
+
+
+def missingResults(remote, commits):
+  return sorted(commit for commit in commits if subprocess.run(
+    ["git", "cat-file", "-e", f"{commit}^{{commit}}"], cwd=remote, capture_output=True).returncode != 0)
+
+
+def test_pushingListedBranchesDeliversEveryRecordedResult(legacyProject, tmp_path, capsys):
+  assert exportState(legacyProject) == 0
+  remote = tmp_path / "remote.git"
+
+  pushListed(legacyProject, capsys.readouterr().out, remote)
+
+  results = recordedResults(readSnapshot(legacyProject))
+  assert len(results) == 5
+  assert missingResults(remote, results) == []
+
+
+def test_completedPlanMergedIntoMainNeedsNoBranches(legacyProject, tmp_path, capsys):
+  git(legacyProject, "merge", "-q", "--no-ff", "-m", "合併 P0006", "plan/P0006")
+  # 合併進主分支並清理後，task 與 plan 分支都不在了，成果靠主分支交付
+  git(legacyProject, "branch", "-D", "task/P0006-T1")
+  git(legacyProject, "branch", "-D", "plan/P0006")
+
+  assert exportState(legacyProject) == 0
+
+  output = capsys.readouterr().out
+  assert "plan/P0006" not in output
+  remote = tmp_path / "remote.git"
+  pushListed(legacyProject, output, remote)
+  assert missingResults(remote, recordedResults(readSnapshot(legacyProject))) == []
+
+
+def test_statusHintsCompletedPlanMergedAfterExport(legacyProject, capsys):
+  assert exportState(legacyProject) == 0
+  git(legacyProject, "merge", "-q", "--no-ff", "-m", "合併 P0006", "plan/P0006")
+  capsys.readouterr()
+
+  # 沒有新事件，但再匯出時不必再 push plan/P0006，交接內容已經不同
+  assert board.cmdStatus(legacyProject) == 0
+  assert "export-state" in capsys.readouterr().out
+
+  assert exportState(legacyProject) == 0
+  assert "plan/P0006" not in readSnapshot(legacyProject)["branches"]
+  capsys.readouterr()
+  assert board.cmdStatus(legacyProject) == 0
+  assert "export-state" not in capsys.readouterr().out
 
 
 def test_exportDoesNotCommitOrChangeTaskStatus(legacyProject):
@@ -206,6 +313,22 @@ def rewindPlanBranch(projectDir):
   git(board_git.planWorktreePath(projectDir, "P0001"), "reset", "-q", "--hard", "HEAD~1")
 
 
+def rewindOldMergedPlanBranch(projectDir):
+  # 舊流程完成的任務沒有 mergedCommit，只能靠 lastCommit 發現 plan 分支丟了成果
+  git(projectDir, "branch", "-f", "plan/P0005", "plan/P0005~1")
+
+
+def dropUnmergedCompletedPlan(projectDir):
+  # 已完成但沒合併進主分支，plan 分支是成果唯一的來源
+  git(projectDir, "branch", "-D", "task/P0006-T1")
+  git(projectDir, "branch", "-D", "plan/P0006")
+
+
+def rewindUnmergedCompletedPlan(projectDir):
+  git(projectDir, "branch", "-D", "task/P0006-T1")
+  git(projectDir, "branch", "-f", "plan/P0006", "plan/P0006~1")
+
+
 @pytest.mark.parametrize("breakSource, keyword", [
   (holdAlfredLock, "Alfred"),
   (leaveHalfWork, "P0001-T1"),
@@ -217,6 +340,9 @@ def rewindPlanBranch(projectDir):
   (dropBranchWithWork, "task/P0001-T3"),
   (rewindTaskBranch, "task/P0001-T3"),
   (rewindPlanBranch, "plan/P0001"),
+  (rewindOldMergedPlanBranch, "plan/P0005"),
+  (dropUnmergedCompletedPlan, "plan/P0006"),
+  (rewindUnmergedCompletedPlan, "plan/P0006"),
 ])
 def test_failedChecksKeepExistingHandoffFile(legacyProject, capsys, breakSource, keyword):
   assert exportState(legacyProject) == 0

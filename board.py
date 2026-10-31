@@ -25,6 +25,7 @@ humanOnlyCommands = {"approve", "reject", "abandon", "decide", "stop", "resume",
 stopReason = "你執行了 stop"
 unexportedHint = ("有進度還沒匯出成交接檔：只 push 程式碼無法交接，請停止 Alfred 後執行 "
                   "python board.py export-state，再 commit、push 列出的檔案與分支")
+mergedStatuses = (TaskStatus.done, TaskStatus.mergedUntested)
 boardPyPath = Path(__file__).resolve()
 snippetPath = boardPyPath.parent / "docs" / "AGENTS-snippet.md"
 installSkillPath = boardPyPath.parent / "install_skill.py"
@@ -201,7 +202,7 @@ def cmdStatus(projectDir, planIdValue=None):
     for task in tasks:
       print(taskStatusLine(task))
   if unexportedProgress(projectDir, plans, loadConfig(projectDir),
-                        lambda state: requiredBranches(projectDir, state)[1]):
+                        lambda state: requiredBranches(projectDir, state)):
     # 進度只在 .board 裡，不提醒的話使用者會以為 push 程式碼就能在另一台電腦接續
     print(unexportedHint)
   return 0
@@ -249,33 +250,65 @@ def worktreeProblems(projectDir, state):
   return [problem for problem in map(worktreeProblem, paths) if problem]
 
 
-def branchNeeds(state, planIdValue):
+def recordedCommits(task):
+  return [commit for commit in (task["lastCommit"], task["mergedCommit"]) if commit]
+
+
+def keptTasks(state, planIdValue):
+  return [task for task in planTasks(state, planIdValue) if task["status"] != TaskStatus.abandoned]
+
+
+def planBranchResults(task):
+  # 已合併的任務 task 分支可能已刪，成果只剩 plan 分支帶著；舊流程合併不記 mergedCommit，只能用 lastCommit 驗
+  if task["status"] in mergedStatuses:
+    return recordedCommits(task)
+  return [task["mergedCommit"]] if task["mergedCommit"] else []
+
+
+def activeNeeds(state, planIdValue):
   # 有 lastCommit 的任務已有成果在分支上，分支不見就無法交接；還沒寫過的排隊任務本來就還沒有分支
   # 第三欄是分支上一定要有的 commit：分支被退回到成果之前，照清單 push 過去也拿不到記錄的成果
-  tasks = planTasks(state, planIdValue)
-  merged = [task["mergedCommit"] for task in tasks if task["mergedCommit"]]
+  tasks = keptTasks(state, planIdValue)
+  merged = [commit for task in tasks for commit in planBranchResults(task)]
   needs = [(board_git.planBranch(planIdValue), any(task["lastCommit"] for task in tasks), merged)]
   return needs + [(board_git.taskBranch(planIdValue, task["task"]), task["lastCommit"] is not None,
                    [task["lastCommit"]] if task["lastCommit"] else [])
                   for task in unfinishedTasks(state, planIdValue)]
 
 
+def completedNeeds(projectDir, state, planIdValue):
+  # 完成的 plan 不會自動合併進交付分支；成果都已在交付分支上才不需要任何分支，task 分支被清掉也沒關係
+  pending = [commit for task in keptTasks(state, planIdValue) for commit in recordedCommits(task)
+             if not board_git.containsCommit(projectDir, "HEAD", commit)]
+  return [(board_git.planBranch(planIdValue), True, pending)] if pending else []
+
+
+def branchNeeds(projectDir, state):
+  needs = []
+  for planState in state["plans"].values():
+    if planState["status"] == PlanStatus.active:
+      needs += activeNeeds(state, planState["id"])
+    elif planState["status"] == PlanStatus.completed:
+      needs += completedNeeds(projectDir, state, planState["id"])
+  return needs
+
+
 def lostCommitProblems(projectDir, name, commits):
   return [f"分支 {name} 沒有記錄中的成果 {commit[:12]}，可能被退回或改寫過；請找回成果再匯出，否則另一台電腦拿不到這些程式"
-          for commit in commits if not board_git.containsCommit(projectDir, name, commit)]
+          for commit in commits if not board_git.containsCommit(projectDir, f"refs/heads/{name}", commit)]
 
 
 def requiredBranches(projectDir, state):
-  # 另一台電腦要從這些分支接續進行中的工作；完成或放棄的任務已合併或不再需要
+  # 交接檔記下的每個成果，都要能從交付分支（交接檔所在的目前分支）或這裡列出的分支取得
   branches = {}
   missing = []
-  for planIdValue in activePlanIds(state):
-    for name, hasWork, commits in branchNeeds(state, planIdValue):
-      if board_git.branchExists(projectDir, name):
-        branches[name] = board_git.runGit(projectDir, "rev-parse", f"refs/heads/{name}")
-        missing += lostCommitProblems(projectDir, name, commits)
-      elif hasWork:
-        missing.append(f"分支 {name} 不存在，但任務已有成果；請找回這個分支再匯出，否則另一台電腦拿不到這些程式")
+  for name, hasWork, commits in branchNeeds(projectDir, state):
+    if board_git.branchExists(projectDir, name):
+      branches[name] = board_git.runGit(projectDir, "rev-parse", f"refs/heads/{name}")
+      missing += lostCommitProblems(projectDir, name, commits)
+    elif hasWork:
+      missing.append(f"分支 {name} 不存在，但任務已有成果；請找回這個分支（完成的 plan 也可以先合併進目前分支）再匯出，"
+                     "否則另一台電腦拿不到這些程式")
   return missing, branches
 
 

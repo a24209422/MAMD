@@ -198,9 +198,9 @@ def taskDiff(projectDir, planIdValue, taskId):
   return runGit(projectDir, "diff", f"{planBranch(planIdValue)}...{taskBranch(planIdValue, taskId)}")
 
 
-def containsCommit(projectDir, branch, commit):
+def containsCommit(projectDir, ref, commit):
   # commit 不存在於本機時 merge-base 也會失敗，一樣當成分支沒帶著它
-  completed = subprocess.run(["git", "merge-base", "--is-ancestor", commit, f"refs/heads/{branch}"],
+  completed = subprocess.run(["git", "merge-base", "--is-ancestor", commit, ref],
                              cwd=projectDir, capture_output=True)
   return completed.returncode == 0
 

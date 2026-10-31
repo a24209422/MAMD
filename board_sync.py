@@ -906,8 +906,10 @@ def unexportedProgress(projectDir, plans, config, readBranches):
     if snapshot is None:
       return progressView(result["state"], snapshot) != canonicalJson({})
     # 和匯出時組出同樣的內容來比：只在分支補 commit 或改 plan 檔、沒有新事件時，匯出也會產生新 revision
-    # 只蓋上本機有的分支：剛 clone 的電腦還沒建出本機分支，不該被當成有新進度
-    branches = {**snapshot["branches"], **readBranches(result["state"])}
+    # 分支都齊全時用和匯出相同的清單，完成的 plan 合併進交付分支後不必再 push 也算新內容
+    # 缺分支時只蓋上本機有的：剛 clone 的電腦還沒建出本機分支，不該被當成有新進度
+    problems, localBranches = readBranches(result["state"])
+    branches = {**snapshot["branches"], **localBranches} if problems else localBranches
     current = buildSnapshot(result["state"], plans, snapshot["projectId"], snapshot, branches,
                             reviewReader(boardDir(projectDir)))
   except SyncError:
