@@ -17,10 +17,15 @@ from board_core import (PlanStatus, TaskStatus, appendEvent, boardDir, deriveSta
 from board_index import buildIndex
 from board_prompts import tddCrapDir
 from board_stats import approvedPlanIds, boardStats, planStats, taskRounds
+from board_sync import ExportError, SyncError, commitPaths, exportProgress, unexportedProgress
+from conductor import processAlive, readLockPid
 
 humanOnlyCommands = {"approve", "reject", "abandon", "decide", "stop", "resume", "cleanup"}
 # board_api 要從暫停事件的原因分辨是不是你按的 stop，兩邊共用同一個字串
 stopReason = "你執行了 stop"
+unexportedHint = ("有進度還沒匯出成交接檔：只 push 程式碼無法交接，請停止 Alfred 後執行 "
+                  "python board.py export-state，再 commit、push 列出的檔案與分支")
+mergedStatuses = (TaskStatus.done, TaskStatus.mergedUntested)
 boardPyPath = Path(__file__).resolve()
 snippetPath = boardPyPath.parent / "docs" / "AGENTS-snippet.md"
 installSkillPath = boardPyPath.parent / "install_skill.py"
@@ -185,7 +190,7 @@ def taskStatusLine(task):
 
 def cmdStatus(projectDir, planIdValue=None):
   loadErrors = []
-  _, state = currentState(projectDir, loadErrors)
+  plans, state = currentState(projectDir, loadErrors)
   printLoadWarnings(loadErrors)
   if state["paused"]:
     print(f"已暫停：{state['pauseReason']}")
@@ -196,6 +201,151 @@ def cmdStatus(projectDir, planIdValue=None):
     print(planStatusLine(planState, tasks))
     for task in tasks:
       print(taskStatusLine(task))
+  if unexportedProgress(projectDir, plans, loadConfig(projectDir),
+                        lambda state: requiredBranches(projectDir, state)):
+    # 進度只在 .board 裡，不提醒的話使用者會以為 push 程式碼就能在另一台電腦接續
+    print(unexportedHint)
+  return 0
+
+
+def alfredProblems(projectDir):
+  pid = readLockPid(projectDir)
+  if pid is not None and processAlive(pid):
+    return [f"Alfred 還在執行（PID {pid}），進度可能還在變動；請先停止 Alfred 再匯出"]
+  return []
+
+
+def unfinishedTasks(state, planIdValue):
+  return [task for task in planTasks(state, planIdValue)
+          if task["status"] not in (TaskStatus.done, TaskStatus.abandoned)]
+
+
+def mainProjectProblems(projectDir):
+  # 主專案停在合併衝突時，plan 檔或其他要提交的檔案可能還是半成品
+  if board_git.mergeInProgress(projectDir) or board_git.unmergedFiles(projectDir):
+    return ["主專案有未解的合併衝突，請先解完衝突並 commit 再匯出"]
+  return []
+
+
+def worktreeProblem(path):
+  if not path.exists():
+    return None
+  if board_git.mergeInProgress(path) or board_git.unmergedFiles(path):
+    return f"worktree {path.name} 有未解的合併衝突，請先解完衝突並 commit"
+  if board_git.hasChanges(path):
+    return f"worktree {path.name} 有還沒 commit 的改動（半成品），請先 commit 或清掉"
+  return None
+
+
+def worktreeProblems(projectDir, state):
+  # 要交付的分支都得檢查：完成、被取代或放棄的 plan 分支也可能要 push，worktree 有半成品就不是完整成果
+  paths = [path for _name, _hasWork, _commits, path in branchNeeds(projectDir, state)]
+  return [problem for problem in map(worktreeProblem, paths) if problem]
+
+
+def recordedCommits(task):
+  return [commit for commit in (task["lastCommit"], task["mergedCommit"]) if commit]
+
+
+def keptTasks(state, planIdValue):
+  return [task for task in planTasks(state, planIdValue) if task["status"] != TaskStatus.abandoned]
+
+
+def planBranchResults(task):
+  # 已合併的任務 task 分支可能已刪，成果只剩 plan 分支帶著；舊流程合併不記 mergedCommit，只能用 lastCommit 驗
+  if task["status"] in mergedStatuses:
+    return recordedCommits(task)
+  return [task["mergedCommit"]] if task["mergedCommit"] else []
+
+
+def activeNeeds(projectDir, state, planIdValue):
+  # 有 lastCommit 的任務已有成果在分支上，分支不見就無法交接；還沒寫過的排隊任務本來就還沒有分支
+  # 第三欄是分支上一定要有的 commit：分支被退回到成果之前，照清單 push 過去也拿不到記錄的成果
+  tasks = keptTasks(state, planIdValue)
+  merged = [commit for task in tasks for commit in planBranchResults(task)]
+  needs = [(board_git.planBranch(planIdValue), any(task["lastCommit"] for task in tasks), merged,
+            board_git.planWorktreePath(projectDir, planIdValue))]
+  return needs + [(board_git.taskBranch(planIdValue, task["task"]), task["lastCommit"] is not None,
+                   [task["lastCommit"]] if task["lastCommit"] else [],
+                   board_git.taskWorktreePath(projectDir, planIdValue, task["task"]))
+                  for task in unfinishedTasks(state, planIdValue)]
+
+
+def settledNeeds(projectDir, state, planIdValue):
+  # 完成、被取代或放棄的 plan 不會自動合併進交付分支；成果都已在交付分支上才不需要任何分支，task 分支被清掉也沒關係
+  # 這些 plan 只有已合併的任務成果還留在快照裡要交付，沒做完的任務已不會再接著做；放棄前已完成的任務仍保有成果
+  pending = [commit for task in keptTasks(state, planIdValue) if task["status"] in mergedStatuses
+             for commit in recordedCommits(task) if not board_git.containsCommit(projectDir, "HEAD", commit)]
+  if not pending:
+    return []
+  return [(board_git.planBranch(planIdValue), True, pending, board_git.planWorktreePath(projectDir, planIdValue))]
+
+
+def branchNeeds(projectDir, state):
+  needs = []
+  for planState in state["plans"].values():
+    if planState["status"] == PlanStatus.active:
+      needs += activeNeeds(projectDir, state, planState["id"])
+    elif planState["status"] in (PlanStatus.completed, PlanStatus.superseded, PlanStatus.abandoned):
+      needs += settledNeeds(projectDir, state, planState["id"])
+  return needs
+
+
+def lostCommitProblems(projectDir, name, commits):
+  return [f"分支 {name} 沒有記錄中的成果 {commit[:12]}，可能被退回或改寫過；請找回成果再匯出，否則另一台電腦拿不到這些程式"
+          for commit in commits if not board_git.containsCommit(projectDir, f"refs/heads/{name}", commit)]
+
+
+def requiredBranches(projectDir, state):
+  # 交接檔記下的每個成果，都要能從交付分支（交接檔所在的目前分支）或這裡列出的分支取得
+  branches = {}
+  missing = []
+  for name, hasWork, commits, _path in branchNeeds(projectDir, state):
+    if board_git.branchExists(projectDir, name):
+      branches[name] = board_git.runGit(projectDir, "rev-parse", f"refs/heads/{name}")
+      missing += lostCommitProblems(projectDir, name, commits)
+    elif hasWork:
+      missing.append(f"分支 {name} 不存在，但任務已有成果；請找回這個分支（完成的 plan 也可以先合併進目前分支）再匯出，"
+                     "否則另一台電腦拿不到這些程式")
+  return missing, branches
+
+
+def cmdExportState(projectDir):
+  if board_git.isLinkedWorktree(projectDir):
+    # 交接檔只能由主專案產生；在 worktree 執行會讀錯 .board，並把交接檔寫進任務分支
+    print("無法匯出交接進度：export-state 只能在主專案執行，請改到主專案資料夾執行")
+    return 1
+
+  def checkSource(state):
+    problems = alfredProblems(projectDir) + mainProjectProblems(projectDir) + worktreeProblems(projectDir, state)
+    if problems:
+      return problems, {}
+    return requiredBranches(projectDir, state)
+
+  try:
+    snapshot, changed = exportProgress(projectDir, loadConfig(projectDir), checkSource)
+  except ExportError as error:
+    problems = error.problems
+  except SyncError as error:
+    problems = [str(error)]
+  else:
+    problems = []
+  if problems:
+    print("無法匯出交接進度，既有交接檔沒有更動：")
+    for problem in problems:
+      print(f"- {problem}")
+    return 1
+  if changed:
+    print(f"已匯出交接進度 revision {snapshot['revision'][:12]}")
+  else:
+    print(f"沒有新進度，沿用 revision {snapshot['revision'][:12]}")
+  print("請 commit 這些檔案：")
+  for path in commitPaths(snapshot):
+    print(f"  {path}")
+  print("請 push 這些分支：")
+  for branch, sha in snapshot["branches"].items():
+    print(f"  {branch} {sha}")
+  print("export-state 不會 commit、push，也不會改任務狀態；請自己 commit 上面的檔案並 push 檔案所在分支與上面的分支")
   return 0
 
 
@@ -718,6 +868,7 @@ def buildParser():
   sub.add_parser("resume")
   sub.add_parser("cleanup").add_argument("plan")
   sub.add_parser("index")
+  sub.add_parser("export-state")
   init = sub.add_parser("init")
   testing = init.add_mutually_exclusive_group()
   testing.add_argument("--tdd", action="store_true", help="寫程式的 agent 照 tdd-crap 寫程式（只適用 Python 專案）")
@@ -752,6 +903,7 @@ def main(argv=None):
     "resume": lambda: cmdResume(projectDir),
     "cleanup": lambda: cmdCleanup(projectDir, args.plan),
     "index": lambda: cmdIndex(projectDir),
+    "export-state": lambda: cmdExportState(projectDir),
     "init": lambda: cmdInit(projectDir, args.tdd, args.source, args.tests, args.test_command, args.skip_tests),
   }
   return commands[args.command]()

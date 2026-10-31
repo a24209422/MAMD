@@ -74,6 +74,13 @@ def mergeInProgress(path):
   return runGit(path, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False) != ""
 
 
+def isLinkedWorktree(path):
+  # 主專案的 git-dir 就是共用的 .git；plan／task worktree 的 git-dir 在 .git/worktrees 底下，兩者不同
+  gitDir = runGit(path, "rev-parse", "--git-dir", check=False)
+  commonDir = runGit(path, "rev-parse", "--git-common-dir", check=False)
+  return (Path(path) / gitDir).resolve() != (Path(path) / commonDir).resolve()
+
+
 def branchExists(projectDir, branch):
   return runGit(projectDir, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False) != ""
 
@@ -189,6 +196,13 @@ def commitAll(path, message):
 
 def taskDiff(projectDir, planIdValue, taskId):
   return runGit(projectDir, "diff", f"{planBranch(planIdValue)}...{taskBranch(planIdValue, taskId)}")
+
+
+def containsCommit(projectDir, ref, commit):
+  # commit 不存在於本機時 merge-base 也會失敗，一樣當成分支沒帶著它
+  completed = subprocess.run(["git", "merge-base", "--is-ancestor", commit, ref],
+                             cwd=projectDir, capture_output=True)
+  return completed.returncode == 0
 
 
 def isMerged(projectDir, planIdValue, taskId):

@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 from board_core import (BoardError, PlanStatus, TaskStatus, applyEvents, boardDir, boardDirName, deriveState,
-                        fileLock, loadPlans, lockFileName, newTaskState, readEvents, taskKey)
+                        eventsFileName, fileLock, loadPlans, lockFileName, newTaskState, readEvents, taskKey)
 from board_review import renderReviewMarkdown, verifyRef
 
 progressDirName = ".agent-board"
@@ -828,3 +828,102 @@ def loadProgress(projectDir, config, plans=None):
     result = acceptUnderLock(projectDir, plans, config)
   result["sync"]["blockedPlans"] = blockChangedPlans(result["state"], result["base"], plans)
   return {"plans": plans, "state": result["state"], "sync": result["sync"]}
+
+
+# 這些情況下本機進度和交接檔的先後關係清楚，才能接著匯出；其餘要先處理交接檔本身
+exportableStatuses = ("none", "same", "accepted")
+
+
+class ExportError(SyncError):
+  def __init__(self, problems):
+    super().__init__("；".join(problems))
+    self.problems = problems
+
+
+def brokenEventLines(projectDir):
+  # readEvents 會跳過壞掉的行，直接匯出就會少掉那些事件，所以匯出前自己逐行檢查
+  path = boardDir(projectDir) / eventsFileName
+  try:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+  except FileNotFoundError:
+    return []
+  broken = []
+  for number, line in enumerate(lines, start=1):
+    if not line.strip():
+      continue
+    try:
+      parsed = json.loads(line)
+    except json.JSONDecodeError:
+      parsed = None
+    if not isinstance(parsed, dict):
+      broken.append(number)
+  return broken
+
+
+def eventProblems(projectDir):
+  return [f"事件紀錄第 {number} 行是殘缺事件，無法完整讀取進度；請修好或刪掉那一行再匯出"
+          for number in brokenEventLines(projectDir)]
+
+
+def syncProblems(sync):
+  if sync["status"] in exportableStatuses:
+    return []
+  return [sync["message"]]
+
+
+def unloadedPlanProblems(projectDir, state, loadErrors):
+  # 重播會整份略過找不到 plan 的事件，checkpoint 又把它們算成已匯出；之後補回 plan 檔也不會再重播
+  referenced = {event.get("plan") for event in readEvents(projectDir) if event.get("plan")}
+  missing = sorted(referenced - set(state["plans"]))
+  if not missing:
+    return []
+  return [f"事件紀錄引用的 {planIdValue} 找不到可讀取的 plan 檔，照樣匯出會永久漏掉它的進度；"
+          "請還原 plans/ 底下對應的 plan 檔再匯出" for planIdValue in missing] + loadErrors
+
+
+def exportProgress(projectDir, config, checkSource):
+  loadErrors = []
+  plans = loadPlans(projectDir, loadErrors)
+  directory = boardDir(projectDir)
+  directory.mkdir(parents=True, exist_ok=True)
+  # 和寫事件共用同一把鎖：檢查到寫檔之間不能有新事件，否則邊界會漏算
+  with fileLock(directory / lockFileName):
+    result = evaluateProgress(projectDir, plans, config)
+    sourceProblems, branches = checkSource(result["state"])
+    # 已接納的基底裡 active plan 的 plan 檔被改過時，用新檔案 hash 配舊任務匯出會把不一致蓋掉
+    changedPlans = list(blockChangedPlans(result["state"], result["base"], plans).values())
+    problems = (eventProblems(projectDir) + syncProblems(result["sync"])
+                + unloadedPlanProblems(projectDir, result["state"], loadErrors) + changedPlans + sourceProblems)
+    if problems:
+      raise ExportError(problems)
+    previous = result["base"]
+    projectId = previous["projectId"] if previous else newProjectId()
+    snapshot = buildSnapshot(result["state"], plans, projectId, previous, branches, reviewReader(directory))
+    writeSnapshot(projectDir, snapshot)
+    # 本機也記下這一版是基底，之後的事件才會被當成接在它後面的新進度，而不是另一條來源
+    writeCheckpoint(projectDir, snapshot, len(readEvents(projectDir)))
+  return snapshot, snapshot is not previous
+
+
+def commitPaths(snapshot):
+  return [f"{progressDirName}/{progressFileName}", *sorted(entry["file"] for entry in snapshot["plans"].values())]
+
+
+def unexportedProgress(projectDir, plans, config, readBranches):
+  result = evaluateProgress(projectDir, plans, config)
+  if result["sync"]["status"] not in exportableStatuses:
+    return False
+  try:
+    snapshot = readSnapshot(projectDir)
+    if snapshot is None:
+      return progressView(result["state"], snapshot) != canonicalJson({})
+    # 和匯出時組出同樣的內容來比：只在分支補 commit 或改 plan 檔、沒有新事件時，匯出也會產生新 revision
+    # 分支都齊全時用和匯出相同的清單，完成的 plan 合併進交付分支後不必再 push 也算新內容
+    # 缺分支時只蓋上本機有的：剛 clone 的電腦還沒建出本機分支，不該被當成有新進度
+    problems, localBranches = readBranches(result["state"])
+    branches = {**snapshot["branches"], **localBranches} if problems else localBranches
+    current = buildSnapshot(result["state"], plans, snapshot["projectId"], snapshot, branches,
+                            reviewReader(boardDir(projectDir)))
+  except SyncError:
+    return False
+  return current is not snapshot
