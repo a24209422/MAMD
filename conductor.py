@@ -16,10 +16,11 @@ from pathlib import Path
 import board_agents
 import board_git
 from board_core import (BoardError, PlanStatus, TaskStatus, agentLanes, appendEvent, boardDir, configProblems,
-                        defaultConfig, deriveState, isPlanFinished, loadConfig, loadPlans, readEvents,
+                        defaultConfig, isPlanFinished, loadConfig, loadPlans, readEvents,
                         readUserConfig, readyTasks, roleChoiceText, roleNames, roleSpec, taskKey, tasksWithStatus)
 from board_prompts import buildResolvePrompt, buildReviewPrompt, buildWritePrompt, reviewerRules, writerRules
 from board_scheduling import availableLane
+from board_sync import loadProgress
 from board_review import (renderReviewMarkdown, reviewFileName, reviewResultSchema, validateReview,
                           validateWriteResult, writeResultSchema)
 
@@ -319,6 +320,9 @@ class Conductor:
     self.recovered = False
     self.notified = set()
     self.onlyPlansCache = {}
+    # 只在啟動後第一次讀進度時接納交接檔；之後換基底會讓執行中的任務和進度對不上
+    self.handoffSettled = False
+    self.sync = None
     # 啟動前的歷史事件不重印，終端機只顯示這次執行期間發生的事
     self.printedCount = len(readEvents(self.projectDir))
     self.roles = {role: self.roleLaunch(roleSpec(self.config, role)) for role in roleNames}
@@ -356,7 +360,12 @@ class Conductor:
     plans = loadPlans(self.projectDir, loadErrors)
     for message in loadErrors:
       self.notifyOnce("警告｜" + message)
-    return plans, deriveState(readEvents(self.projectDir), plans, self.config)
+    loaded = loadProgress(self.projectDir, self.config, plans, accept=not self.handoffSettled)
+    self.handoffSettled = True
+    self.sync = loaded["sync"]
+    if self.sync["message"]:
+      self.notifyOnce("交接檔｜" + self.sync["message"])
+    return plans, loaded["state"]
 
   def notifyOnce(self, message):
     # 每隔幾秒就跑一輪，問題沒解決前每輪都會再遇到同一個錯誤；只印第一次，終端機才不會被洗版
@@ -753,6 +762,9 @@ class Conductor:
                       "reused": reused, **outcome})
 
   def startWrites(self, plans, state):
+    # 有沒接納的新交接檔時，照舊進度派工可能重做另一台電腦已經在做的任務
+    if self.sync and self.sync["status"] == "waiting":
+      return
     for taskState in readyTasks(state):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
         continue

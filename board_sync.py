@@ -661,6 +661,7 @@ unrelatedMessage = "交接檔和本機已接納的版本沒有共同來源，保
 localOnlyMessage = "本機已有進度，交接檔和它沒有共同來源，保留本機進度，沒有覆蓋"
 divergedMessage = ("本機在上次接納的交接版本之後已有新進度，交接檔也有新版本；兩邊都保留、沒有互相覆蓋，"
                    "請決定要接續哪一邊")
+waitingMessage = "交接檔有新版本，但本機 Alfred 正在執行，先維持目前進度、不派新任務；請停止 Alfred 後再接納"
 
 
 def checkpointPath(projectDir):
@@ -820,12 +821,19 @@ def blockChangedPlans(state, base, plans):
   return blocked
 
 
-def loadProgress(projectDir, config, plans=None):
+def holdIncoming(projectDir, plans, config, incoming):
+  # Alfred 照目前的基底派工，執行中換基底會讓它手上的任務和看板對不上，所以先維持本機進度
+  context = {"plans": plans, "config": config, "events": readEvents(projectDir)}
+  return keepLocal(context, readCheckpoint(projectDir), "waiting", waitingMessage, incoming)
+
+
+def loadProgress(projectDir, config, plans=None, accept=True):
   # 所有讀取端共用：以接納的交接快照為基底，再套用本機在那之後的事件；沒有交接檔時照舊重播事件
   plans = loadPlans(projectDir) if plans is None else plans
   result = evaluateProgress(projectDir, plans, config)
   if result["accept"] is not None:
-    result = acceptUnderLock(projectDir, plans, config)
+    result = (acceptUnderLock(projectDir, plans, config) if accept
+              else holdIncoming(projectDir, plans, config, result["base"]))
   result["sync"]["blockedPlans"] = blockChangedPlans(result["state"], result["base"], plans)
   return {"plans": plans, "state": result["state"], "sync": result["sync"]}
 
