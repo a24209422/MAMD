@@ -6,9 +6,10 @@ import board_git
 import board_logs
 from board import approveWarnings, planBlockers, stopReason
 from board_core import (PlanStatus, TaskStatus, agentLanes, boardDir, configProblems, defaultContextWindows,
-                        deriveState, loadConfig, loadPlans, planTasks, readEvents, readUserConfig, roleNames,
+                        loadConfig, loadPlans, planTasks, readEvents, readUserConfig, roleNames,
                         roleSpec, taskKey, tasksWithStatus)
 from board_stats import approvedPlanIds, planStats, taskRounds
+from board_sync import loadProgress
 from conductor import formatEvent, processAlive, readLockPid
 from rtm_graph import asList, formatList, parseArea
 
@@ -26,8 +27,12 @@ def loadSnapshot(projectDir):
   config = loadConfig(projectDir)
   # 設定寫錯時 conductor 會拒絕啟動，儀表板也要說出原因
   warnings += configProblems(readUserConfig(projectDir))
+  loaded = loadProgress(projectDir, config, plans, accept=not conductorStatus(projectDir)["running"])
+  if loaded["sync"]["message"]:
+    # 放進每次輪詢都重算的警告，畫面只要還在讀舊進度，提示就會一直在
+    warnings.append("交接檔｜" + loaded["sync"]["message"])
   return {"plans": plans, "events": events, "config": config, "warnings": warnings,
-          "state": deriveState(events, plans, config)}
+          "state": loaded["state"], "sync": loaded["sync"]}
 
 
 def conductorStatus(projectDir):
@@ -171,6 +176,7 @@ def stateView(projectDir):
     "pauseReason": state["pauseReason"],
     "conductor": conductorStatus(projectDir),
     "warnings": snapshot["warnings"],
+    "sync": snapshot["sync"],
     "roles": {role: roleView(snapshot["config"], role) for role in roleNames},
     "needsYou": needsYouView(projectDir, snapshot),
     "plans": [planSummary(snapshot, planIdValue) for planIdValue in snapshot["plans"]],

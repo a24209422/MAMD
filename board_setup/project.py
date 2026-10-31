@@ -4,7 +4,8 @@ from pathlib import Path
 import subprocess
 
 import board
-from board_core import testConfigProblems
+from board_core import loadConfig, testConfigProblems
+from board_sync import loadProgress
 from . import assets, environment, layout
 
 
@@ -121,4 +122,18 @@ def initialize(project, options=None, toolRoot=None):
     print("請將 .agents/、.claude/、.agent-board/、AGENTS.md、.gitignore 納入 Git。")
     print("換電腦 clone 後再次呼叫 agent-board-init；若技能未顯示，重新開啟 agent。")
     print("Alfred 若已在執行，請重啟以套用新的測試設定。")
+    message = acceptHandoff(project)
+    if message:
+        print(message)
     return 0
+
+
+def acceptHandoff(project):
+    # 換電腦 clone 後 init 一次就把交接進度接起來；只記本機 checkpoint，交接檔本身不改
+    try:
+        sync = loadProgress(project, loadConfig(project), accept=not board.alfredRunning(project))["sync"]
+    except (OSError, ValueError) as error:
+        return f"交接進度沒有接納：{error}"
+    if sync["status"] == "accepted":
+        return f"已接納交接進度（版本 {sync['baseRevision'][:12]}）。"
+    return sync["message"] and f"交接檔｜{sync['message']}"

@@ -16,10 +16,11 @@ from pathlib import Path
 import board_agents
 import board_git
 from board_core import (BoardError, PlanStatus, TaskStatus, agentLanes, appendEvent, boardDir, configProblems,
-                        defaultConfig, deriveState, isPlanFinished, loadConfig, loadPlans, readEvents,
+                        defaultConfig, isPlanFinished, loadConfig, loadPlans, readEvents,
                         readUserConfig, readyTasks, roleChoiceText, roleNames, roleSpec, taskKey, tasksWithStatus)
 from board_prompts import buildResolvePrompt, buildReviewPrompt, buildWritePrompt, reviewerRules, writerRules
 from board_scheduling import availableLane
+from board_sync import loadProgress
 from board_review import (renderReviewMarkdown, reviewFileName, reviewResultSchema, validateReview,
                           validateWriteResult, writeResultSchema)
 
@@ -306,6 +307,8 @@ def baselineReuseCandidates(events, command):
 mergeTestRecordFields = ("commit", "command", "passed", "failures", "qualityChecked", "qualityFailures", "tail")
 # 背景跑完整測試、跑完要移除暫時 worktree 的 job
 detachedTestKinds = ("baseline", "mergeTest")
+# 交接檔有新版本卻沒接納的狀態：分歧要等使用者決定接續哪一邊，不能自己往下派
+heldSyncStatuses = ("waiting", "diverged")
 
 
 class Conductor:
@@ -319,6 +322,9 @@ class Conductor:
     self.recovered = False
     self.notified = set()
     self.onlyPlansCache = {}
+    # 只在啟動後第一次讀進度時接納交接檔；之後換基底會讓執行中的任務和進度對不上
+    self.handoffSettled = False
+    self.sync = None
     # 啟動前的歷史事件不重印，終端機只顯示這次執行期間發生的事
     self.printedCount = len(readEvents(self.projectDir))
     self.roles = {role: self.roleLaunch(roleSpec(self.config, role)) for role in roleNames}
@@ -356,7 +362,12 @@ class Conductor:
     plans = loadPlans(self.projectDir, loadErrors)
     for message in loadErrors:
       self.notifyOnce("警告｜" + message)
-    return plans, deriveState(readEvents(self.projectDir), plans, self.config)
+    loaded = loadProgress(self.projectDir, self.config, plans, accept=not self.handoffSettled)
+    self.handoffSettled = True
+    self.sync = loaded["sync"]
+    if self.sync["message"]:
+      self.notifyOnce("交接檔｜" + self.sync["message"])
+    return plans, loaded["state"]
 
   def notifyOnce(self, message):
     # 每隔幾秒就跑一輪，問題沒解決前每輪都會再遇到同一個錯誤；只印第一次，終端機才不會被洗版
@@ -752,7 +763,14 @@ class Conductor:
                 data={**record, "comparedTo": (info["predecessor"] or {}).get("commit"), "covers": info["covers"],
                       "reused": reused, **outcome})
 
+  def handoffHeld(self):
+    # 有沒接納的新交接檔時，照舊進度派工可能重做另一台電腦已經在做的任務；
+    # 本機已有新進度時判斷結果是 diverged 而不是 waiting，同樣是沒接納的新版本，也要擋
+    return bool(self.sync) and self.sync["status"] in heldSyncStatuses
+
   def startWrites(self, plans, state):
+    if self.handoffHeld():
+      return
     for taskState in readyTasks(state):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
         continue
@@ -1021,6 +1039,8 @@ class Conductor:
     return passed, "\n".join(output.splitlines()[-50:]), failures, qualityChecked, qualityFailures
 
   def startReviews(self, plans, state):
+    if self.handoffHeld():
+      return
     for taskState in tasksWithStatus(state, TaskStatus.toReview):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
         continue

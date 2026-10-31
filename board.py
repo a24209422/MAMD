@@ -17,7 +17,7 @@ from board_core import (PlanStatus, TaskStatus, appendEvent, boardDir, deriveSta
 from board_index import buildIndex
 from board_prompts import tddCrapDir
 from board_stats import approvedPlanIds, boardStats, planStats, taskRounds
-from board_sync import ExportError, SyncError, commitPaths, exportProgress, unexportedProgress
+from board_sync import ExportError, SyncError, commitPaths, exportProgress, loadProgress, unexportedProgress
 from conductor import processAlive, readLockPid
 
 humanOnlyCommands = {"approve", "reject", "abandon", "decide", "stop", "resume", "cleanup"}
@@ -61,9 +61,19 @@ def isHuman():
   return sys.stdin.isatty() and sys.stdout.isatty()
 
 
+def alfredRunning(projectDir):
+  pid = readLockPid(projectDir)
+  return pid is not None and processAlive(pid)
+
+
+def loadedProgress(projectDir, loadErrors=None):
+  return loadProgress(projectDir, loadConfig(projectDir), loadPlans(projectDir, loadErrors),
+                      accept=not alfredRunning(projectDir))
+
+
 def currentState(projectDir, loadErrors=None):
-  plans = loadPlans(projectDir, loadErrors)
-  return plans, deriveState(readEvents(projectDir), plans, loadConfig(projectDir))
+  loaded = loadedProgress(projectDir, loadErrors)
+  return loaded["plans"], loaded["state"]
 
 
 def printLoadWarnings(loadErrors):
@@ -190,8 +200,11 @@ def taskStatusLine(task):
 
 def cmdStatus(projectDir, planIdValue=None):
   loadErrors = []
-  plans, state = currentState(projectDir, loadErrors)
+  loaded = loadedProgress(projectDir, loadErrors)
+  plans, state = loaded["plans"], loaded["state"]
   printLoadWarnings(loadErrors)
+  if loaded["sync"]["message"]:
+    print("交接檔｜" + loaded["sync"]["message"])
   if state["paused"]:
     print(f"已暫停：{state['pauseReason']}")
   for planState in state["plans"].values():
