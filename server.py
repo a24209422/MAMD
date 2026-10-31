@@ -49,12 +49,13 @@ postRoutes = [
   (re.compile(rf"^/api/tasks/({idText})/({idText})/decide$"), "decide"),
   (re.compile(r"^/api/stop$"), "stop"),
   (re.compile(r"^/api/resume$"), "resume"),
+  (re.compile(r"^/api/sync/(incoming|local)$"), "stateSync"),
   (re.compile(r"^/api/roles/(writer|reviewer)$"), "saveRole"),
   (re.compile(r"^/api/models/(writer|reviewer)$"), "models"),
 ]
 projectRoute = re.compile(r"/api/projects/([^/]+)(/.+)")
 # 這些會改看板狀態或設定；未初始化的專案只能看和用終端機，不能替使用者寫入
-boardWrites = {"approve", "reject", "abandon", "decide", "stop", "resume", "saveRole"}
+boardWrites = {"approve", "reject", "abandon", "decide", "stop", "resume", "stateSync", "saveRole"}
 # 指令函式把結果印到 stdout；接住時 stdout 是整個程式共用的，不同專案的 Dashboard 也只能同時有一個寫入在跑
 writeLock = threading.RLock()
 
@@ -119,6 +120,9 @@ class Dashboard:
 
   def resume(self, body):
     return 200, self.runCommand(board.cmdResume)
+
+  def stateSync(self, side, body):
+    return 200, self.runCommand(board.cmdStateSync, side)
 
   def saveRole(self, role, body):
     cli, model, effort = body.get("cli"), body.get("model", ""), body.get("reasoningEffort", "")

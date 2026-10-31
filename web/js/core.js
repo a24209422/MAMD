@@ -200,9 +200,32 @@ function renderChrome() {
   const missing = app.projectMissing ? `<p>server 還沒登錄這個專案（可能重新啟動過）。
     <a class="mini-btn" href="/#overview">返回預設專案</a>
     <button class="mini-btn" type="button" data-project-reopen${writeDisabled()}>重新開啟</button></p>` : '';
-  $('#notice').innerHTML = missing + notes.map(note => `<p>${escapeHtml(note)}</p>`).join('');
-  $('#notice').hidden = !missing && !notes.length;
+  const sync = syncNotice(app.state && app.state.sync);
+  $('#notice').innerHTML = missing + notes.map(note => `<p>${escapeHtml(note)}</p>`).join('') + sync;
+  $('#notice').hidden = !missing && !notes.length && !sync;
   renderProjectBar();
+}
+
+function shortRevision(revision) {
+  return revision ? revision.slice(0, 12) : '無';
+}
+
+// 交接版本、未匯出進度和分歧選擇放在一起，使用者一眼看出這台電腦和交接檔的關係
+function syncNotice(sync) {
+  if (!sync) return '';
+  const lines = [];
+  if (sync.baseRevision || sync.incomingRevision) {
+    lines.push(`<p>交接版本｜本機基底 ${escapeHtml(shortRevision(sync.baseRevision))}｜收到 ${escapeHtml(shortRevision(sync.incomingRevision))}</p>`);
+  }
+  if (sync.unexported) {
+    lines.push('<p>交接檔｜本機有進度還沒匯出：請停止 Alfred 後執行 python board.py export-state，再 commit、push 列出的檔案與分支</p>');
+  }
+  if (sync.choosable) {
+    lines.push(`<p>交接檔｜要接續哪一邊由你決定，選擇前會把兩邊進度備份到 .board/sync-backups，不會刪除分支或 worktree
+      <button class="mini-btn" type="button" data-sync-take="incoming"${writeDisabled()}>接收交接檔</button>
+      <button class="mini-btn" type="button" data-sync-take="local"${writeDisabled()}>保留本機</button></p>`);
+  }
+  return lines.join('');
 }
 
 function projectName(path) {

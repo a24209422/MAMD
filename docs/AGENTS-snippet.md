@@ -62,5 +62,6 @@
 
 ### 不可以做的事
 
-- 不要執行 `approve`、`reject`、`abandon`、`decide`、`stop`、`resume`、`cleanup`，這些只能由使用者執行
+- 不要執行 `approve`、`reject`、`abandon`、`decide`、`stop`、`resume`、`cleanup`、`state-sync`，這些只能由使用者執行
+- 交接檔和本機進度分歧時，不要自己決定接續哪一邊；規劃、writer、reviewer 都只回報分歧，由使用者執行 `state-sync` 選擇
 - 不要修改 `.board/` 底下的任何檔案

@@ -329,8 +329,9 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 | `decide P0007 T2 abandon` | 等你處理的任務：放棄 |
 | `stop`／`resume` | 全部停止／繼續 |
 | `cleanup P0007` | 刪除結束的 plan 的 worktree 與任務分支（`plan/P0007` 保留） |
+| `state-sync --take incoming`／`--take local` | 本機進度和交接檔分歧時，選擇接續交接檔或保留本機；選擇前先備份到 `.board/sync-backups`，不刪除分支、worktree 或未提交檔案 |
 
-`approve`、`reject`、`abandon`、`decide`、`stop`、`resume`、`cleanup` 只能由你在終端機執行，agent 執行會被拒絕。
+`approve`、`reject`、`abandon`、`decide`、`stop`、`resume`、`cleanup`、`state-sync` 只能由你在終端機執行，agent 執行會被拒絕。
 
 `stats` 只讀 `.board/events.jsonl` 和推導出的狀態，不另外記錄資料，舊的 plan 也算得出來：
 
