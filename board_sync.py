@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 from board_core import BoardError, PlanStatus, TaskStatus, deriveState, newTaskState, taskKey
-from board_review import renderReviewMarkdown
+from board_review import renderReviewMarkdown, verifyRef
 
 progressDirName = ".agent-board"
 progressFileName = "progress.json"
@@ -38,10 +38,11 @@ quotedPathPattern = re.compile(r"""(['"])(?:[A-Za-z]:[\\/]|\\\\|/)[^'"\n]*\1""")
 # 前面接著網址的 :/ 或相對路徑的字元時不算絕對路徑，plan/P0001、https://… 才不會被誤遮；
 # 全形標點視為路徑結尾，中文句子裡「路徑，後文」的後文才不會一起被吃掉
 barePathPattern = re.compile(r"""(?<![\w.~-])(?:[A-Za-z]:[\\/]|\\\\)[^\s'"，。；、）」]*"""
-                             r"""|(?<![\w.:~/-])/[^\s'"/，。；、）」]+/[^\s'"，。；、）」]*""")
+                             r"""|(?<![\w.:~/-])/[^\s'"，。；、）」]+""")
 conflictMarkerPattern = re.compile(r"^(?:<{7}|={7}|>{7})(?: |$)", re.MULTILINE)
 # 遮蔽值遇到全形標點與截斷用的「…」就停，重複清理同一段文字結果才會一樣
 secretValue = r"""[^\s'"，。；、）」…]+"""
+secretKey = r"(?i)((?<![a-z])[a-z_-]*(?:token|secret|password|passwd|api[_-]?key)[a-z_-]*\s*[=:：]\s*)"
 # 依序套用：先去掉終端控制碼，再遮蔽憑證與 PID，最後才遮路徑，避免路徑規則先吃掉 token 的前後文
 maskRules = (
   (re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]"), ""),
@@ -51,8 +52,9 @@ maskRules = (
               r"|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|glpat-[A-Za-z0-9_-]{20,})"),
    maskPlaceholder),
   (re.compile(r"(?i)(?<![a-z])(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}"), r"\1 " + maskPlaceholder),
-  (re.compile(r"(?i)((?<![a-z])[a-z_-]*(?:token|secret|password|passwd|api[_-]?key)[a-z_-]*\s*[=:：]\s*)"
-              + secretValue), r"\1" + maskPlaceholder),
+  # 有引號的值整段遮到收尾引號，值裡有空白也不會漏；沒收尾的引號交給下一條照一般值遮
+  (re.compile(secretKey + r"""(["'])[^\n]*?\2"""), r"\1\2" + maskPlaceholder + r"\2"),
+  (re.compile(secretKey + r"""(["']?)""" + secretValue), r"\1\2" + maskPlaceholder),
   (re.compile(r"(?i)(?<![a-z])(pid)(?![a-z])[\s:=#]*\d+"), r"\1 " + maskPlaceholder),
   (quotedPathPattern, lambda match: match.group(1) + pathPlaceholder + match.group(1)),
   (barePathPattern, pathPlaceholder),
@@ -128,6 +130,7 @@ def portableNeeds(needs):
 
 reviewHeaderPattern = re.compile(r"# \S+ \S+ 第 ([1-9]\d*) 輪審查：(通過|不通過)")
 mustFixItemPattern = re.compile(r"\[([^\]\n]*)\] (.*)", re.DOTALL)
+mustFixStartPattern = re.compile(r"- \[([^\]\n]*)\] ")
 
 
 def reviewSections(lines):
@@ -141,30 +144,47 @@ def reviewSections(lines):
   return sections
 
 
-def reviewItems(lines):
+def reviewItems(lines, startsItem):
+  if [line for line in lines if line.strip()] == ["- （無）"]:
+    return []
   items = []
   for line in lines:
-    if line.startswith("- "):
+    # 項目內容本身可能有「- 」開頭的清單行，只有符合項目開頭的行才切新項目，其餘接回上一項
+    if startsItem(line):
       items.append(line[2:])
     elif items:
       items[-1] += "\n" + line
-  items = [item.rstrip("\n") for item in items]
-  return [] if items == ["（無）"] else items
+    elif line.strip():
+      return None
+  return [item.rstrip("\n") for item in items]
 
 
-def parseReviewMarkdown(text):
+def mustFixStarts(refs):
+  # 必改項目一定以審查時允許的 [需求編號] 開頭，內容裡的「- [x] …」不會被當成新項目
+  def startsItem(line):
+    match = mustFixStartPattern.match(line)
+    return match is not None and match.group(1).strip().upper() in refs
+  return startsItem
+
+
+def isSuggestStart(line):
+  return line.startswith("- ")
+
+
+def parseReviewMarkdown(text, refs):
   # 解析 renderReviewMarkdown 的格式；不是這個格式就當讀不到，不猜內容
   lines = text.replace("\r\n", "\n").split("\n")
   header = reviewHeaderPattern.fullmatch(lines[0])
   sections = reviewSections(lines[1:])
   if header is None or not {"必改", "建議"} <= sections.keys():
     return None
-  mustFix = [mustFixItemPattern.fullmatch(item) for item in reviewItems(sections["必改"])]
-  if not all(mustFix):
+  mustFix = reviewItems(sections["必改"], mustFixStarts(refs))
+  suggest = reviewItems(sections["建議"], isSuggestStart)
+  if mustFix is None or suggest is None:
     return None
+  itemMatches = [mustFixItemPattern.fullmatch(item) for item in mustFix]
   return {"round": int(header.group(1)), "verdict": "pass" if header.group(2) == "通過" else "fail",
-          "mustFix": [{"ref": match.group(1), "text": match.group(2)} for match in mustFix],
-          "suggest": reviewItems(sections["建議"])}
+          "mustFix": [{"ref": match.group(1), "text": match.group(2)} for match in itemMatches], "suggest": suggest}
 
 
 def portableConclusion(conclusion):
@@ -187,9 +207,9 @@ def reviewLookup(readReview, previous):
   known = {notes: conclusion for plan in (previous or {}).get("plans", {}).values()
            for task in plan["tasks"] for notes, conclusion in task["reviewConclusions"].items()}
 
-  def lookup(notes):
+  def lookup(notes, refs):
     text = readReview(notes) if readReview else None
-    conclusion = parseReviewMarkdown(text) if text is not None else None
+    conclusion = parseReviewMarkdown(text, refs) if text is not None else None
     return portableConclusion(conclusion) if conclusion else known.get(notes)
   return lookup
 
@@ -197,12 +217,14 @@ def reviewLookup(readReview, previous):
 def reviewConclusions(taskState, lookup):
   # 只帶最後一次審查：writer 重寫時讀的是 lastReviewNotes，看板顯示的是最後一輪
   notesNames = {taskState["lastReviewNotes"], *taskState["reviews"][-1:]} - {None}
-  conclusions = {notes: lookup(notes) for notes in sorted(notesNames)}
+  refs = {ref.upper() for ref in taskState["requirementIds"]} | {verifyRef}
+  conclusions = {notes: lookup(notes, refs) for notes in sorted(notesNames)}
   return {notes: conclusion for notes, conclusion in conclusions.items() if conclusion is not None}
 
 
 def taskEntry(taskState, lookup):
   entry = {"id": taskState["task"], **{field: taskState[field] for field in taskCopyFields}}
+  entry["text"] = portableText(entry["text"])
   entry["userNote"] = portableText(entry["userNote"])
   entry["mergeFailures"] = portableList(entry["mergeFailures"])
   entry["lastTest"] = testSummary(taskState["lastTest"], lastTestFields)
@@ -381,19 +403,19 @@ testSummarySpec = objectOf({}, {
   "covers": optional(listOf(idText)),
 })
 lastTestSpec = objectOf({}, {
-  "source": optional(isText), "verdict": optional(isText), "newFailures": textList, "commit": optional(shaText),
+  "source": optional(noteText), "verdict": optional(noteText), "newFailures": textList, "commit": optional(shaText),
   "passed": optional(isBool), "failures": textList, "qualityChecked": optional(isBool), "qualityFailures": textList,
 })
-needsSpec = objectOf({"kind": isText, "reason": reasonText},
-                     {"stage": optional(isText), "conflicts": listOf(relativePath)})
+needsSpec = objectOf({"kind": noteText, "reason": reasonText},
+                     {"stage": optional(noteText), "conflicts": listOf(relativePath)})
 taskStatuses = tuple(value for name, value in vars(TaskStatus).items() if not name.startswith("_"))
 planStatuses = tuple(value for name, value in vars(PlanStatus).items()
                      if not name.startswith("_") and value != PlanStatus.draft)
 taskSpec = objectOf({
-  "id": idText, "text": isText, "dependsOn": listOf(idText), "requirementIds": listOf(isText),
+  "id": idText, "text": noteText, "dependsOn": listOf(idText), "requirementIds": listOf(noteText),
   "status": oneOf(taskStatuses), "round": isPositive, "maxRounds": isPositive, "userNote": noteText,
   "userDone": isBool, "failStreak": isCount, "lastCommit": optional(shaText), "mergedCommit": optional(shaText),
-  "resolving": isBool, "conflictFiles": listOf(relativePath), "conflictCount": isCount, "lastWriteMode": isText,
+  "resolving": isBool, "conflictFiles": listOf(relativePath), "conflictCount": isCount, "lastWriteMode": noteText,
   "mergeFix": isBool, "mergeFailures": listOf(noteText), "reviews": listOf(optional(reviewNote)),
   "lastReviewNotes": optional(reviewNote), "lastTest": optional(lastTestSpec), "needs": optional(needsSpec),
   "reviewConclusions": mapOf(reviewNote, conclusionSpec),
