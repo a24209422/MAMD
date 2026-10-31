@@ -42,7 +42,9 @@ barePathPattern = re.compile(r"""(?<![\w.~-])(?:[A-Za-z]:[\\/]|\\\\)[^\s'"，。
 conflictMarkerPattern = re.compile(r"^(?:<{7}|={7}|>{7})(?: |$)", re.MULTILINE)
 # 遮蔽值遇到全形標點與截斷用的「…」就停，重複清理同一段文字結果才會一樣
 secretValue = r"""[^\s'"，。；、）」…]+"""
-secretKey = r"(?i)((?<![a-z])[a-z_-]*(?:token|secret|password|passwd|api[_-]?key)[a-z_-]*\s*[=:：]\s*)"
+# 鍵名後可接收尾引號，JSON 與 Python dict 寫法的 "token": "…" 才遮得到
+secretKey = (r"""(?i)((?<![a-z])[a-z_-]*(?:token|secret|password|passwd|api[_-]?key)[a-z_-]*["']?"""
+             r"""\s*[=:：]\s*)""")
 # 依序套用：先去掉終端控制碼，再遮蔽憑證與 PID，最後才遮路徑，避免路徑規則先吃掉 token 的前後文
 maskRules = (
   (re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]"), ""),
@@ -128,24 +130,13 @@ def portableNeeds(needs):
   return picked
 
 
-reviewHeaderPattern = re.compile(r"# \S+ \S+ 第 ([1-9]\d*) 輪審查：(通過|不通過)")
+reviewHeaderPattern = re.compile(r"# (\S+) (\S+) 第 ([1-9]\d*) 輪審查：(通過|不通過)")
 mustFixItemPattern = re.compile(r"\[([^\]\n]*)\] (.*)", re.DOTALL)
 mustFixStartPattern = re.compile(r"- \[([^\]\n]*)\] ")
 
 
-def reviewSections(lines):
-  sections = {}
-  current = None
-  for line in lines:
-    if line.startswith("## "):
-      current = sections.setdefault(line[3:].strip(), [])
-    elif current is not None:
-      current.append(line)
-  return sections
-
-
 def reviewItems(lines, startsItem):
-  if [line for line in lines if line.strip()] == ["- （無）"]:
+  if lines == ["- （無）"]:
     return []
   items = []
   for line in lines:
@@ -154,9 +145,9 @@ def reviewItems(lines, startsItem):
       items.append(line[2:])
     elif items:
       items[-1] += "\n" + line
-    elif line.strip():
+    else:
       return None
-  return [item.rstrip("\n") for item in items]
+  return items
 
 
 def mustFixStarts(refs):
@@ -171,20 +162,33 @@ def isSuggestStart(line):
   return line.startswith("- ")
 
 
+def reviewBody(lines, refs):
+  # 必改正文也可能有「## 」標題，甚至一行「## 建議」，所以不靠標題切區段：
+  # 從最後一個空行後的「## 建議」往前試，寧可把可疑的行留在必改，也不讓必改少一截
+  splits = [index for index in range(4, len(lines)) if lines[index] == "## 建議" and lines[index - 1] == ""]
+  for index in reversed(splits):
+    mustFix = reviewItems(lines[3:index - 1], mustFixStarts(refs))
+    suggest = reviewItems(lines[index + 1:-1], isSuggestStart)
+    if mustFix is not None and suggest is not None:
+      return mustFix, suggest
+  return None
+
+
 def parseReviewMarkdown(text, refs):
   # 解析 renderReviewMarkdown 的格式；不是這個格式就當讀不到，不猜內容
-  lines = text.replace("\r\n", "\n").split("\n")
+  text = text.replace("\r\n", "\n")
+  lines = text.split("\n")
   header = reviewHeaderPattern.fullmatch(lines[0])
-  sections = reviewSections(lines[1:])
-  if header is None or not {"必改", "建議"} <= sections.keys():
+  body = reviewBody(lines, refs) if header and lines[1:3] == ["", "## 必改"] else None
+  if body is None:
     return None
-  mustFix = reviewItems(sections["必改"], mustFixStarts(refs))
-  suggest = reviewItems(sections["建議"], isSuggestStart)
-  if mustFix is None or suggest is None:
-    return None
-  itemMatches = [mustFixItemPattern.fullmatch(item) for item in mustFix]
-  return {"round": int(header.group(1)), "verdict": "pass" if header.group(2) == "通過" else "fail",
-          "mustFix": [{"ref": match.group(1), "text": match.group(2)} for match in itemMatches], "suggest": suggest}
+  itemMatches = [mustFixItemPattern.fullmatch(item) for item in body[0]]
+  conclusion = {"round": int(header.group(3)), "verdict": "pass" if header.group(4) == "通過" else "fail",
+                "mustFix": [{"ref": match.group(1), "text": match.group(2)} for match in itemMatches],
+                "suggest": body[1]}
+  # 重新輸出要和原檔一字不差，才能確定解析沒有漏掉或改動任何內容
+  rendered = renderReviewMarkdown(header.group(1), header.group(2), conclusion["round"], conclusion)
+  return conclusion if rendered == text else None
 
 
 def portableConclusion(conclusion):

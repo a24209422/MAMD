@@ -189,15 +189,16 @@ def test_taskTextAndQuotedSecretsAreMasked(tmp_path, writePlan):
     makeEvent("planSubmitted", plan="P0001"), approval,
     makeEvent("needsYou", plan="P0001", task="T1", kind="noChanges", reason="沒有改動"),
     makeEvent("userDecision", plan="P0001", task="T1", action="retry",
-              note='暫存在 /tmp 與 /secret，token="abc123secret"'),
+              note='暫存在 /tmp 與 /secret，token="abc123secret"，設定 {"token":"abc123secret","password":"p@ssword"}'),
   ]
   plans, state = eventsState(projectDir, events)
   snapshot = buildSnapshot(state, plans, projectId)
   task = snapshot["plans"]["P0001"]["tasks"][0]
   assert task["text"] == "讀 <路徑> 與 token=<已遮蔽>"
-  assert task["userNote"] == '暫存在 <路徑> 與 <路徑>，token="<已遮蔽>"'
+  assert task["userNote"] == ('暫存在 <路徑> 與 <路徑>，token="<已遮蔽>"，'
+                              '設定 {"token":"<已遮蔽>","password":"<已遮蔽>"}')
   text = serializeSnapshot(snapshot)
-  for forbidden in ("alice", "private.txt", "abc123", "/tmp", "/secret"):
+  for forbidden in ("alice", "private.txt", "abc123", "p@ssword", "/tmp", "/secret"):
     assert forbidden not in text
   assert parseSnapshot(text.encode("utf-8")) == snapshot
   restored = stateFromSnapshot(snapshot, plans)
@@ -215,6 +216,8 @@ def test_taskTextAndQuotedSecretsAreMasked(tmp_path, writePlan):
   ('設定 token="abc123secret" 與 password=\'p@ss word\'', '設定 token="<已遮蔽>" 與 password=\'<已遮蔽>\''),
   ("暫存在 /tmp 與 /secret，再看 C:\\x", "暫存在 <路徑> 與 <路徑>，再看 <路徑>"),
   ("改 前端/上傳 與 plan/P0001，比例 1/2", "改 前端/上傳 與 plan/P0001，比例 1/2"),
+  ('{"token":"abc123secret", "password": "p@ssword", \'api_key\':\'k 1\'}',
+   '{"token":"<已遮蔽>", "password": "<已遮蔽>", \'api_key\':\'<已遮蔽>\'}'),
 ])
 def test_portableTextMasksMachineLocalData(text, expected):
   assert board_sync.portableText(text) == expected
@@ -267,7 +270,9 @@ def test_multiLineReviewItemsRoundTrip(tmp_path, writePlan):
   second = makeProject(tmp_path / "電腦2", writePlan)
   review = {"verdict": "fail",
             "mustFix": [{"ref": "R1", "text": "Fix both cases:\n- empty input\n- invalid input"},
-                        {"ref": "驗證", "text": "清單：\n- [x] 已做\n\n- 未做"}],
+                        {"ref": "驗證", "text": "清單：\n- [x] 已做\n\n- 未做"},
+                        {"ref": "R1", "text": "Fix input\n## Details\nReject blank values"},
+                        {"ref": "R1", "text": "看下面\n\n## 建議\n- 不是建議"}],
             "suggest": ["分兩步：\n- 先寫測試"]}
   original = writeReview(first, 1, review)
   plans, state = projectState(first)
@@ -464,6 +469,7 @@ def mutate(data, path, value):
   (("plans", "P0001", "tasks", 0, "userNote"), "x" * 5000, "userNote"),
   (("plans", "P0001", "tasks", 0, "userNote"), "暫存在 /secret", "userNote"),
   (("plans", "P0001", "tasks", 0, "userNote"), 'password="abc123secret"', "userNote"),
+  (("plans", "P0001", "tasks", 0, "userNote"), '{"token":"abc123secret"}', "userNote"),
   (("plans", "P0001", "tasks", 0, "text"), "讀 C:/Users/alice/private.txt", "text"),
   (("plans", "P0001", "tasks", 0, "text"), "設定 token=abc123", "text"),
   (("plans", "P0001", "tasks", 0, "requirementIds"), ["/tmp"], "requirementIds"),
