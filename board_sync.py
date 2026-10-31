@@ -897,15 +897,19 @@ def commitPaths(snapshot):
   return [f"{progressDirName}/{progressFileName}", *sorted(entry["file"] for entry in snapshot["plans"].values())]
 
 
-def unexportedProgress(projectDir, plans, config):
+def unexportedProgress(projectDir, plans, config, readBranches):
   result = evaluateProgress(projectDir, plans, config)
   if result["sync"]["status"] not in exportableStatuses:
     return False
   try:
     snapshot = readSnapshot(projectDir)
+    if snapshot is None:
+      return progressView(result["state"], snapshot) != canonicalJson({})
+    # 和匯出時組出同樣的內容來比：只在分支補 commit 或改 plan 檔、沒有新事件時，匯出也會產生新 revision
+    # 只蓋上本機有的分支：剛 clone 的電腦還沒建出本機分支，不該被當成有新進度
+    branches = {**snapshot["branches"], **readBranches(result["state"])}
+    current = buildSnapshot(result["state"], plans, snapshot["projectId"], snapshot, branches,
+                            reviewReader(boardDir(projectDir)))
   except SyncError:
     return False
-  view = progressView(result["state"], snapshot)
-  if snapshot is None:
-    return view != canonicalJson({})
-  return view != progressView(stateFromSnapshot(snapshot, plans), snapshot)
+  return current is not snapshot

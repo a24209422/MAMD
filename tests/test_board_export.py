@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -33,6 +34,14 @@ def commitIn(path, fileName, text):
   git(path, "commit", "-q", "-m", f"改 {fileName}")
 
 
+def withRealCommits(events, commits):
+  # 重複字元的假 SHA 不在任何分支上，驗不出分支是否真的帶著記錄的成果
+  text = json.dumps(events, ensure_ascii=False)
+  for fake, real in commits.items():
+    text = text.replace(fake, real)
+  return json.loads(text)
+
+
 @pytest.fixture
 def legacyProject(gitProject, writePlan):
   # 升級前的舊專案：只有 .board 事件紀錄，沒有交接檔；有完成、進行中、退回與草稿的 plan
@@ -40,13 +49,19 @@ def legacyProject(gitProject, writePlan):
   writePlan("0002-second.md", rows[:1], planId="P0002", projectDir=gitProject)
   writePlan("0003-draft.md", rows[:1], planId="P0003", projectDir=gitProject)
   writePlan("0004-done.md", rows[:1], planId="P0004", projectDir=gitProject)
-  writeEvents(gitProject, projectEvents(gitProject) + doneEvents)
   git(gitProject, "branch", "plan/P0001")
-  git(gitProject, "worktree", "add", "-q", str(board_git.planWorktreePath(gitProject, "P0001")), "plan/P0001")
+  planPath = board_git.planWorktreePath(gitProject, "P0001")
+  git(gitProject, "worktree", "add", "-q", str(planPath), "plan/P0001")
   taskPath = board_git.taskWorktreePath(gitProject, "P0001", "T1")
   git(gitProject, "worktree", "add", "-q", "-b", "task/P0001-T1", str(taskPath), "plan/P0001")
   commitIn(taskPath, "t1.txt", "T1 寫到一半先 commit\n")
-  git(gitProject, "branch", "task/P0001-T3", "plan/P0001")
+  git(planPath, "checkout", "-q", "-b", "task/P0001-T3")
+  commitIn(planPath, "t3.txt", "T3 的成果\n")
+  git(planPath, "checkout", "-q", "plan/P0001")
+  git(planPath, "merge", "-q", "--no-ff", "-m", "合併 T3", "task/P0001-T3")
+  commits = {"2" * 40: revParse(gitProject, "task/P0001-T1"), "3" * 40: revParse(gitProject, "task/P0001-T3"),
+             "4" * 40: revParse(gitProject, "plan/P0001")}
+  writeEvents(gitProject, withRealCommits(projectEvents(gitProject) + doneEvents, commits))
   git(gitProject, "branch", "task/P0004-T1")
   return gitProject
 
@@ -85,6 +100,10 @@ def test_legacyProjectExportRestoresInBlankEnvironment(legacyProject, tmp_path, 
   assert portableView(loaded["state"]) == sourceView(legacyProject)
   assert loaded["state"]["plans"]["P0004"]["status"] == PlanStatus.completed
   assert loaded["state"]["plans"]["P0001"]["status"] == PlanStatus.active
+  # 新環境還沒建出本機分支，不能誤報成有未匯出的進度
+  capsys.readouterr()
+  assert board.cmdStatus(blank) == 0
+  assert "export-state" not in capsys.readouterr().out
 
 
 def test_exportListsExactCommitPathsAndBranches(legacyProject, capsys):
@@ -178,6 +197,15 @@ def dropBranchWithWork(projectDir):
   git(projectDir, "branch", "-D", "task/P0001-T3")
 
 
+def rewindTaskBranch(projectDir):
+  # 分支還在但退回到成果之前，照清單 push 過去也拿不到任務成果
+  git(projectDir, "branch", "-f", "task/P0001-T3", "task/P0001-T3~1")
+
+
+def rewindPlanBranch(projectDir):
+  git(board_git.planWorktreePath(projectDir, "P0001"), "reset", "-q", "--hard", "HEAD~1")
+
+
 @pytest.mark.parametrize("breakSource, keyword", [
   (holdAlfredLock, "Alfred"),
   (leaveHalfWork, "P0001-T1"),
@@ -187,6 +215,8 @@ def dropBranchWithWork(projectDir):
   (leaveMainProjectConflict, "主專案"),
   (changeApprovedPlan, "plans/0001-first.md"),
   (dropBranchWithWork, "task/P0001-T3"),
+  (rewindTaskBranch, "task/P0001-T3"),
+  (rewindPlanBranch, "plan/P0001"),
 ])
 def test_failedChecksKeepExistingHandoffFile(legacyProject, capsys, breakSource, keyword):
   assert exportState(legacyProject) == 0
@@ -238,6 +268,23 @@ def test_statusHintsUnexportedProgress(legacyProject, capsys):
   writeEvents(legacyProject, [started("T1", roundNumber=2)])
   assert board.cmdStatus(legacyProject) == 0
   assert "export-state" in capsys.readouterr().out
+
+
+def test_statusHintsBranchCommitWithoutNewEvent(legacyProject, capsys):
+  assert exportState(legacyProject) == 0
+  first = readSnapshot(legacyProject)
+  # 使用者自己在任務分支補 commit，沒有新事件，但交接檔記的分支 SHA 已經過時
+  commitIn(board_git.taskWorktreePath(legacyProject, "P0001", "T1"), "t1.txt", "補上的修改\n")
+  capsys.readouterr()
+
+  assert board.cmdStatus(legacyProject) == 0
+  assert "export-state" in capsys.readouterr().out
+
+  assert exportState(legacyProject) == 0
+  assert readSnapshot(legacyProject)["previousRevision"] == first["revision"]
+  capsys.readouterr()
+  assert board.cmdStatus(legacyProject) == 0
+  assert "export-state" not in capsys.readouterr().out
 
 
 def test_statusWithoutPlansHasNoHint(gitProject, capsys):

@@ -200,7 +200,8 @@ def cmdStatus(projectDir, planIdValue=None):
     print(planStatusLine(planState, tasks))
     for task in tasks:
       print(taskStatusLine(task))
-  if unexportedProgress(projectDir, plans, loadConfig(projectDir)):
+  if unexportedProgress(projectDir, plans, loadConfig(projectDir),
+                        lambda state: requiredBranches(projectDir, state)[1]):
     # 進度只在 .board 裡，不提醒的話使用者會以為 push 程式碼就能在另一台電腦接續
     print(unexportedHint)
   return 0
@@ -250,10 +251,18 @@ def worktreeProblems(projectDir, state):
 
 def branchNeeds(state, planIdValue):
   # 有 lastCommit 的任務已有成果在分支上，分支不見就無法交接；還沒寫過的排隊任務本來就還沒有分支
+  # 第三欄是分支上一定要有的 commit：分支被退回到成果之前，照清單 push 過去也拿不到記錄的成果
   tasks = planTasks(state, planIdValue)
-  needs = [(board_git.planBranch(planIdValue), any(task["lastCommit"] for task in tasks))]
-  return needs + [(board_git.taskBranch(planIdValue, task["task"]), task["lastCommit"] is not None)
+  merged = [task["mergedCommit"] for task in tasks if task["mergedCommit"]]
+  needs = [(board_git.planBranch(planIdValue), any(task["lastCommit"] for task in tasks), merged)]
+  return needs + [(board_git.taskBranch(planIdValue, task["task"]), task["lastCommit"] is not None,
+                   [task["lastCommit"]] if task["lastCommit"] else [])
                   for task in unfinishedTasks(state, planIdValue)]
+
+
+def lostCommitProblems(projectDir, name, commits):
+  return [f"分支 {name} 沒有記錄中的成果 {commit[:12]}，可能被退回或改寫過；請找回成果再匯出，否則另一台電腦拿不到這些程式"
+          for commit in commits if not board_git.containsCommit(projectDir, name, commit)]
 
 
 def requiredBranches(projectDir, state):
@@ -261,9 +270,10 @@ def requiredBranches(projectDir, state):
   branches = {}
   missing = []
   for planIdValue in activePlanIds(state):
-    for name, hasWork in branchNeeds(state, planIdValue):
+    for name, hasWork, commits in branchNeeds(state, planIdValue):
       if board_git.branchExists(projectDir, name):
         branches[name] = board_git.runGit(projectDir, "rev-parse", f"refs/heads/{name}")
+        missing += lostCommitProblems(projectDir, name, commits)
       elif hasWork:
         missing.append(f"分支 {name} 不存在，但任務已有成果；請找回這個分支再匯出，否則另一台電腦拿不到這些程式")
   return missing, branches
