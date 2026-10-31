@@ -5,7 +5,8 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from board_core import BoardError
+from board import repoProblems
+from board_core import BoardError, configPath, configProblems, readUserConfig
 
 pathHint = "請輸入專案資料夾的完整路徑，例如 D:\\projects\\demo"
 
@@ -43,6 +44,18 @@ def resolveProjectPath(pathText):
   return path
 
 
+def readiness(path):
+  # 每次都重新檢查：使用者可能剛在終端機裡 init 或修好設定，不必重新開啟專案
+  problems = repoProblems(path)
+  if not configPath(path).is_file():
+    return {"ready": False, "problems": problems + [".board/config.json 不存在：在這個專案執行 board.py init 完成初始化"]}
+  try:
+    problems += [f".board/config.json：{problem}" for problem in configProblems(readUserConfig(path), requireTestChoice=True)]
+  except (OSError, ValueError) as error:
+    problems.append(f".board/config.json 讀不懂，請先手動修正：{error}")
+  return {"ready": not problems, "problems": problems}
+
+
 class ProjectRegistry:
   def __init__(self, defaultPath, makeDashboard):
     self.makeDashboard = makeDashboard
@@ -63,6 +76,9 @@ class ProjectRegistry:
   def get(self, identifier):
     return self.projects.get(identifier)
 
-  def list(self):
+  def all(self):
     with self.lock:
-      return [project.view() for project in self.projects.values()]
+      return list(self.projects.values())
+
+  def list(self):
+    return [project.view() for project in self.all()]
