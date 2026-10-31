@@ -1,3 +1,5 @@
+import pytest
+
 from board_core import PlanStatus, TaskStatus, deriveState, isPlanFinished, readyTasks
 from helpers import approvedEvent, makeEvent, makePlans, testConfig
 
@@ -146,3 +148,76 @@ def test_mergeTestSkippedCompletesWaitingTasks():
   state = stateAfter(*mergedCycle(1), skipped)
   assert task(state)["status"] == TaskStatus.done
   assert isPlanFinished(state, "P0001")
+
+
+def needsYou(kind, **data):
+  return makeEvent("needsYou", plan="P0001", task="T1", kind=kind, reason="停下", **data)
+
+
+def decided(*events, **data):
+  return task(stateAfter(*events, makeEvent("userDecision", plan="P0001", task="T1", **data)))
+
+
+@pytest.mark.parametrize("kind, expected", [
+  ("blocked", TaskStatus.queued), ("noChanges", TaskStatus.queued), ("invalidReview", TaskStatus.toReview),
+  ("mergeFailed", TaskStatus.merging), ("mergeTest", TaskStatus.mergedUntested), ("other", TaskStatus.queued),
+])
+def test_retryReturnsToStageByNeedsKindWithoutSpendingRounds(kind, expected):
+  state = decided(needsYou(kind), action="retry", note="補充")
+  assert (state["status"], state["round"], state["maxRounds"]) == (expected, 1, 3)
+  assert (state["needs"], state["failStreak"], state["userNote"], state["userDone"]) == (None, 0, "補充", False)
+  assert (state["resolving"], state["needsClean"]) == (False, False)
+
+
+def test_retryAfterReviewRoundsAddsOneRound():
+  state = decided(needsYou("rounds"), action="retry")
+  assert (state["status"], state["round"], state["maxRounds"], state["userNote"]) == (TaskStatus.queued, 2, 4, "")
+
+
+def test_retryAfterMergeTestFailureKeepsMergeFixAndNote():
+  events = []
+  for roundNumber in (1, 2, 3):
+    events += [*mergedCycle(roundNumber, commit=f"m{roundNumber}"),
+               mergeTestRun({"T1": {"result": "newFailure", "names": ["t::a"]}}, commit=f"m{roundNumber}")]
+  state = decided(*events, action="retry", note="看 t::a")
+  assert (state["status"], state["round"], state["maxRounds"]) == (TaskStatus.queued, 4, 4)
+  assert (state["mergeFix"], state["mergeFailures"], state["userNote"]) == (True, ["t::a"], "看 t::a")
+
+
+@pytest.mark.parametrize("stage, expected, needsClean", [
+  ("write", TaskStatus.queued, True), ("review", TaskStatus.toReview, False),
+])
+def test_retryAfterAgentFailedReturnsToFailedStage(stage, expected, needsClean):
+  failed = [makeEvent("agentFailed", plan="P0001", task="T1", stage=stage, reason="exit 1")] * 2
+  stuck = task(stateAfter(*failed))
+  assert stuck["needs"]["kind"] == "agentFailed"
+  state = decided(*failed, action="retry")
+  assert (state["status"], state["needsClean"], state["round"], state["maxRounds"]) == (expected, needsClean, 1, 3)
+  assert (state["needs"], state["failStreak"]) == (None, 0)
+
+
+def test_retryAfterMergeConflictResolvesAgain():
+  state = decided(needsYou("mergeConflict", conflicts=["shared.txt"]), action="retry", note="兩邊都留")
+  assert (state["status"], state["resolving"], state["conflictFiles"]) == (TaskStatus.queued, True, ["shared.txt"])
+  assert (state["round"], state["maxRounds"], state["userDone"], state["userNote"]) == (2, 4, False, "兩邊都留")
+  assert state["conflictCount"] == 0
+
+
+def test_doneMergesAgainUnlessAlreadyMerged():
+  state = decided(needsYou("blocked"), action="done", note="不會記")
+  assert (state["status"], state["userDone"], state["needs"], state["userNote"]) == (TaskStatus.merging, True, None, "")
+  merged = decided(needsYou("mergeTest"), action="done")
+  assert (merged["status"], merged["userDone"], merged["needs"]) == (TaskStatus.done, False, None)
+
+
+def test_abandonClearsNeeds():
+  state = decided(needsYou("tests"), action="abandon")
+  assert (state["status"], state["needs"], state["round"], state["maxRounds"]) == (TaskStatus.abandoned, None, 1, 3)
+
+
+def test_decisionIsIgnoredUnlessWaitingForYouOrActionUnknown():
+  notWaiting = decided(action="retry", note="補充")
+  assert (notWaiting["status"], notWaiting["userNote"], notWaiting["round"]) == (TaskStatus.queued, "", 1)
+  unknown = decided(needsYou("rounds"), action="later", note="補充")
+  assert (unknown["status"], unknown["needs"]["kind"], unknown["userNote"]) == (TaskStatus.needsYou, "rounds", "")
+  assert (unknown["round"], unknown["maxRounds"]) == (1, 3)
