@@ -51,14 +51,15 @@ postRoutes = [
   (re.compile(r"^/api/roles/(writer|reviewer)$"), "saveRole"),
   (re.compile(r"^/api/models/(writer|reviewer)$"), "models"),
 ]
+# 指令函式把結果印到 stdout；接住時 stdout 是整個程式共用的，不同專案的 Dashboard 也只能同時有一個寫入在跑
+writeLock = threading.RLock()
 
 
 class Dashboard:
   def __init__(self, projectDir, token):
     self.projectDir = Path(projectDir).resolve()
     self.token = token
-    # 指令函式把結果印到 stdout；接住時 stdout 是整個程式共用的，同一時間只能有一個寫入在跑
-    self.writeLock = threading.RLock()
+    self.writeLock = writeLock
     self.errorLock = threading.Lock()
     self.reportedErrors = set()
     self.modelCatalog = board_models.ModelCatalog(self.projectDir)
