@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from board_core import PlanStatus, TaskStatus, deriveState, loadPlans, readEvents, readyTasks
+from board_core import (PlanStatus, TaskStatus, deriveState, loadPlans, readEvents, readyTasks, taskKey,
+                        tasksWithStatus)
 from board_sync import (buildSnapshot, checkpointPath, loadProgress, progressPath, readCheckpoint, writeSnapshot)
 from helpers import makeEvent, testConfig
 from test_board_sync import approved, baseSha, makeProject, portableView, projectEvents, projectId, rows
@@ -301,6 +302,34 @@ def test_changedPlanFileBlocksApprovedPlan(tmp_path, writePlan):
   assert loaded["state"]["plans"]["P0001"]["syncBlocked"] == reason
   assert loaded["state"]["plans"]["P0003"]["status"] == PlanStatus.draft
   assert [task for task in readyTasks(loaded["state"]) if task["plan"] == "P0001"] == []
+
+
+def test_changedPlanFileBlocksEveryContinuation(tmp_path, writePlan):
+  source = richProject(tmp_path / "A", writePlan)
+  target = richProject(tmp_path / "B", writePlan)
+  writeSnapshot(target, snapshotOf(source, richEvents()))
+  statuses = (TaskStatus.queued, TaskStatus.testing, TaskStatus.toReview, TaskStatus.merging, TaskStatus.needsYou)
+  assert all(tasksWithStatus(load(target)["state"], status) for status in statuses)
+  writePlan("0001-plan.md", rows[:2], planId="P0001", projectDir=target)
+
+  state = load(target)["state"]
+
+  assert {status: tasksWithStatus(state, status) for status in statuses} == {status: [] for status in statuses}
+  assert readyTasks(state) == []
+
+
+def test_rejectedPlanEditedAndReapprovedContinues(tmp_path, writePlan):
+  source, target = machines(tmp_path, writePlan)
+  writeSnapshot(target, snapshotOf(source, projectEvents(source)))
+  load(target)
+  writePlan("0002-second.md", rows[:2], planId="P0002", projectDir=target)
+  writeEvents(target, [makeEvent("planSubmitted", plan="P0002"), approvedWith("P0002", ["T1"])])
+
+  loaded = load(target)
+
+  assert loaded["sync"]["blockedPlans"] == {}
+  assert "syncBlocked" not in loaded["state"]["plans"]["P0002"]
+  assert "P0002/T1" in [taskKey(task["plan"], task["task"]) for task in readyTasks(loaded["state"])]
 
 
 def test_missingPlanFileBlocksApprovedPlan(tmp_path, writePlan):

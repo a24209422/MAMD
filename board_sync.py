@@ -811,7 +811,9 @@ def blockChangedPlans(state, base, plans):
   blocked = {}
   for planIdValue, entry in (base["plans"] if base else {}).items():
     planState = state["plans"][planIdValue]
-    reason = planFileProblem(plans.get(planIdValue), entry) if planState["status"] == PlanStatus.active else None
+    # 只有交接時就已核准的 plan 才要對 hash；退回或待核准的版本在本機改過再核准是正常流程，舊 hash 不算數
+    continued = entry["status"] == PlanStatus.active and planState["status"] == PlanStatus.active
+    reason = planFileProblem(plans.get(planIdValue), entry) if continued else None
     if reason:
       planState["syncBlocked"] = reason
       blocked[planIdValue] = reason

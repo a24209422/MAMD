@@ -733,9 +733,6 @@ def readyTasks(state):
     return []
   ready = []
   for taskState in tasksWithStatus(state, TaskStatus.queued):
-    # plan 檔和交接進度對不上時不能照舊任務繼續做；仍算進行中，看板才看得到原因
-    if state["plans"][taskState["plan"]].get("syncBlocked"):
-      continue
     dependencies = [state["tasks"].get(taskKey(taskState["plan"], dependencyId)) for dependencyId in taskState["dependsOn"]]
     # 已合併待測試的前置已經在 plan 分支裡，依賴它的任務不必等合併後測試
     satisfied = (TaskStatus.done, TaskStatus.mergedUntested)
@@ -745,8 +742,11 @@ def readyTasks(state):
 
 
 def tasksWithStatus(state, status):
+  # 派工、測試、審查、合併和等你處理都從這裡取任務；plan 檔和交接進度對不上時全部不接續，
+  # plan 仍算進行中，看板才看得到原因
   return [taskState for taskState in state["tasks"].values()
-          if taskState["status"] == status and state["plans"][taskState["plan"]]["status"] == PlanStatus.active]
+          if taskState["status"] == status and state["plans"][taskState["plan"]]["status"] == PlanStatus.active
+          and not state["plans"][taskState["plan"]].get("syncBlocked")]
 
 
 def isPlanFinished(state, planIdValue):
