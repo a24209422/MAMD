@@ -6,12 +6,13 @@ import pytest
 
 import board
 import board_api
-from board_core import PlanStatus, TaskStatus, readEvents
+import board_git
+from board_core import PlanStatus, TaskStatus, readEvents, tasksWithStatus
 from board_setup.project import Options, initialize
 from board_sync import checkpointPath, progressPath, readCheckpoint, readSnapshot
 from conductor import Conductor
 from conftest import git
-from helpers import fakeConfig
+from helpers import fakeConfig, makeEvent
 from test_board_export import exportState, holdAlfredLock, legacyProject, pushListed, section  # noqa: F401
 from test_board_setup import toolRoot
 from test_board_sync_load import started, writeEvents
@@ -76,9 +77,9 @@ def test_laterPullUpdatesStatusAndBoardWithoutInit(computers, capsys):
   updated = publish(source, capsys, remote)
   git(clone, "pull", "-q", "--ff-only")
 
-  assert "  T1 寫程式中（第 2/3 輪）" in planLines(statusOutput(clone, capsys))
-  # 已開著的頁面輪詢 /api/state 時內容變了就重畫，新開的頁面也讀同一份
+  # 已開著的頁面輪詢 /api/state 時內容變了就重畫，新開的頁面也讀同一份；先讀 API，確認輪詢本身就會接納
   after = board_api.stateView(clone)
+  assert "  T1 寫程式中（第 2/3 輪）" in planLines(statusOutput(clone, capsys))
   assert after != before
   assert after["sync"]["baseRevision"] == updated["revision"]
   statuses = {(task["plan"], task["task"]): task["status"] for task in after["tasks"]}
@@ -179,6 +180,72 @@ def test_alfredAcceptsAtStartupButHoldsHandoffArrivingWhileRunning(computers, ca
   assert checkpointPath(clone).read_bytes() == checkpoint
   assert readSnapshot(clone)["revision"] == updated["revision"]
   assert sum("請停止 Alfred" in message for message in messages) == 1
+
+
+def stubLaunches(alfred, monkeypatch, launched, recordFirst=False):
+  # 不真的啟動 agent；recordFirst 時第一個派出的任務照實記下開始與寫完，讓本機在接納後有真實進度、又留下待審的任務
+  def startWrite(plan, taskState, lane):
+    if recordFirst and not launched:
+      alfred.event("taskStarted", {**taskState, "agent": lane})
+      alfred.event("taskWritten", taskState, commit="2" * 40, summary="完成")
+    launched.append(("write", taskState["plan"], taskState["task"]))
+  monkeypatch.setattr(alfred, "startWrite", startWrite)
+  monkeypatch.setattr(alfred, "startReview", lambda plan, taskState, lane: launched.append(
+    ("review", taskState["plan"], taskState["task"])))
+
+
+def taskWrittenInSource(source):
+  commit = board_git.runGit(source, "rev-parse", "refs/heads/task/P0001-T1")
+  return [started("T1", roundNumber=2), makeEvent("taskWritten", plan="P0001", task="T1", commit=commit, summary="完成")]
+
+
+def test_waitingHandoffAlsoHoldsPendingReviews(computers, capsys, monkeypatch):
+  source, clone, remote = computers
+  writeEvents(source, taskWrittenInSource(source))
+  publish(source, capsys, remote)
+  git(clone, "pull", "-q", "--ff-only")
+  launched = []
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+  stubLaunches(alfred, monkeypatch, launched)
+  plans, state = alfred.currentState()
+  alfred.startReviews(plans, state)
+  assert ("review", "P0001", "T1") in launched
+
+  launched.clear()
+  writeEvents(source, [makeEvent("reviewStarted", plan="P0001", task="T1", roundNumber=2, agent="codex")])
+  publish(source, capsys, remote)
+  git(clone, "pull", "-q", "--ff-only")
+  plans, state = alfred.currentState()
+  alfred.startReviews(plans, state)
+  alfred.startWrites(plans, state)
+
+  assert alfred.sync["status"] == "waiting"
+  assert state["tasks"]["P0001/T1"]["status"] == TaskStatus.toReview
+  assert launched == []
+
+
+def test_localProgressThenNewHandoffKeepsHoldingDispatch(computers, capsys, monkeypatch):
+  source, clone, remote = computers
+  messages, launched = [], []
+  alfred = Conductor(clone, config=fakeConfig(maxParallel=1), out=messages.append)
+  stubLaunches(alfred, monkeypatch, launched, recordFirst=True)
+  plans, state = alfred.currentState()
+  alfred.startWrites(plans, state)
+  assert launched and [event["type"] for event in readEvents(clone)[-2:]] == ["taskStarted", "taskWritten"]
+
+  launched.clear()
+  writeEvents(source, [started("T1", roundNumber=2)])
+  publish(source, capsys, remote)
+  git(clone, "pull", "-q", "--ff-only")
+  for _ in range(2):
+    plans, state = alfred.currentState()
+    assert tasksWithStatus(state, TaskStatus.toReview)
+    alfred.startReviews(plans, state)
+    alfred.startWrites(plans, state)
+
+  assert alfred.sync["status"] == "diverged"
+  assert launched == []
+  assert sum("交接檔｜" in message for message in messages) == 1
 
 
 def test_stoppingAlfredAcceptsWaitingProgress(pulledWhileAlfredRuns, capsys):

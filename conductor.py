@@ -307,6 +307,8 @@ def baselineReuseCandidates(events, command):
 mergeTestRecordFields = ("commit", "command", "passed", "failures", "qualityChecked", "qualityFailures", "tail")
 # 背景跑完整測試、跑完要移除暫時 worktree 的 job
 detachedTestKinds = ("baseline", "mergeTest")
+# 交接檔有新版本卻沒接納的狀態：分歧要等使用者決定接續哪一邊，不能自己往下派
+heldSyncStatuses = ("waiting", "diverged")
 
 
 class Conductor:
@@ -761,9 +763,13 @@ class Conductor:
                 data={**record, "comparedTo": (info["predecessor"] or {}).get("commit"), "covers": info["covers"],
                       "reused": reused, **outcome})
 
+  def handoffHeld(self):
+    # 有沒接納的新交接檔時，照舊進度派工可能重做另一台電腦已經在做的任務；
+    # 本機已有新進度時判斷結果是 diverged 而不是 waiting，同樣是沒接納的新版本，也要擋
+    return bool(self.sync) and self.sync["status"] in heldSyncStatuses
+
   def startWrites(self, plans, state):
-    # 有沒接納的新交接檔時，照舊進度派工可能重做另一台電腦已經在做的任務
-    if self.sync and self.sync["status"] == "waiting":
+    if self.handoffHeld():
       return
     for taskState in readyTasks(state):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
@@ -1033,6 +1039,8 @@ class Conductor:
     return passed, "\n".join(output.splitlines()[-50:]), failures, qualityChecked, qualityFailures
 
   def startReviews(self, plans, state):
+    if self.handoffHeld():
+      return
     for taskState in tasksWithStatus(state, TaskStatus.toReview):
       if taskKey(taskState["plan"], taskState["task"]) in self.jobs:
         continue
