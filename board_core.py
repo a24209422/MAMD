@@ -702,6 +702,11 @@ def deriveState(events, plans, config):
                                    "baseCommit": None, "testBaseline": None, "rejectReason": "",
                                    "testTiming": None, "mergeTest": {"lastTested": None, "split": None},
                                    "meta": plan["meta"]}
+  return applyEvents(state, events, plans, config)
+
+
+def applyEvents(state, events, plans, config):
+  # 交接快照還原出的狀態也要接著套用本機事件，所以重播和收尾跟建初始狀態分開
   for event in events:
     eventType = event.get("type")
     if eventType == "paused":
@@ -728,6 +733,9 @@ def readyTasks(state):
     return []
   ready = []
   for taskState in tasksWithStatus(state, TaskStatus.queued):
+    # plan 檔和交接進度對不上時不能照舊任務繼續做；仍算進行中，看板才看得到原因
+    if state["plans"][taskState["plan"]].get("syncBlocked"):
+      continue
     dependencies = [state["tasks"].get(taskKey(taskState["plan"], dependencyId)) for dependencyId in taskState["dependsOn"]]
     # 已合併待測試的前置已經在 plan 分支裡，依賴它的任務不必等合併後測試
     satisfied = (TaskStatus.done, TaskStatus.mergedUntested)

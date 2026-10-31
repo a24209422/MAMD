@@ -7,13 +7,17 @@ import time
 import uuid
 from pathlib import Path
 
-from board_core import BoardError, PlanStatus, TaskStatus, deriveState, newTaskState, taskKey
+from board_core import (BoardError, PlanStatus, TaskStatus, applyEvents, boardDir, boardDirName, deriveState,
+                        fileLock, loadPlans, lockFileName, newTaskState, readEvents, taskKey)
 from board_review import renderReviewMarkdown, verifyRef
 
 progressDirName = ".agent-board"
 progressFileName = "progress.json"
 formatName = "agent-board-progress"
 formatVersion = 1
+checkpointFileName = "sync-checkpoint.json"
+checkpointFormat = "agent-board-checkpoint"
+checkpointVersion = 1
 maxReasonLength = 500
 maxNoteLength = 2000
 pathPlaceholder = "<路徑>"
@@ -577,7 +581,7 @@ def readSnapshot(projectDir):
     raise SyncError(f"{progressDirName}/{progressFileName}：{error}") from None
 
 
-def replaceWithRetry(source, target, attempts=20):
+def replaceWithRetry(source, target, label, attempts=20):
   for _ in range(attempts):
     try:
       os.replace(source, target)
@@ -585,24 +589,27 @@ def replaceWithRetry(source, target, attempts=20):
     except PermissionError:
       # Windows 上防毒或編輯器短暫開著檔案時 replace 會被拒絕，稍等再試
       time.sleep(0.05)
-  raise SyncError(f"{progressDirName}/{progressFileName} 被其他程式占用，無法更新，請關掉開著它的程式再試")
+  raise SyncError(f"{label} 被其他程式占用，無法更新，請關掉開著它的程式再試")
+
+
+def writeAtomically(path, text, label):
+  path.parent.mkdir(parents=True, exist_ok=True)
+  temporary = path.with_name(path.name + ".tmp")
+  try:
+    with open(temporary, "wb") as handle:
+      handle.write(text.encode("utf-8"))
+      handle.flush()
+      os.fsync(handle.fileno())
+    replaceWithRetry(temporary, path, label)
+  finally:
+    if temporary.exists():
+      temporary.unlink()
 
 
 def writeSnapshot(projectDir, snapshot):
   # 先驗證再寫：不合格的內容不能蓋掉原本可用的交接檔
   validateSnapshot(snapshot)
-  path = progressPath(projectDir)
-  path.parent.mkdir(parents=True, exist_ok=True)
-  temporary = path.with_name(progressFileName + ".tmp")
-  try:
-    with open(temporary, "wb") as handle:
-      handle.write(serializeSnapshot(snapshot).encode("utf-8"))
-      handle.flush()
-      os.fsync(handle.fileno())
-    replaceWithRetry(temporary, path)
-  finally:
-    if temporary.exists():
-      temporary.unlink()
+  writeAtomically(progressPath(projectDir), serializeSnapshot(snapshot), f"{progressDirName}/{progressFileName}")
 
 
 def restoreTask(planState, entry):
@@ -644,3 +651,178 @@ def stateFromSnapshot(snapshot, plans):
   for planIdValue, entry in snapshot["plans"].items():
     restorePlan(state, state["plans"][planIdValue], entry)
   return state
+
+
+checkpointLabel = f"{boardDirName}/{checkpointFileName}"
+pauseEvents = ("paused", "resumed")
+otherProjectMessage = "交接檔的專案識別和本機已接納的進度不同，保留本機進度，沒有覆蓋"
+olderMessage = "交接檔比本機已接納的版本舊，保留本機進度，沒有套用"
+unrelatedMessage = "交接檔和本機已接納的版本沒有共同來源，保留本機進度，沒有覆蓋"
+localOnlyMessage = "本機已有進度，交接檔和它沒有共同來源，保留本機進度，沒有覆蓋"
+divergedMessage = ("本機在上次接納的交接版本之後已有新進度，交接檔也有新版本；兩邊都保留、沒有互相覆蓋，"
+                   "請決定要接續哪一邊")
+
+
+def checkpointPath(projectDir):
+  return boardDir(projectDir) / checkpointFileName
+
+
+def checkCheckpoint(data):
+  if not isinstance(data, dict) or data.get("format") != checkpointFormat or data.get("version") != checkpointVersion:
+    raise SyncError("不是這個版本的本機同步紀錄")
+  eventCount = data.get("eventCount")
+  if type(eventCount) is not int or eventCount < 0:
+    raise SyncError("eventCount 必須是非負整數")
+  validateSnapshot(data.get("base"))
+
+
+def readCheckpoint(projectDir):
+  try:
+    content = checkpointPath(projectDir).read_bytes()
+  except FileNotFoundError:
+    return None
+  try:
+    data = json.loads(decodeContent(content))
+    checkCheckpoint(data)
+  except (json.JSONDecodeError, SyncError) as error:
+    raise SyncError(f"{checkpointLabel} 損毀：{error}") from None
+  return data
+
+
+def writeCheckpoint(projectDir, base, eventCount):
+  data = {"format": checkpointFormat, "version": checkpointVersion, "eventCount": eventCount, "base": base}
+  checkCheckpoint(data)
+  writeAtomically(checkpointPath(projectDir), serializeSnapshot(data), checkpointLabel)
+
+
+def deriveFromBase(base, events, eventCount, plans, config):
+  # 邊界之前的事件已經算在交接快照裡，再重播會重複核准、多加輪次；只有暫停是本機設定要沿用
+  state = stateFromSnapshot(base, plans)
+  earlier = [event for event in events[:eventCount] if event.get("type") in pauseEvents]
+  return applyEvents(state, earlier + events[eventCount:], plans, config)
+
+
+def progressView(state, base):
+  # 只比交接檔會帶的內容：對話、agent、暫停這些本機欄位變了不算新進度
+  lookup = reviewLookup(None, base)
+  return canonicalJson({planIdValue: planEntry(state, planState, {}, lookup)
+                        for planIdValue, planState in state["plans"].items() if planState["status"] != PlanStatus.draft})
+
+
+def syncInfo(status, message, base, incoming):
+  return {"status": status, "message": message, "baseRevision": base["revision"] if base else None,
+          "incomingRevision": incoming["revision"] if incoming else None, "blockedPlans": {}}
+
+
+def localState(context, checkpoint):
+  if checkpoint is None:
+    return deriveState(context["events"], context["plans"], context["config"])
+  return deriveFromBase(checkpoint["base"], context["events"], checkpoint["eventCount"], context["plans"],
+                        context["config"])
+
+
+def keepLocal(context, checkpoint, status, message="", incoming=None, state=None):
+  base = checkpoint["base"] if checkpoint else None
+  return {"state": state or localState(context, checkpoint), "base": base, "accept": None,
+          "sync": syncInfo(status, message, base, incoming)}
+
+
+def acceptIncoming(context, incoming):
+  eventCount = len(context["events"])
+  state = deriveFromBase(incoming, context["events"], eventCount, context["plans"], context["config"])
+  return {"state": state, "base": incoming, "accept": eventCount, "sync": syncInfo("accepted", "", incoming, incoming)}
+
+
+def untouchedView(context, base):
+  return progressView(deriveFromBase(base, [], 0, context["plans"], context["config"]), base)
+
+
+def judgeFirstSnapshot(context, incoming):
+  # 本機從沒接納過交接檔：沒有進度或進度和交接檔相同才接納，否則分不出哪邊較新，不拿時間戳硬選
+  local = localState(context, None)
+  # 沒有事件也可能有非草稿：被新 plan 取代的草稿會算成被取代，所以和空事件的結果比，不和空白比
+  blank = progressView(deriveState([], context["plans"], context["config"]), incoming)
+  if progressView(local, incoming) not in (blank, untouchedView(context, incoming)):
+    return keepLocal(context, None, "unrelated", localOnlyMessage, incoming, local)
+  return acceptIncoming(context, incoming)
+
+
+def judgeDescendant(context, checkpoint, incoming):
+  base = checkpoint["base"]
+  local = localState(context, checkpoint)
+  if progressView(local, base) != untouchedView(context, base):
+    return keepLocal(context, checkpoint, "diverged", divergedMessage, incoming, local)
+  return acceptIncoming(context, incoming)
+
+
+def judgeSnapshot(context, checkpoint, incoming):
+  if checkpoint is None:
+    return judgeFirstSnapshot(context, incoming)
+  base = checkpoint["base"]
+  if base["projectId"] != incoming["projectId"]:
+    return keepLocal(context, checkpoint, "unrelated", otherProjectMessage, incoming)
+  if base["revision"] == incoming["revision"]:
+    return keepLocal(context, checkpoint, "same", "", incoming)
+  # 交接檔帶著完整的前序版本鏈，中間跳過幾版也認得出是後繼
+  if base["revision"] in incoming["ancestors"]:
+    return judgeDescendant(context, checkpoint, incoming)
+  if incoming["revision"] in base["ancestors"]:
+    return keepLocal(context, checkpoint, "older", olderMessage, incoming)
+  return keepLocal(context, checkpoint, "unrelated", unrelatedMessage, incoming)
+
+
+def evaluateProgress(projectDir, plans, config):
+  context = {"plans": plans, "config": config, "events": readEvents(projectDir)}
+  try:
+    checkpoint = readCheckpoint(projectDir)
+  except SyncError as error:
+    return keepLocal(context, None, "error", str(error))
+  try:
+    incoming = readSnapshot(projectDir)
+  except SyncError as error:
+    return keepLocal(context, checkpoint, "error", str(error))
+  if incoming is None:
+    return keepLocal(context, checkpoint, "none")
+  return judgeSnapshot(context, checkpoint, incoming)
+
+
+def acceptUnderLock(projectDir, plans, config):
+  directory = boardDir(projectDir)
+  directory.mkdir(parents=True, exist_ok=True)
+  # 判斷之後 conductor 可能又寫了事件，鎖住重新判斷，邊界才不會把沒算進快照的事件跳過
+  with fileLock(directory / lockFileName):
+    result = evaluateProgress(projectDir, plans, config)
+    if result["accept"] is not None:
+      writeCheckpoint(projectDir, result["base"], result["accept"])
+      restoreReviewNotes(result["base"], directory)
+  return result
+
+
+def planFileProblem(plan, entry):
+  if plan is None or not plan.get("path"):
+    return f"找不到 {entry['file']}，無法接續這份已核准的 plan；請先拉下包含這個 plan 檔的 commit"
+  if planFileHash(plan["path"]) != entry["sha256"]:
+    return (f"{entry['file']} 和交接進度記錄的內容不同，核准後的 plan 被改過，不能照原本的任務接續；"
+            "請還原 plan 檔，或另外送出新的 plan")
+  return None
+
+
+def blockChangedPlans(state, base, plans):
+  blocked = {}
+  for planIdValue, entry in (base["plans"] if base else {}).items():
+    planState = state["plans"][planIdValue]
+    reason = planFileProblem(plans.get(planIdValue), entry) if planState["status"] == PlanStatus.active else None
+    if reason:
+      planState["syncBlocked"] = reason
+      blocked[planIdValue] = reason
+  return blocked
+
+
+def loadProgress(projectDir, config, plans=None):
+  # 所有讀取端共用：以接納的交接快照為基底，再套用本機在那之後的事件；沒有交接檔時照舊重播事件
+  plans = loadPlans(projectDir) if plans is None else plans
+  result = evaluateProgress(projectDir, plans, config)
+  if result["accept"] is not None:
+    result = acceptUnderLock(projectDir, plans, config)
+  result["sync"]["blockedPlans"] = blockChangedPlans(result["state"], result["base"], plans)
+  return {"plans": plans, "state": result["state"], "sync": result["sync"]}
