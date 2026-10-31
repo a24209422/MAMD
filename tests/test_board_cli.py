@@ -324,9 +324,11 @@ def test_statusShowsPauseRejectReasonAgentAndNeeds(gitProject, writePlan, capsys
     "P0002 系統監控｜進行中｜完成 0/2",
     "  T1 寫程式中（第 1/3 輪，writer-1）",
     "  T2 等你處理（第 1/3 輪）｜沒有改動",
+    board.unexportedHint,
   ]
   assert board.cmdStatus(gitProject, "P0001") == 0
-  assert capsys.readouterr().out.splitlines() == [f"已暫停：{board.stopReason}", "P0001 批次上傳｜退回｜退回原因：缺驗證"]
+  assert capsys.readouterr().out.splitlines() == [f"已暫停：{board.stopReason}", "P0001 批次上傳｜退回｜退回原因：缺驗證",
+                                                  board.unexportedHint]
 
 
 def writeEvents(projectDir, events):

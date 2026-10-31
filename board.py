@@ -17,10 +17,14 @@ from board_core import (PlanStatus, TaskStatus, appendEvent, boardDir, deriveSta
 from board_index import buildIndex
 from board_prompts import tddCrapDir
 from board_stats import approvedPlanIds, boardStats, planStats, taskRounds
+from board_sync import ExportError, SyncError, commitPaths, exportProgress, unexportedProgress
+from conductor import processAlive, readLockPid
 
 humanOnlyCommands = {"approve", "reject", "abandon", "decide", "stop", "resume", "cleanup"}
 # board_api 要從暫停事件的原因分辨是不是你按的 stop，兩邊共用同一個字串
 stopReason = "你執行了 stop"
+unexportedHint = ("有進度還沒匯出成交接檔：只 push 程式碼無法交接，請停止 Alfred 後執行 "
+                  "python board.py export-state，再 commit、push 列出的檔案與分支")
 boardPyPath = Path(__file__).resolve()
 snippetPath = boardPyPath.parent / "docs" / "AGENTS-snippet.md"
 installSkillPath = boardPyPath.parent / "install_skill.py"
@@ -185,7 +189,7 @@ def taskStatusLine(task):
 
 def cmdStatus(projectDir, planIdValue=None):
   loadErrors = []
-  _, state = currentState(projectDir, loadErrors)
+  plans, state = currentState(projectDir, loadErrors)
   printLoadWarnings(loadErrors)
   if state["paused"]:
     print(f"已暫停：{state['pauseReason']}")
@@ -196,6 +200,86 @@ def cmdStatus(projectDir, planIdValue=None):
     print(planStatusLine(planState, tasks))
     for task in tasks:
       print(taskStatusLine(task))
+  if unexportedProgress(projectDir, plans, loadConfig(projectDir)):
+    # 進度只在 .board 裡，不提醒的話使用者會以為 push 程式碼就能在另一台電腦接續
+    print(unexportedHint)
+  return 0
+
+
+def alfredProblems(projectDir):
+  pid = readLockPid(projectDir)
+  if pid is not None and processAlive(pid):
+    return [f"Alfred 還在執行（PID {pid}），進度可能還在變動；請先停止 Alfred 再匯出"]
+  return []
+
+
+def unfinishedTasks(state, planIdValue):
+  return [task for task in planTasks(state, planIdValue)
+          if task["status"] not in (TaskStatus.done, TaskStatus.abandoned)]
+
+
+def activePlanIds(state):
+  return [planState["id"] for planState in state["plans"].values() if planState["status"] == PlanStatus.active]
+
+
+def worktreeProblem(path):
+  if not path.exists():
+    return None
+  if board_git.mergeInProgress(path) or board_git.unmergedFiles(path):
+    return f"worktree {path.name} 有未解的合併衝突，請先解完衝突並 commit"
+  if board_git.hasChanges(path):
+    return f"worktree {path.name} 有還沒 commit 的改動（半成品），請先 commit 或清掉"
+  return None
+
+
+def worktreeProblems(projectDir, state):
+  paths = []
+  for planIdValue in activePlanIds(state):
+    paths.append(board_git.planWorktreePath(projectDir, planIdValue))
+    paths += [board_git.taskWorktreePath(projectDir, planIdValue, task["task"])
+              for task in unfinishedTasks(state, planIdValue)]
+  return [problem for problem in map(worktreeProblem, paths) if problem]
+
+
+def requiredBranches(projectDir, state):
+  # 另一台電腦要從這些分支接續進行中的工作；完成或放棄的任務已合併或不再需要
+  names = []
+  for planIdValue in activePlanIds(state):
+    names.append(board_git.planBranch(planIdValue))
+    names += [board_git.taskBranch(planIdValue, task["task"]) for task in unfinishedTasks(state, planIdValue)]
+  return {name: board_git.runGit(projectDir, "rev-parse", f"refs/heads/{name}")
+          for name in names if board_git.branchExists(projectDir, name)}
+
+
+def cmdExportState(projectDir):
+  def checkSource(state):
+    problems = alfredProblems(projectDir) + worktreeProblems(projectDir, state)
+    return problems, ({} if problems else requiredBranches(projectDir, state))
+
+  try:
+    snapshot, changed = exportProgress(projectDir, loadConfig(projectDir), checkSource)
+  except ExportError as error:
+    problems = error.problems
+  except SyncError as error:
+    problems = [str(error)]
+  else:
+    problems = []
+  if problems:
+    print("無法匯出交接進度，既有交接檔沒有更動：")
+    for problem in problems:
+      print(f"- {problem}")
+    return 1
+  if changed:
+    print(f"已匯出交接進度 revision {snapshot['revision'][:12]}")
+  else:
+    print(f"沒有新進度，沿用 revision {snapshot['revision'][:12]}")
+  print("請 commit 這些檔案：")
+  for path in commitPaths(snapshot):
+    print(f"  {path}")
+  print("請 push 這些分支：")
+  for branch, sha in snapshot["branches"].items():
+    print(f"  {branch} {sha}")
+  print("export-state 不會 commit、push，也不會改任務狀態；請自己 commit 上面的檔案並 push 檔案所在分支與上面的分支")
   return 0
 
 
@@ -718,6 +802,7 @@ def buildParser():
   sub.add_parser("resume")
   sub.add_parser("cleanup").add_argument("plan")
   sub.add_parser("index")
+  sub.add_parser("export-state")
   init = sub.add_parser("init")
   testing = init.add_mutually_exclusive_group()
   testing.add_argument("--tdd", action="store_true", help="寫程式的 agent 照 tdd-crap 寫程式（只適用 Python 專案）")
@@ -752,6 +837,7 @@ def main(argv=None):
     "resume": lambda: cmdResume(projectDir),
     "cleanup": lambda: cmdCleanup(projectDir, args.plan),
     "index": lambda: cmdIndex(projectDir),
+    "export-state": lambda: cmdExportState(projectDir),
     "init": lambda: cmdInit(projectDir, args.tdd, args.source, args.tests, args.test_command, args.skip_tests),
   }
   return commands[args.command]()

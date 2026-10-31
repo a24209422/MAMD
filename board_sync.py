@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 
 from board_core import (BoardError, PlanStatus, TaskStatus, applyEvents, boardDir, boardDirName, deriveState,
-                        fileLock, loadPlans, lockFileName, newTaskState, readEvents, taskKey)
+                        eventsFileName, fileLock, loadPlans, lockFileName, newTaskState, readEvents, taskKey)
 from board_review import renderReviewMarkdown, verifyRef
 
 progressDirName = ".agent-board"
@@ -828,3 +828,82 @@ def loadProgress(projectDir, config, plans=None):
     result = acceptUnderLock(projectDir, plans, config)
   result["sync"]["blockedPlans"] = blockChangedPlans(result["state"], result["base"], plans)
   return {"plans": plans, "state": result["state"], "sync": result["sync"]}
+
+
+# 這些情況下本機進度和交接檔的先後關係清楚，才能接著匯出；其餘要先處理交接檔本身
+exportableStatuses = ("none", "same", "accepted")
+
+
+class ExportError(SyncError):
+  def __init__(self, problems):
+    super().__init__("；".join(problems))
+    self.problems = problems
+
+
+def brokenEventLines(projectDir):
+  # readEvents 會跳過壞掉的行，直接匯出就會少掉那些事件，所以匯出前自己逐行檢查
+  path = boardDir(projectDir) / eventsFileName
+  try:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+  except FileNotFoundError:
+    return []
+  broken = []
+  for number, line in enumerate(lines, start=1):
+    if not line.strip():
+      continue
+    try:
+      parsed = json.loads(line)
+    except json.JSONDecodeError:
+      parsed = None
+    if not isinstance(parsed, dict):
+      broken.append(number)
+  return broken
+
+
+def eventProblems(projectDir):
+  return [f"事件紀錄第 {number} 行是殘缺事件，無法完整讀取進度；請修好或刪掉那一行再匯出"
+          for number in brokenEventLines(projectDir)]
+
+
+def syncProblems(sync):
+  if sync["status"] in exportableStatuses:
+    return []
+  return [sync["message"]]
+
+
+def exportProgress(projectDir, config, checkSource):
+  plans = loadPlans(projectDir)
+  directory = boardDir(projectDir)
+  directory.mkdir(parents=True, exist_ok=True)
+  # 和寫事件共用同一把鎖：檢查到寫檔之間不能有新事件，否則邊界會漏算
+  with fileLock(directory / lockFileName):
+    result = evaluateProgress(projectDir, plans, config)
+    sourceProblems, branches = checkSource(result["state"])
+    problems = eventProblems(projectDir) + syncProblems(result["sync"]) + sourceProblems
+    if problems:
+      raise ExportError(problems)
+    previous = result["base"]
+    projectId = previous["projectId"] if previous else newProjectId()
+    snapshot = buildSnapshot(result["state"], plans, projectId, previous, branches, reviewReader(directory))
+    writeSnapshot(projectDir, snapshot)
+    # 本機也記下這一版是基底，之後的事件才會被當成接在它後面的新進度，而不是另一條來源
+    writeCheckpoint(projectDir, snapshot, len(readEvents(projectDir)))
+  return snapshot, snapshot is not previous
+
+
+def commitPaths(snapshot):
+  return [f"{progressDirName}/{progressFileName}", *sorted(entry["file"] for entry in snapshot["plans"].values())]
+
+
+def unexportedProgress(projectDir, plans, config):
+  result = evaluateProgress(projectDir, plans, config)
+  if result["sync"]["status"] not in exportableStatuses:
+    return False
+  try:
+    snapshot = readSnapshot(projectDir)
+  except SyncError:
+    return False
+  view = progressView(result["state"], snapshot)
+  if snapshot is None:
+    return view != canonicalJson({})
+  return view != progressView(stateFromSnapshot(snapshot, plans), snapshot)
