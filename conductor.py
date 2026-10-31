@@ -522,18 +522,28 @@ class Conductor:
     candidates = None
     for planState in state["plans"].values():
       key = baselineKey(planState["id"])
-      if planState["status"] != PlanStatus.active or key in self.jobs or not self.needsTestBaseline(planState):
+      if not self.wantsTestBaseline(planState, key):
         continue
       if candidates is None:
         # 有 plan 要基準時才讀整份事件紀錄
         candidates = baselineReuseCandidates(readEvents(self.projectDir), self.config["testCommand"])
-      source = next(((kind, event) for kind, event in candidates
-                     if self.onlyPlansChanged(event["data"]["commit"], planState["baseCommit"])), None)
-      if source is not None:
-        # 沿用不跑測試，不佔測試名額
-        self.reuseTestBaseline(planState, *source)
-      elif not self.waitsForRunningBaseline(planState) and self.freeTestSlots() > 0:
-        self.startTestBaseline(planState, key)
+      self.reuseOrStartTestBaseline(planState, key, candidates)
+
+  def wantsTestBaseline(self, planState, key):
+    return planState["status"] == PlanStatus.active and key not in self.jobs and self.needsTestBaseline(planState)
+
+  def reusableBaselineSource(self, planState, candidates):
+    # candidates 已由新到舊排好，取第一個程式碼相同的來源
+    return next(((kind, event) for kind, event in candidates
+                 if self.onlyPlansChanged(event["data"]["commit"], planState["baseCommit"])), None)
+
+  def reuseOrStartTestBaseline(self, planState, key, candidates):
+    source = self.reusableBaselineSource(planState, candidates)
+    if source is not None:
+      # 沿用不跑測試，不佔測試名額
+      self.reuseTestBaseline(planState, *source)
+    elif not self.waitsForRunningBaseline(planState) and self.freeTestSlots() > 0:
+      self.startTestBaseline(planState, key)
 
   def freeTestSlots(self):
     # 基準、任務測試和合併後測試都是完整測試，合計不超過 maxParallelTests；名額滿了留到之後的 tick
