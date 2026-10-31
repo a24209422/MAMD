@@ -71,6 +71,31 @@ def test_approveAsksWhenWarningsAndCanCancel(gitProject, writePlan):
   assert asked and "planApproved" not in eventTypes(gitProject)
 
 
+def test_approveAfterConfirmingWarningsWritesFullSnapshot(gitProject, writePlan, capsys):
+  writePlan("0001-ok.md", cleanRows + ["| | | D2 額外做法 | | T3 額外任務 | | 驗證三 |"], planId="P0001", projectDir=gitProject)
+  board.cmdSubmit(gitProject, "P0001")
+  capsys.readouterr()
+  asked = []
+  # 確認輸入前後有空白、大寫也算同意；testTiming=None 時事件不帶這個欄位
+  assert board.cmdApprove(gitProject, "P0001", confirm=lambda prompt: asked.append(prompt) or " Y ",
+                          testTiming=None) == 0
+  assert asked == ["確定核准？輸入 y 繼續："]
+  output = capsys.readouterr().out
+  assert output.startswith("核准前請確認：\n  橘｜")
+  assert output.endswith("P0001 已核准，Alfred 會開始執行。\n")
+  approved = board_core.readEvents(gitProject)[-1]
+  assert approved["type"] == "planApproved" and approved["plan"] == "P0001"
+  assert approved["data"] == {
+    "baseCommit": board_git.headCommit(gitProject),
+    "branch": board_git.planBranch("P0001"),
+    "tasks": [
+      {"id": "T1", "text": "任務一", "dependsOn": [], "requirementIds": ["R1"]},
+      {"id": "T2", "text": "任務二", "dependsOn": ["T1"], "requirementIds": ["R1"]},
+      {"id": "T3", "text": "額外任務", "dependsOn": [], "requirementIds": []},
+    ],
+  }
+
+
 def test_approveWarnsAboutTrackedChanges(gitProject, writePlan, capsys):
   writePlan("0001-ok.md", cleanRows, planId="P0001", projectDir=gitProject)
   board.cmdSubmit(gitProject, "P0001")
