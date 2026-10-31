@@ -165,8 +165,8 @@ def test_fixtureCoversOldAndNewMergeStates(legacyProject):
 
 
 def recordedResults(snapshot):
-  # 交接檔記下的成果：進行中與完成 plan 裡沒放棄的任務，另一台電腦都要拿得到
-  return {commit for plan in snapshot["plans"].values() if plan["status"] != PlanStatus.abandoned
+  # 交接檔記下的成果：沒放棄的任務都要拿得到；plan 被放棄前已完成的任務也還保有成果
+  return {commit for plan in snapshot["plans"].values()
           for task in plan["tasks"] if task["status"] != TaskStatus.abandoned
           for commit in (task["lastCommit"], task["mergedCommit"]) if commit}
 
@@ -229,6 +229,28 @@ def test_supersededPlanKeepsUnmergedResultsDeliverable(legacyProject, tmp_path, 
   pushListed(legacyProject, output, remote)
   results = recordedResults(snapshot)
   assert {task["lastCommit"] for task in snapshot["plans"]["P0006"]["tasks"]} <= results
+  assert missingResults(remote, results) == []
+
+
+def abandonOldMergedPlan(projectDir):
+  # P0005 的 T1 已完成並合併進 plan 分支，之後才放棄整份 plan；完成的成果還留在交接檔裡
+  writeEvents(projectDir, [makeEvent("planAbandoned", plan="P0005")])
+
+
+def test_abandonedPlanKeepsCompletedResultsDeliverable(legacyProject, tmp_path, capsys):
+  abandonOldMergedPlan(legacyProject)
+
+  assert exportState(legacyProject) == 0
+
+  output = capsys.readouterr().out
+  snapshot = readSnapshot(legacyProject)
+  assert snapshot["plans"]["P0005"]["status"] == PlanStatus.abandoned
+  assert snapshot["plans"]["P0005"]["tasks"][0]["status"] == TaskStatus.done
+  assert f"plan/P0005 {revParse(legacyProject, 'plan/P0005')}" in section(output, "請 push 這些分支：")
+  remote = tmp_path / "remote.git"
+  pushListed(legacyProject, output, remote)
+  results = recordedResults(snapshot)
+  assert {task["lastCommit"] for task in snapshot["plans"]["P0005"]["tasks"]} <= results
   assert missingResults(remote, results) == []
 
 
@@ -382,6 +404,38 @@ def dropSupersededUnmergedPlan(projectDir):
   dropUnmergedCompletedPlan(projectDir)
 
 
+def dropAbandonedPlanWithResults(projectDir):
+  abandonOldMergedPlan(projectDir)
+  git(projectDir, "branch", "-D", "plan/P0005")
+
+
+def addPlanWorktree(projectDir, planIdValue):
+  path = board_git.planWorktreePath(projectDir, planIdValue)
+  git(projectDir, "worktree", "add", "-q", str(path), f"plan/{planIdValue}")
+  return path
+
+
+def leaveHalfWorkInUnmergedPlan(projectDir):
+  # 完成但沒合併的 plan 分支要交付，它的 worktree 有半成品時 push 出去的分支不是完整成果
+  (addPlanWorktree(projectDir, "P0006") / "half.txt").write_text("寫到一半\n", encoding="utf-8")
+
+
+def leaveConflictInSupersededPlan(projectDir):
+  supersedeUnmergedPlan(projectDir)
+  path = addPlanWorktree(projectDir, "P0006")
+  git(path, "checkout", "-q", "-b", "side-P0006")
+  commitIn(path, "t6.txt", "side 的內容\n")
+  git(path, "checkout", "-q", "plan/P0006")
+  commitIn(path, "t6.txt", "plan 的內容\n")
+  subprocess.run(["git", "merge", "side-P0006"], cwd=path, capture_output=True)
+  assert board_git.mergeInProgress(path)
+
+
+def leaveHalfWorkInAbandonedPlan(projectDir):
+  abandonOldMergedPlan(projectDir)
+  (addPlanWorktree(projectDir, "P0005") / "half.txt").write_text("寫到一半\n", encoding="utf-8")
+
+
 def submitUnloadablePlan(projectDir):
   (projectDir / "plans" / "0008-broken.md").write_bytes(b"\xff\xfe\x00 not utf-8")
   writeEvents(projectDir, [makeEvent("planSubmitted", plan="P0008")])
@@ -402,6 +456,10 @@ def submitUnloadablePlan(projectDir):
   (dropUnmergedCompletedPlan, "plan/P0006"),
   (rewindUnmergedCompletedPlan, "plan/P0006"),
   (dropSupersededUnmergedPlan, "plan/P0006"),
+  (dropAbandonedPlanWithResults, "plan/P0005"),
+  (leaveHalfWorkInUnmergedPlan, "半成品"),
+  (leaveConflictInSupersededPlan, "衝突"),
+  (leaveHalfWorkInAbandonedPlan, "半成品"),
   (submitUnloadablePlan, "P0008"),
 ])
 def test_failedChecksKeepExistingHandoffFile(legacyProject, capsys, breakSource, keyword):

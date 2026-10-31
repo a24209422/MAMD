@@ -220,10 +220,6 @@ def unfinishedTasks(state, planIdValue):
           if task["status"] not in (TaskStatus.done, TaskStatus.abandoned)]
 
 
-def activePlanIds(state):
-  return [planState["id"] for planState in state["plans"].values() if planState["status"] == PlanStatus.active]
-
-
 def mainProjectProblems(projectDir):
   # 主專案停在合併衝突時，plan 檔或其他要提交的檔案可能還是半成品
   if board_git.mergeInProgress(projectDir) or board_git.unmergedFiles(projectDir):
@@ -242,11 +238,8 @@ def worktreeProblem(path):
 
 
 def worktreeProblems(projectDir, state):
-  paths = []
-  for planIdValue in activePlanIds(state):
-    paths.append(board_git.planWorktreePath(projectDir, planIdValue))
-    paths += [board_git.taskWorktreePath(projectDir, planIdValue, task["task"])
-              for task in unfinishedTasks(state, planIdValue)]
+  # 要交付的分支都得檢查：完成、被取代或放棄的 plan 分支也可能要 push，worktree 有半成品就不是完整成果
+  paths = [path for _name, _hasWork, _commits, path in branchNeeds(projectDir, state)]
   return [problem for problem in map(worktreeProblem, paths) if problem]
 
 
@@ -265,31 +258,35 @@ def planBranchResults(task):
   return [task["mergedCommit"]] if task["mergedCommit"] else []
 
 
-def activeNeeds(state, planIdValue):
+def activeNeeds(projectDir, state, planIdValue):
   # 有 lastCommit 的任務已有成果在分支上，分支不見就無法交接；還沒寫過的排隊任務本來就還沒有分支
   # 第三欄是分支上一定要有的 commit：分支被退回到成果之前，照清單 push 過去也拿不到記錄的成果
   tasks = keptTasks(state, planIdValue)
   merged = [commit for task in tasks for commit in planBranchResults(task)]
-  needs = [(board_git.planBranch(planIdValue), any(task["lastCommit"] for task in tasks), merged)]
+  needs = [(board_git.planBranch(planIdValue), any(task["lastCommit"] for task in tasks), merged,
+            board_git.planWorktreePath(projectDir, planIdValue))]
   return needs + [(board_git.taskBranch(planIdValue, task["task"]), task["lastCommit"] is not None,
-                   [task["lastCommit"]] if task["lastCommit"] else [])
+                   [task["lastCommit"]] if task["lastCommit"] else [],
+                   board_git.taskWorktreePath(projectDir, planIdValue, task["task"]))
                   for task in unfinishedTasks(state, planIdValue)]
 
 
 def settledNeeds(projectDir, state, planIdValue):
-  # 完成或被取代的 plan 不會自動合併進交付分支；成果都已在交付分支上才不需要任何分支，task 分支被清掉也沒關係
-  # 被取代的 plan 只有已合併的任務成果還留在快照裡要交付，沒做完的任務已不會再接著做
+  # 完成、被取代或放棄的 plan 不會自動合併進交付分支；成果都已在交付分支上才不需要任何分支，task 分支被清掉也沒關係
+  # 這些 plan 只有已合併的任務成果還留在快照裡要交付，沒做完的任務已不會再接著做；放棄前已完成的任務仍保有成果
   pending = [commit for task in keptTasks(state, planIdValue) if task["status"] in mergedStatuses
              for commit in recordedCommits(task) if not board_git.containsCommit(projectDir, "HEAD", commit)]
-  return [(board_git.planBranch(planIdValue), True, pending)] if pending else []
+  if not pending:
+    return []
+  return [(board_git.planBranch(planIdValue), True, pending, board_git.planWorktreePath(projectDir, planIdValue))]
 
 
 def branchNeeds(projectDir, state):
   needs = []
   for planState in state["plans"].values():
     if planState["status"] == PlanStatus.active:
-      needs += activeNeeds(state, planState["id"])
-    elif planState["status"] in (PlanStatus.completed, PlanStatus.superseded):
+      needs += activeNeeds(projectDir, state, planState["id"])
+    elif planState["status"] in (PlanStatus.completed, PlanStatus.superseded, PlanStatus.abandoned):
       needs += settledNeeds(projectDir, state, planState["id"])
   return needs
 
@@ -303,7 +300,7 @@ def requiredBranches(projectDir, state):
   # 交接檔記下的每個成果，都要能從交付分支（交接檔所在的目前分支）或這裡列出的分支取得
   branches = {}
   missing = []
-  for name, hasWork, commits in branchNeeds(projectDir, state):
+  for name, hasWork, commits, _path in branchNeeds(projectDir, state):
     if board_git.branchExists(projectDir, name):
       branches[name] = board_git.runGit(projectDir, "rev-parse", f"refs/heads/{name}")
       missing += lostCommitProblems(projectDir, name, commits)
