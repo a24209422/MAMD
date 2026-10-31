@@ -348,6 +348,75 @@ def test_finishedWorkKeepsItsStageWithoutDeletedTaskBranches(computers, capsys, 
   assert restarted & {("P0001", "T3"), ("P0005", "T1"), ("P0004", "T1"), ("P0006", "T1")} == set()
 
 
+def test_finishedPlanNotYetDeliveredNeedsItsPushedPlanBranch(computers, capsys):
+  source, clone, _ = computers
+  recorded = readSnapshot(clone)["branches"]
+  expected = [line for line in planLines(statusOutput(source, capsys)) if line.startswith("P0006")]
+  # 來源漏 push plan/P0006：P0006 已完成但還沒合併進 main，成果只在這個分支上
+  git(clone, "update-ref", "-d", "refs/remotes/origin/plan/P0006")
+  messages = []
+  alfred = Conductor(clone, config=fakeConfig(), out=messages.append)
+
+  alfred.currentState()
+
+  output = statusOutput(clone, capsys)
+  assert [line for line in planLines(output) if line.startswith("P0006")] == expected
+  assert "P0006 不派工" in output and "plan/P0006" in output
+  refusal = [message for message in messages if "P0006" in message and "plan/P0006" in message]
+  assert refusal and "push" in refusal[0] and "git fetch" in refusal[0]
+  assert localSha(clone, "plan/P0006") == ""
+
+  # 補 push 後在這台電腦 fetch，就照記錄的 SHA 建回分支、不再阻擋
+  git(clone, "fetch", "-q", "origin")
+  _, state = alfred.currentState()
+
+  assert "P0006" not in alfred.sync["blockedPlans"]
+  assert state["plans"]["P0006"]["status"] == PlanStatus.completed
+  assert localSha(clone, "plan/P0006") == recorded["plan/P0006"]
+
+
+def recordTestJobs(monkeypatch, recorded):
+  # 只記下要在哪個工作目錄跑測試，不真的跑
+  monkeypatch.setattr(conductorModule, "BackgroundTestJob", lambda runTestCommand, worktree: type(
+    "RecordedTest", (), {"start": lambda self: recorded.append(Path(worktree)) or self})())
+
+
+def test_blockedPlanKeepsMergedUntestedWhenTestsAreOff(computers, monkeypatch):
+  _, clone, _ = computers
+  git(clone, "branch", "task/P0001-T1", "main")
+  recordAgentJobs(monkeypatch, [])
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+
+  alfred.tick()
+
+  # 關掉測試時合併後測試會被略過、任務直接完成；交接被擋的 plan 不能因此跳過原本的測試
+  assert [event for event in readEvents(clone) if event["type"] == "mergeTestSkipped"] == []
+  assert alfred.currentState()[1]["tasks"]["P0001/T3"]["status"] == TaskStatus.mergedUntested
+
+
+def test_blockedPlanDoesNotRunMergeTests(computers, monkeypatch):
+  _, clone, _ = computers
+  command = "python -c pass"
+  git(clone, "branch", "task/P0001-T1", "main")
+  tested = []
+  messages = []
+  recordTestJobs(monkeypatch, tested)
+  alfred = Conductor(clone, config=fakeConfig(testCommand=command), out=messages.append)
+  alfred.currentState()
+  # 交接檔的基準不帶指令，這台電腦要先有自己的基準，合併後測試才會輪到
+  writeEvents(clone, [makeEvent("testBaseline", plan="P0001", command=command, passed=True, failures=[])])
+
+  _, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  assert not alfred.needsTestBaseline(state["plans"]["P0001"])
+  alfred.startMergeTests(state)
+
+  assert "P0001" in alfred.sync["blockedPlans"]
+  assert tested == [] and not any(info["plan"] == "P0001" for info in alfred.jobs.values())
+  # 被擋的 plan 根本不該嘗試合併後測試，連「無法開始」的通知都不該出現
+  assert not any("合併後測試" in str(message) for message in messages)
+
+
 def recordAgentJobs(monkeypatch, recorded):
   # 只記下要啟動的指令與工作目錄，不真的跑 agent
   class RecordedJob:

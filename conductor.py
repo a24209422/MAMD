@@ -699,9 +699,9 @@ class Conductor:
     return not self.needsTestBaseline(planState)
 
   def awaitsMergeTests(self, planState):
-    # 每份 plan 同時只跑一個合併後測試
+    # 每份 plan 同時只跑一個合併後測試；交接缺分支或分支歧異時不能測，也不能把待測試任務跳過成完成
     return (planState["status"] == PlanStatus.active and mergeTestKey(planState["id"]) not in self.jobs
-            and planState["testTiming"] == "afterMerge")
+            and planState["testTiming"] == "afterMerge" and not planState.get("syncBlocked"))
 
   def skipMergeTests(self, planState, state):
     # 合併後才把測試關掉時，已合併待測試的任務沒有測試可等；記下來讓重播也得到同樣結果

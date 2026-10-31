@@ -845,17 +845,26 @@ def blockPlan(state, blocked, planIdValue, reason):
   state["plans"][planIdValue]["syncBlocked"] = blocked[planIdValue]
 
 
-def continuedBranches(state, recorded):
-  # 只驗接下來還要在本機繼續做的分支：完成的 plan、完成或放棄的任務不再派工，分支被清掉也沒關係
+def continuedBranches(projectDir, state, recorded):
+  # 只驗接下來還要在本機繼續做或還要交付的分支：完成或放棄的任務不再派工，task 分支被清掉也沒關係
   wanted = {}
   for planState in state["plans"].values():
     if planState["status"] != PlanStatus.active:
+      wanted.update(undeliveredPlanBranch(projectDir, planState, recorded))
       continue
     names = [board_git.planBranch(planState["id"])] + [
       board_git.taskBranch(taskState["plan"], taskState["task"]) for taskState in state["tasks"].values()
       if taskState["plan"] == planState["id"] and taskState["status"] not in (TaskStatus.done, TaskStatus.abandoned)]
     wanted.update({name: planState["id"] for name in names if name in recorded})
   return wanted
+
+
+def undeliveredPlanBranch(projectDir, planState, recorded):
+  # 結束的 plan 只有成果還沒進交付分支時才會記 plan 分支；本機 HEAD 已帶著它就不必再要求這個分支
+  name = board_git.planBranch(planState["id"])
+  if name not in recorded or board_git.containsCommit(projectDir, "HEAD", recorded[name]):
+    return {}
+  return {name: planState["id"]}
 
 
 def branchProblem(projectDir, branch, sha, refs):
@@ -875,7 +884,7 @@ def branchProblem(projectDir, branch, sha, refs):
 def blockUnreachableBranches(projectDir, state, base, blocked):
   """缺分支或分支歧異的 plan 不派工；回傳本機還沒有、但遠端有相同 SHA、可以直接建立的分支。"""
   recorded = base["branches"] if base else {}
-  wanted = continuedBranches(state, recorded)
+  wanted = continuedBranches(projectDir, state, recorded)
   refs = board_git.branchRefs(projectDir) if wanted else {}
   adoptable = {}
   for branch, planIdValue in wanted.items():
