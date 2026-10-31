@@ -99,16 +99,16 @@ function fakeDocument() {
   return doc;
 }
 
-function setup() {
+function setup(extra = {}) {
   const clock = fakeClock();
   const server = fakeServer();
   const document = fakeDocument();
   const context = vm.createContext({ AbortController, console });
   vm.runInContext(source, context);
   const monitor = context.SystemMonitor.create({
-    fetch: server.fetch, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, document,
+    fetch: server.fetch, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, document, ...extra,
   });
-  return { clock, server, document, monitor };
+  return { clock, server, document, monitor, context };
 }
 
 function iso(seconds) {
@@ -171,6 +171,20 @@ test('first load shows loading, then three cards with host label and sample time
   assert.match(card(box, 'disk'), /125\.0 \/ 500\.0 GiB/);
   assert.match(card(box, 'disk'), /剩餘<\/dt><dd>375\.0 GiB/);
   assert.doesNotMatch(html, /過期/);
+});
+
+test('host page can inject the API URL; shared() keeps the first options', async () => {
+  const { clock, server, document, monitor, context } = setup({ apiUrl: '/api/projects/abc/system-monitor' });
+  monitor.mountPage(element()).setVisible(true);
+  assert.equal(server.requests[0].url, '/api/projects/abc/system-monitor');
+  // 主系統的完整頁與摘要都用 shared()，第一次給的網址就是整頁唯一的網址
+  const shared = context.SystemMonitor.shared({
+    apiUrl: '/api/projects/abc/system-monitor',
+    fetch: server.fetch, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout, document,
+  });
+  assert.equal(context.SystemMonitor.shared(), shared);
+  shared.mountPage(element()).setVisible(true);
+  assert.equal(server.last().url, '/api/projects/abc/system-monitor');
 });
 
 test('polls every 3 seconds and a slow response never overlaps the next request', async () => {

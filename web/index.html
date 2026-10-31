@@ -1010,6 +1010,8 @@ button, input, select { font: inherit; color: inherit; }
   border-bottom: 1px solid var(--line);
 }
 .chatbar-head h2 { flex: 1; margin: 0; font: 700 14px/1.4 var(--font-cjk); }
+.chatbar-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-project { color: var(--fg-3); font-weight: 400; font-size: 12px; }
 .icon-btn {
   flex: none;
   display: grid;
@@ -1050,6 +1052,29 @@ button, input, select { font: inherit; color: inherit; }
 /* ---------- 接上後端後新增的元件 ---------- */
 .notice { display: grid; gap: 2px; padding: 8px 22px; border-bottom: 1px solid var(--line); background: rgb(255 197 61 / 0.06); }
 .notice p { margin: 0; color: var(--amber); font: 12px/1.6 var(--font-cjk); overflow-wrap: anywhere; }
+.notice .mini-btn { text-decoration: none; }
+/* 目前專案：同名資料夾要靠完整路徑分辨，路徑不截斷，太長就換行 */
+.project-bar { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 8px 22px; border-bottom: 1px solid var(--line); }
+.project-name { color: var(--fg); font: 700 13px/1.5 var(--font-cjk); overflow-wrap: anywhere; }
+.project-path { flex: 1; min-width: 0; color: var(--fg-3); font: 11.5px/1.5 var(--font-mono); overflow-wrap: anywhere; }
+.project-dialog { width: min(560px, calc(100vw - 32px)); padding: 18px; background: var(--win); border: 1px solid var(--line-2); color: var(--fg); }
+.project-dialog::backdrop { background: rgb(0 0 0 / 0.55); }
+.project-dialog h2 { margin: 0 0 6px; font: 700 15px/1.5 var(--font-cjk); }
+.project-recent { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 260px; overflow-y: auto; }
+.project-recent-btn {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  background: var(--ground);
+  border: 1px solid var(--line-2);
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.project-recent-btn:hover { border-color: var(--fg-3); }
+.project-recent-btn strong { font: 700 12.5px/1.5 var(--font-cjk); }
+.project-recent-btn span { color: var(--fg-3); font: 11.5px/1.5 var(--font-mono); overflow-wrap: anywhere; }
 /* 值可能是「1/3」「計算中」，比百分比寬 */
 .meter { grid-template-columns: var(--ml, 7.5em) minmax(0, 1fr) minmax(4ch, max-content); }
 /* 上一行會蓋掉原本 .meter-lg 的單欄設定，大進度條要再設回來 */
@@ -1272,6 +1297,11 @@ button, input, select { font: inherit; color: inherit; }
         <h1 class="term-title">多 Agent 監控儀表板<span id="termPage">— 總覽</span></h1>
         <div class="pill" id="pill" data-state="live">LIVE</div>
       </div>
+      <div class="project-bar">
+        <strong class="project-name" id="projectName">讀取中…</strong>
+        <span class="project-path" id="projectPath"></span>
+        <button class="mini-btn" id="projectOpen" type="button" hidden>開啟資料夾</button>
+      </div>
       <div class="notice" id="notice" hidden></div>
 
       <div class="term-body">
@@ -1408,7 +1438,7 @@ button, input, select { font: inherit; color: inherit; }
     <div id="terminalResize" role="separator" aria-label="調整終端機寬度" tabindex="0" aria-orientation="vertical"></div>
     <div class="chatbar-strip"><button class="rail-btn" type="button" data-chat-toggle title="展開終端機">&gt;_</button></div>
     <section class="chatbar-panel">
-      <header class="chatbar-head"><h2>終端機</h2>
+      <header class="chatbar-head"><h2>終端機 <span class="terminal-project" id="terminalProject"></span></h2>
         <button class="icon-btn" id="terminalNew" title="新增終端機" type="button">＋</button>
         <button class="icon-btn" id="terminalMax" title="放大／還原終端機" type="button">⛶</button>
         <button class="icon-btn" data-chat-toggle title="收合終端機" type="button">›</button>
@@ -1420,6 +1450,21 @@ button, input, select { font: inherit; color: inherit; }
   </aside>
 </div>
 
+<dialog class="project-dialog" id="projectDialog" aria-labelledby="projectDialogTitle">
+  <form class="op-form" id="projectForm">
+    <h2 id="projectDialogTitle">開啟資料夾</h2>
+    <label class="field">專案資料夾的完整路徑
+      <input id="projectPathInput" type="text" autocomplete="off" spellcheck="false" placeholder="例如 D:\projects\demo">
+    </label>
+    <p class="op-hint">最近開啟</p>
+    <ul class="project-recent" id="projectRecent"></ul>
+    <p class="op-msg" id="projectOpenMessage" role="alert"></p>
+    <div class="role-actions">
+      <button class="act" id="projectCancel" type="button">取消</button>
+      <button class="act act-primary" id="projectOpenSubmit" type="submit">開啟</button>
+    </div>
+  </form>
+</dialog>
 <script src="modules/system-monitor/monitor.js"></script>
 <script src="js/core.js"></script>
 <script src="js/overview.js"></script>

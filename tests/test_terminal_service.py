@@ -117,8 +117,9 @@ def test_real_powershell_unicode_resize_and_job_cleanup(tmp_path):
     finally:
         manager.shutdown()
     assert not item.pty.process.isalive()
-    listing = subprocess.run(['tasklist', '/FI', f'PID eq {childPid}', '/FO', 'CSV'], capture_output=True, text=True)
-    assert f'"{childPid}"' not in listing.stdout
+    # tasklist 用系統語系編碼輸出（中文 Windows 是 cp950），用 UTF-8 解碼會失敗；PID 是 ASCII，直接比對位元組
+    listing = subprocess.run(['tasklist', '/FI', f'PID eq {childPid}', '/FO', 'CSV'], capture_output=True)
+    assert f'"{childPid}"'.encode('ascii') not in listing.stdout
 
 
 def test_http_terminal_routes_require_token(running):
