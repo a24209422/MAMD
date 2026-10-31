@@ -871,8 +871,19 @@ def syncProblems(sync):
   return [sync["message"]]
 
 
+def unloadedPlanProblems(projectDir, state, loadErrors):
+  # 重播會整份略過找不到 plan 的事件，checkpoint 又把它們算成已匯出；之後補回 plan 檔也不會再重播
+  referenced = {event.get("plan") for event in readEvents(projectDir) if event.get("plan")}
+  missing = sorted(referenced - set(state["plans"]))
+  if not missing:
+    return []
+  return [f"事件紀錄引用的 {planIdValue} 找不到可讀取的 plan 檔，照樣匯出會永久漏掉它的進度；"
+          "請還原 plans/ 底下對應的 plan 檔再匯出" for planIdValue in missing] + loadErrors
+
+
 def exportProgress(projectDir, config, checkSource):
-  plans = loadPlans(projectDir)
+  loadErrors = []
+  plans = loadPlans(projectDir, loadErrors)
   directory = boardDir(projectDir)
   directory.mkdir(parents=True, exist_ok=True)
   # 和寫事件共用同一把鎖：檢查到寫檔之間不能有新事件，否則邊界會漏算
@@ -881,7 +892,8 @@ def exportProgress(projectDir, config, checkSource):
     sourceProblems, branches = checkSource(result["state"])
     # 已接納的基底裡 active plan 的 plan 檔被改過時，用新檔案 hash 配舊任務匯出會把不一致蓋掉
     changedPlans = list(blockChangedPlans(result["state"], result["base"], plans).values())
-    problems = eventProblems(projectDir) + syncProblems(result["sync"]) + changedPlans + sourceProblems
+    problems = (eventProblems(projectDir) + syncProblems(result["sync"])
+                + unloadedPlanProblems(projectDir, result["state"], loadErrors) + changedPlans + sourceProblems)
     if problems:
       raise ExportError(problems)
     previous = result["base"]

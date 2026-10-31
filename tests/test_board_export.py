@@ -9,7 +9,7 @@ import board
 import board_git
 from board_core import PlanStatus, TaskStatus, deriveState, loadConfig, loadPlans, readEvents
 from board_sync import checkpointPath, loadProgress, progressPath, readSnapshot
-from conftest import git
+from conftest import git, planText
 from helpers import makeEvent, testConfig
 from test_board_sync import baseSha, portableView, projectEvents, rows
 from test_board_sync_load import started, writeEvents
@@ -166,7 +166,7 @@ def test_fixtureCoversOldAndNewMergeStates(legacyProject):
 
 def recordedResults(snapshot):
   # 交接檔記下的成果：進行中與完成 plan 裡沒放棄的任務，另一台電腦都要拿得到
-  return {commit for plan in snapshot["plans"].values() if plan["status"] in (PlanStatus.active, PlanStatus.completed)
+  return {commit for plan in snapshot["plans"].values() if plan["status"] != PlanStatus.abandoned
           for task in plan["tasks"] if task["status"] != TaskStatus.abandoned
           for commit in (task["lastCommit"], task["mergedCommit"]) if commit}
 
@@ -207,6 +207,54 @@ def test_completedPlanMergedIntoMainNeedsNoBranches(legacyProject, tmp_path, cap
   remote = tmp_path / "remote.git"
   pushListed(legacyProject, output, remote)
   assert missingResults(remote, recordedResults(readSnapshot(legacyProject))) == []
+
+
+def supersedeUnmergedPlan(projectDir):
+  # 新 plan 取代已完成但沒合併的 P0006，P0006 的完成任務仍留在交接檔裡
+  (projectDir / "plans" / "0007-replace.md").write_text(
+    planText("P0007", "取代 P0006", rows[:1], "supersedes: P0006\n"), encoding="utf-8")
+
+
+def test_supersededPlanKeepsUnmergedResultsDeliverable(legacyProject, tmp_path, capsys):
+  supersedeUnmergedPlan(legacyProject)
+  git(legacyProject, "branch", "-D", "task/P0006-T1")
+
+  assert exportState(legacyProject) == 0
+
+  output = capsys.readouterr().out
+  snapshot = readSnapshot(legacyProject)
+  assert snapshot["plans"]["P0006"]["status"] == PlanStatus.superseded
+  assert f"plan/P0006 {revParse(legacyProject, 'plan/P0006')}" in section(output, "請 push 這些分支：")
+  remote = tmp_path / "remote.git"
+  pushListed(legacyProject, output, remote)
+  results = recordedResults(snapshot)
+  assert {task["lastCommit"] for task in snapshot["plans"]["P0006"]["tasks"]} <= results
+  assert missingResults(remote, results) == []
+
+
+def deletePlanFile(path):
+  path.unlink()
+
+
+def corruptPlanFile(path):
+  path.write_bytes(b"\xff\xfe\x00 not utf-8")
+
+
+@pytest.mark.parametrize("damage", [deletePlanFile, corruptPlanFile])
+def test_firstExportRejectsEventsOfUnloadablePlan(legacyProject, capsys, damage):
+  # 舊專案的 plan 檔遺失或讀不到時，重播會整份略過它的事件；照樣匯出就把這段歷史永久丟掉
+  path = legacyProject / "plans" / "0005-old-merge.md"
+  original = path.read_bytes()
+  damage(path)
+
+  assert exportState(legacyProject) == 1
+
+  assert "P0005" in capsys.readouterr().out
+  assert not progressPath(legacyProject).exists()
+  assert not checkpointPath(legacyProject).exists()
+  path.write_bytes(original)
+  assert exportState(legacyProject) == 0
+  assert readSnapshot(legacyProject)["plans"]["P0005"]["tasks"][0]["status"] == TaskStatus.done
 
 
 def test_statusHintsCompletedPlanMergedAfterExport(legacyProject, capsys):
@@ -329,6 +377,16 @@ def rewindUnmergedCompletedPlan(projectDir):
   git(projectDir, "branch", "-f", "plan/P0006", "plan/P0006~1")
 
 
+def dropSupersededUnmergedPlan(projectDir):
+  supersedeUnmergedPlan(projectDir)
+  dropUnmergedCompletedPlan(projectDir)
+
+
+def submitUnloadablePlan(projectDir):
+  (projectDir / "plans" / "0008-broken.md").write_bytes(b"\xff\xfe\x00 not utf-8")
+  writeEvents(projectDir, [makeEvent("planSubmitted", plan="P0008")])
+
+
 @pytest.mark.parametrize("breakSource, keyword", [
   (holdAlfredLock, "Alfred"),
   (leaveHalfWork, "P0001-T1"),
@@ -343,6 +401,8 @@ def rewindUnmergedCompletedPlan(projectDir):
   (rewindOldMergedPlanBranch, "plan/P0005"),
   (dropUnmergedCompletedPlan, "plan/P0006"),
   (rewindUnmergedCompletedPlan, "plan/P0006"),
+  (dropSupersededUnmergedPlan, "plan/P0006"),
+  (submitUnloadablePlan, "P0008"),
 ])
 def test_failedChecksKeepExistingHandoffFile(legacyProject, capsys, breakSource, keyword):
   assert exportState(legacyProject) == 0

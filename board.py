@@ -276,10 +276,11 @@ def activeNeeds(state, planIdValue):
                   for task in unfinishedTasks(state, planIdValue)]
 
 
-def completedNeeds(projectDir, state, planIdValue):
-  # 完成的 plan 不會自動合併進交付分支；成果都已在交付分支上才不需要任何分支，task 分支被清掉也沒關係
-  pending = [commit for task in keptTasks(state, planIdValue) for commit in recordedCommits(task)
-             if not board_git.containsCommit(projectDir, "HEAD", commit)]
+def settledNeeds(projectDir, state, planIdValue):
+  # 完成或被取代的 plan 不會自動合併進交付分支；成果都已在交付分支上才不需要任何分支，task 分支被清掉也沒關係
+  # 被取代的 plan 只有已合併的任務成果還留在快照裡要交付，沒做完的任務已不會再接著做
+  pending = [commit for task in keptTasks(state, planIdValue) if task["status"] in mergedStatuses
+             for commit in recordedCommits(task) if not board_git.containsCommit(projectDir, "HEAD", commit)]
   return [(board_git.planBranch(planIdValue), True, pending)] if pending else []
 
 
@@ -288,8 +289,8 @@ def branchNeeds(projectDir, state):
   for planState in state["plans"].values():
     if planState["status"] == PlanStatus.active:
       needs += activeNeeds(state, planState["id"])
-    elif planState["status"] == PlanStatus.completed:
-      needs += completedNeeds(projectDir, state, planState["id"])
+    elif planState["status"] in (PlanStatus.completed, PlanStatus.superseded):
+      needs += settledNeeds(projectDir, state, planState["id"])
   return needs
 
 
