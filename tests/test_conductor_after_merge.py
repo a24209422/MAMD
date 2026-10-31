@@ -2,9 +2,11 @@ import subprocess
 import sys
 import time
 
+import pytest
+
 import board_core
 import board_git
-from board_core import PlanStatus, TaskStatus
+from board_core import BoardError, PlanStatus, TaskStatus
 import conductor as conductorModule
 from conductor import Conductor, formatEvent, mergeTestOutcome
 from helpers import fakeConfig, readCalls, runUntil
@@ -228,6 +230,76 @@ def test_startMergeTestWaitsWhenTestSlotsAreFull(tmp_path, monkeypatch):
   conductor, written, worktrees = targetConductor(tmp_path, monkeypatch, freeSlots=0)
   conductor.startMergeTest(mergePlanState("P0001"), [mergeTask("P0001", "T1")], "P0001/mergetest")
   assert (conductor.jobs, written, worktrees) == ({}, [], [])
+
+
+def finishingConductor(tmp_path, monkeypatch, removeError=None, writeError=None):
+  # 不真的跑測試、不動 worktree：記下寫入的紀錄與移除的 worktree，錯誤由參數決定
+  lines, written, removed = [], [], []
+  conductor = Conductor(tmp_path, fakeConfig(testCommand="pytest"), out=lines.append)
+
+  def removeWorktree(projectDir, planIdValue):
+    removed.append(planIdValue)
+    if removeError is not None:
+      raise removeError
+
+  def writeMergeTestRun(info, record, reused):
+    if writeError is not None:
+      raise writeError
+    written.append((info, record, reused))
+
+  monkeypatch.setattr(board_git, "removeMergeTestWorktree", removeWorktree)
+  monkeypatch.setattr(conductor, "writeMergeTestRun", writeMergeTestRun)
+  return conductor, lines, written, removed
+
+
+def finishedMergeTest(result=None, error=None):
+  job = type("FakeJob", (), {"result": result, "error": error})()
+  return {"kind": "mergeTest", "plan": "P0001", "commit": "m-T1", "covers": ["T1"], "job": job}
+
+
+def test_finishMergeTestWritesRecordAndRemovesWorktree(tmp_path, monkeypatch):
+  conductor, lines, written, removed = finishingConductor(tmp_path, monkeypatch)
+  info = finishedMergeTest(result=(False, "結尾", ["t::a"], True, ["品質門檻 a.py::x"]))
+  conductor.finishMergeTest(info)
+  assert written == [(info, {"commit": "m-T1", "command": "pytest", "passed": False, "failures": ["t::a"],
+                             "qualityChecked": True, "qualityFailures": ["品質門檻 a.py::x"], "tail": "結尾"}, False)]
+  assert (removed, lines) == (["P0001"], [])
+
+
+def test_finishMergeTestFailureNotifiesOnceWithoutRecord(tmp_path, monkeypatch):
+  conductor, lines, written, removed = finishingConductor(tmp_path, monkeypatch)
+  for _ in range(2):
+    conductor.finishMergeTest(finishedMergeTest(error=OSError("模擬測試啟動失敗")))
+  # 結果格式不對也一樣只通知，不捏造測試結果
+  conductor.finishMergeTest(finishedMergeTest(result=("不完整",)))
+  assert written == []
+  assert lines[0] == "P0001 的合併後測試執行失敗：模擬測試啟動失敗" and len(lines) == 2
+  assert lines[1].startswith("P0001 的合併後測試執行失敗：")
+  assert removed == ["P0001"] * 3
+
+
+def test_finishMergeTestPropagatesBoardErrorAfterRemovingWorktree(tmp_path, monkeypatch):
+  conductor, lines, written, removed = finishingConductor(tmp_path, monkeypatch)
+  with pytest.raises(BoardError, match="模擬看板錯誤"):
+    conductor.finishMergeTest(finishedMergeTest(error=BoardError("模擬看板錯誤")))
+  assert (written, lines, removed) == ([], [], ["P0001"])
+  # 寫事件失敗也要往外丟，讓整輪停下來，不能當成測試失敗吞掉
+  conductor, lines, written, removed = finishingConductor(tmp_path, monkeypatch, writeError=BoardError("寫入失敗"))
+  with pytest.raises(BoardError, match="寫入失敗"):
+    conductor.finishMergeTest(finishedMergeTest(result=(True, "", [], False, [])))
+  assert (written, lines, removed) == ([], [], ["P0001"])
+
+
+def test_mergeTestWorktreeRemovalFailureNotifiesOnceAndKeepsResult(tmp_path, monkeypatch):
+  conductor, lines, written, removed = finishingConductor(tmp_path, monkeypatch,
+                                                          removeError=board_git.GitError("模擬移除失敗"))
+  for _ in range(2):
+    conductor.finishMergeTest(finishedMergeTest(result=(True, "", [], False, [])))
+  assert [record["passed"] for _, record, _ in written] == [True, True]
+  assert removed == ["P0001", "P0001"]
+  assert lines == ["P0001 的合併後測試 worktree 移除失敗：模擬移除失敗"]
+  conductor.finishMergeTest(finishedMergeTest(error=OSError("模擬測試啟動失敗")))
+  assert lines == ["P0001 的合併後測試 worktree 移除失敗：模擬移除失敗", "P0001 的合併後測試執行失敗：模擬測試啟動失敗"]
 
 
 def eventsOf(conductor, eventType):
