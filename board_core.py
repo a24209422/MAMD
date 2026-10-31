@@ -702,6 +702,11 @@ def deriveState(events, plans, config):
                                    "baseCommit": None, "testBaseline": None, "rejectReason": "",
                                    "testTiming": None, "mergeTest": {"lastTested": None, "split": None},
                                    "meta": plan["meta"]}
+  return applyEvents(state, events, plans, config)
+
+
+def applyEvents(state, events, plans, config):
+  # 交接快照還原出的狀態也要接著套用本機事件，所以重播和收尾跟建初始狀態分開
   for event in events:
     eventType = event.get("type")
     if eventType == "paused":
@@ -737,8 +742,11 @@ def readyTasks(state):
 
 
 def tasksWithStatus(state, status):
+  # 派工、測試、審查、合併和等你處理都從這裡取任務；plan 檔和交接進度對不上時全部不接續，
+  # plan 仍算進行中，看板才看得到原因
   return [taskState for taskState in state["tasks"].values()
-          if taskState["status"] == status and state["plans"][taskState["plan"]]["status"] == PlanStatus.active]
+          if taskState["status"] == status and state["plans"][taskState["plan"]]["status"] == PlanStatus.active
+          and not state["plans"][taskState["plan"]].get("syncBlocked")]
 
 
 def isPlanFinished(state, planIdValue):
