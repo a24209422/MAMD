@@ -198,29 +198,52 @@ def buildResolvePrompt(plan, taskId, roundNumber, conflicts, userNote="", testCo
   return "\n".join(parts)
 
 
+def resolvedConflictReviewLines(resolvedConflicts):
+  if not resolvedConflicts:
+    return []
+  # 解衝突時最容易出的錯是把別人的改動蓋掉，審查者要知道這一輪的重點
+  return ["", f"這一輪是解合併衝突：其他任務先合併進 plan 分支，和這個任務都改了 {'、'.join(resolvedConflicts)}。",
+          "這個任務已經把最新的 plan 分支合併進來並解掉衝突。請確認這個任務原本的改動還在，"
+          "也沒有刪掉或改壞其他任務已經合併的內容。下面的 diff 是這個任務相對於最新 plan 分支的改動。"]
+
+
+def testRunReviewLines(testRun, baselineFailures):
+  if not testRun:
+    return []
+  return ["", f"自動測試結果：{'通過' if testRun['passed'] else '失敗'}", "```", testRun.get("tail", ""), "```",
+          *baselineFailureLines(testRun, baselineFailures or [])]
+
+
+def optionalReviewLines(resolvedConflicts, testRun, baselineFailures, afterMerge, mergeFailures, tddCrap):
+  # 各區段的順序是提示詞契約的一部分，審查者依這個順序讀
+  lines = [*resolvedConflictReviewLines(resolvedConflicts), *testRunReviewLines(testRun, baselineFailures)]
+  if afterMerge:
+    lines += ["", *afterMergeReviewLines(mergeFailures or [])]
+  if tddCrap:
+    lines += ["", *tddReviewLines]
+  return lines
+
+
+def reviewDiffLines(diff):
+  if len(diff) > maxDiffChars:
+    # 太長的 diff 會超出模型能讀的範圍，截斷並明講，讓審查者知道還有沒看到的部分
+    diff = diff[:maxDiffChars] + f"\n（diff 太長，只附前 {maxDiffChars} 個字元）"
+  return ["", "這個任務的 diff：", "```diff", diff or "（沒有 diff）", "```"]
+
+
+def previousErrorLines(previousErrors):
+  if not previousErrors:
+    return []
+  return ["", "你上一次的審查結果不符合規則，請修正後重新回覆：", *[f"- {error}" for error in previousErrors]]
+
+
 def buildReviewPrompt(plan, taskId, roundNumber, diff, testRun=None, previousErrors=None, resolvedConflicts=None,
                       tddCrap=False, baselineFailures=None, afterMerge=False, mergeFailures=None):
   parts = [
     "審查 " + taskHeadline(plan, taskId, roundNumber), "",
     "這個任務要滿足的需求（必改的 ref 只能用這些編號或「驗證」）：", *requirementLines(plan, taskId), "",
     "plan 裡和這個任務有關的列：", formatRows(taskRows(plan, taskId)), *extraTextLines(plan),
+    *optionalReviewLines(resolvedConflicts, testRun, baselineFailures, afterMerge, mergeFailures, tddCrap),
+    *reviewDiffLines(diff), *previousErrorLines(previousErrors),
   ]
-  if resolvedConflicts:
-    # 解衝突時最容易出的錯是把別人的改動蓋掉，審查者要知道這一輪的重點
-    parts += ["", f"這一輪是解合併衝突：其他任務先合併進 plan 分支，和這個任務都改了 {'、'.join(resolvedConflicts)}。",
-              "這個任務已經把最新的 plan 分支合併進來並解掉衝突。請確認這個任務原本的改動還在，"
-              "也沒有刪掉或改壞其他任務已經合併的內容。下面的 diff 是這個任務相對於最新 plan 分支的改動。"]
-  if testRun:
-    parts += ["", f"自動測試結果：{'通過' if testRun['passed'] else '失敗'}", "```", testRun.get("tail", ""), "```"]
-    parts += baselineFailureLines(testRun, baselineFailures or [])
-  if afterMerge:
-    parts += ["", *afterMergeReviewLines(mergeFailures or [])]
-  if tddCrap:
-    parts += ["", *tddReviewLines]
-  if len(diff) > maxDiffChars:
-    # 太長的 diff 會超出模型能讀的範圍，截斷並明講，讓審查者知道還有沒看到的部分
-    diff = diff[:maxDiffChars] + f"\n（diff 太長，只附前 {maxDiffChars} 個字元）"
-  parts += ["", "這個任務的 diff：", "```diff", diff or "（沒有 diff）", "```"]
-  if previousErrors:
-    parts += ["", "你上一次的審查結果不符合規則，請修正後重新回覆：", *[f"- {error}" for error in previousErrors]]
   return "\n".join(parts)
