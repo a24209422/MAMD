@@ -771,6 +771,99 @@ def test_foreignReviewingIsReviewedAgainHereInSameRound(computers, capsys, monke
   assert p0001Progress(alfred)["P0001/T1"] == (TaskStatus.reviewing, 2)
 
 
+def blockFor(clone, alfred, block):
+  # 擋住 P0001 的條件在 Alfred 第一次 tick 前就存在；回傳模擬使用者解除阻擋的動作
+  if block == "missingBranch":
+    git(clone, "update-ref", "-d", "refs/remotes/origin/task/P0001-T1")
+    return lambda: git(clone, "fetch", "-q", "origin")
+  _, state = alfred.currentState()
+  if block == "planConflict":
+    alfred.ensurePlanWorktrees(state)
+    worktree = board_git.planWorktreePath(clone, "P0001")
+    leaveConflictIn(worktree, "plan/P0001", "t3.txt")
+  else:
+    worktree = board_git.ensureTaskWorktree(clone, "P0001", "T1")
+    leaveConflictIn(worktree)
+  return lambda: git(worktree, "merge", "--abort")
+
+
+def waitingTasks(clone):
+  return {task["task"]: task["handoffWaiting"] for task in board_api.stateView(clone)["tasks"] if task["plan"] == "P0001"}
+
+
+# 來源電腦停在哪個執行態、本機恢復時記的中斷階段，以及恢復後重新開始的事件
+foreignRuns = {
+  "writing": (lambda source: [started("T1", roundNumber=2)], TaskStatus.writing, "write", "taskStarted"),
+  "reviewing": (lambda source: reviewedInSource(source, passed=False), TaskStatus.reviewing, "review", "reviewStarted"),
+}
+
+
+@pytest.mark.parametrize("block", ["missingBranch", "planConflict", "taskConflict"])
+@pytest.mark.parametrize("stage", ["writing", "reviewing"])
+def test_blockedForeignRunKeepsProgressUntilResolvedThenRecoversOnce(computers, writePlan, capsys, monkeypatch,
+                                                                     stage, block):
+  source, clone, remote = computers
+  sourceEvents, status, interruptedStage, restartType = foreignRuns[stage]
+  writeEvents(source, sourceEvents(source))
+  publish(source, capsys, remote)
+  git(clone, "pull", "-q", "--ff-only")
+  jobs = []
+  recordAgentJobs(monkeypatch, jobs)
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+  unblock = blockFor(clone, alfred, block)
+  alfred.currentState()
+  approveOtherPlan(clone, writePlan)
+  eventCount = len(readEvents(clone))
+
+  alfred.tick()
+  alfred.tick()
+
+  # 被擋期間不記中斷、不改階段與輪次，仍顯示等待接續；正常的 P0007 照常派工
+  assert "P0001" in alfred.sync["blockedPlans"]
+  assert p0001EventsSince(clone, eventCount) == []
+  assert p0001Progress(alfred)["P0001/T1"] == (status, 2)
+  assert waitingTasks(clone)["T1"] is True
+  assert [job["cwd"] for job in jobs] == [board_git.taskWorktreePath(clone, "P0007", "T1")]
+
+  unblock()
+  alfred.tick()
+  alfred.tick()
+
+  # 同一個 Alfred 解除後自動補做恢復：只記一次中斷，回到原階段在本機同一輪重新開始，之後的 tick 不再重複
+  assert "P0001" not in alfred.sync["blockedPlans"]
+  later = [event for event in readEvents(clone)[eventCount:] if event.get("plan") == "P0001" and event.get("task") == "T1"]
+  assert [(event["type"], event["round"]) for event in later] == [("taskInterrupted", 2), (restartType, 2)]
+  assert later[0]["data"]["stage"] == interruptedStage
+  assert [job["cwd"] for job in jobs][1:] == [board_git.taskWorktreePath(clone, "P0001", "T1")]
+  assert p0001Progress(alfred)["P0001/T1"] == (status, 2)
+  assert waitingTasks(clone)["T1"] is False
+
+
+def test_blockedFinishedPlanIsCompletedOnlyAfterResolved(computers, monkeypatch):
+  _, clone, _ = computers
+  # P0005 的任務都完成了，但這台電腦抓不到它的 plan 分支
+  git(clone, "update-ref", "-d", "refs/remotes/origin/plan/P0005")
+  recordAgentJobs(monkeypatch, [])
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+
+  def completions():
+    return [event for event in readEvents(clone) if event["type"] == "planCompleted" and event["plan"] == "P0005"]
+
+  alfred.tick()
+  alfred.tick()
+
+  assert "P0005" in alfred.sync["blockedPlans"]
+  assert completions() == []
+  assert alfred.currentState()[1]["plans"]["P0005"]["status"] == PlanStatus.active
+
+  git(clone, "fetch", "-q", "origin")
+  alfred.tick()
+  alfred.tick()
+
+  assert "P0005" not in alfred.sync["blockedPlans"]
+  assert len(completions()) == 1
+
+
 def test_foreignMergingIsMergedHereInLocalPlanWorktree(computers, capsys, monkeypatch):
   source, clone, remote = computers
   writeEvents(source, reviewedInSource(source, passed=True))

@@ -309,6 +309,8 @@ mergeTestRecordFields = ("commit", "command", "passed", "failures", "qualityChec
 detachedTestKinds = ("baseline", "mergeTest")
 # 交接檔有新版本卻沒接納的狀態：分歧要等使用者決定接續哪一邊，不能自己往下派
 heldSyncStatuses = ("waiting", "diverged")
+# 沒有 job 卻停在這兩個階段的任務，恢復時記成哪個階段中斷
+interruptedStages = {TaskStatus.writing: "write", TaskStatus.reviewing: "review"}
 
 
 class Conductor:
@@ -320,6 +322,7 @@ class Conductor:
     self.out = out
     self.jobs = {}
     self.recovered = False
+    self.pendingRecovery = set()
     self.notified = set()
     self.onlyPlansCache = {}
     # 只在啟動後第一次讀進度時接納交接檔；之後換基底會讓執行中的任務和進度對不上
@@ -413,9 +416,7 @@ class Conductor:
   def tick(self):
     self.refreshRoles()
     plans, state = self.currentState()
-    if not self.recovered:
-      self.recoverInterrupted(state)
-      self.recovered = True
+    if self.recoverInterrupted(state):
       plans, state = self.currentState()
     if state["paused"]:
       self.stopJobs(list(self.jobs), recordInterruption=True)
@@ -449,12 +450,31 @@ class Conductor:
       self.recovered = False
 
   def recoverInterrupted(self, state):
-    # 剛啟動時手上沒有任何 agent；事件裡還在寫或審的任務，代表上次 conductor 中途結束
-    for key, taskState in state["tasks"].items():
-      stage = {TaskStatus.writing: "write", TaskStatus.reviewing: "review"}.get(taskState["status"])
-      if stage and key not in self.jobs and state["plans"][taskState["plan"]]["status"] == PlanStatus.active:
+    if not self.recovered:
+      # 剛啟動時手上沒有任何 agent；事件裡還在寫或審的任務，代表上次 conductor 中途結束
+      self.pendingRecovery.update(key for key, taskState in state["tasks"].items()
+                                  if taskState["status"] in interruptedStages)
+      self.recovered = True
+    recoveredAny = False
+    for key in sorted(self.pendingRecovery):
+      taskState = state["tasks"].get(key)
+      stage = self.recoveryStage(state, key)
+      if stage and state["plans"][taskState["plan"]].get("syncBlocked"):
+        # 交接被擋時記中斷會改掉交接進度；留在待恢復清單，解除後同一個 Alfred 的下一輪再補做
+        continue
+      self.pendingRecovery.discard(key)
+      if stage:
         appendEvent(self.projectDir, "taskInterrupted", plan=taskState["plan"], task=taskState["task"],
                     roundNumber=taskState["round"], data={"stage": stage})
+        recoveredAny = True
+    return recoveredAny
+
+  def recoveryStage(self, state, key):
+    taskState = state["tasks"].get(key)
+    # 本機已經有 job、任務已離開寫或審、plan 不再進行中，都不需要再恢復
+    if taskState is None or key in self.jobs or state["plans"][taskState["plan"]]["status"] != PlanStatus.active:
+      return None
+    return interruptedStages.get(taskState["status"])
 
   def stopJobs(self, keys, recordInterruption):
     for key in keys:
@@ -1225,7 +1245,9 @@ class Conductor:
 
   def completeFinishedPlans(self, state):
     for planState in state["plans"].values():
-      if planState["status"] == PlanStatus.active and isPlanFinished(state, planState["id"]):
+      # 交接被擋的 plan 不判定完成：完成會改掉交接進度，要等分支和 worktree 處理好
+      if (planState["status"] == PlanStatus.active and not planState.get("syncBlocked")
+          and isPlanFinished(state, planState["id"])):
         appendEvent(self.projectDir, "planCompleted", plan=planState["id"])
 
   def runForever(self):
