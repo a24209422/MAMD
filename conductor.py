@@ -20,7 +20,7 @@ from board_core import (BoardError, PlanStatus, TaskStatus, agentLanes, appendEv
                         readUserConfig, readyTasks, roleChoiceText, roleNames, roleSpec, taskKey, tasksWithStatus)
 from board_prompts import buildResolvePrompt, buildReviewPrompt, buildWritePrompt, reviewerRules, writerRules
 from board_scheduling import availableLane
-from board_sync import loadProgress
+from board_sync import blockedPlanMessages, loadProgress
 from board_review import (renderReviewMarkdown, reviewFileName, reviewResultSchema, validateReview,
                           validateWriteResult, writeResultSchema)
 
@@ -367,7 +367,20 @@ class Conductor:
     self.sync = loaded["sync"]
     if self.sync["message"]:
       self.notifyOnce("交接檔｜" + self.sync["message"])
+    for message in blockedPlanMessages(self.sync):
+      self.notifyOnce(message)
+    if not self.handoffHeld():
+      # 卡住的新交接檔可能記著不同的 SHA，照舊基底建分支，接納新版後反而會變成歧異
+      self.adoptHandoffBranches()
     return plans, loaded["state"]
+
+  def adoptHandoffBranches(self):
+    # 只有 Alfred 會建分支；status 和看板只讀進度，不動 git
+    for branch, sha in self.sync["adoptBranches"].items():
+      try:
+        board_git.adoptRemoteBranch(self.projectDir, branch, sha)
+      except Exception as error:
+        self.notifyOnce(f"交接檔｜無法從遠端建立分支 {branch}：{error}")
 
   def notifyOnce(self, message):
     # 每隔幾秒就跑一輪，問題沒解決前每輪都會再遇到同一個錯誤；只印第一次，終端機才不會被洗版
@@ -526,7 +539,8 @@ class Conductor:
 
   def ensurePlanWorktrees(self, state):
     for planState in state["plans"].values():
-      if planState["status"] == PlanStatus.active:
+      # 交接缺分支時從核准基底建 plan 分支，會假裝重建出一份沒有任何成果的進度
+      if planState["status"] == PlanStatus.active and not planState.get("syncBlocked"):
         try:
           board_git.ensurePlanWorktree(self.projectDir, planState["id"], planState["baseCommit"])
         except Exception as error:
@@ -989,7 +1003,8 @@ class Conductor:
   def startTest(self, taskState):
     info = {"kind": "test", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
             "agent": taskState["agent"]}
-    worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
+    # 接手另一台電腦交接的測試中任務時，這台電腦還沒有 task worktree，要先依本機路徑建好
+    worktree = board_git.ensureTaskWorktree(self.projectDir, info["plan"], info["task"])
     # 記下被測的 commit 和指令：之後程式碼相同時才能沿用這次的結果
     info["commit"] = board_git.headCommit(worktree)
     info["command"] = self.config["testCommand"]
@@ -1059,7 +1074,8 @@ class Conductor:
             "agent": lane, "attempt": attempt, "cli": launch["spec"]["cli"], "model": launch["spec"]["model"],
             "launch": launch}
     try:
-      worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
+      # 接手另一台電腦交接的待審查任務時，這台電腦還沒有 task worktree，要先依本機路徑建好
+      worktree = board_git.ensureTaskWorktree(self.projectDir, info["plan"], info["task"])
       diff = board_git.taskDiff(self.projectDir, info["plan"], info["task"])
       resolvedConflicts = taskState["conflictFiles"] if taskState["lastWriteMode"] == "resolve" else None
       afterMerge = taskState["testAfterMerge"] and bool(self.config.get("testCommand"))         and not self.config.get("skipTests", False)

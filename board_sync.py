@@ -7,6 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
+import board_git
 from board_core import (BoardError, PlanStatus, TaskStatus, applyEvents, boardDir, boardDirName, deriveState,
                         eventsFileName, fileLock, loadPlans, lockFileName, newTaskState, readEvents, taskKey)
 from board_review import renderReviewMarkdown, verifyRef
@@ -700,7 +701,20 @@ def deriveFromBase(base, events, eventCount, plans, config):
   # 邊界之前的事件已經算在交接快照裡，再重播會重複核准、多加輪次；只有暫停是本機設定要沿用
   state = stateFromSnapshot(base, plans)
   earlier = [event for event in events[:eventCount] if event.get("type") in pauseEvents]
-  return applyEvents(state, earlier + events[eventCount:], plans, config)
+  state = applyEvents(state, earlier + events[eventCount:], plans, config)
+  markHandoffWaiting(state, events[eventCount:])
+  return state
+
+
+# 交接時另一台電腦正在跑的階段：這台電腦沒有對應的 agent 或測試，要由這裡的 Alfred 重新執行
+handoffRunningStatuses = (TaskStatus.writing, TaskStatus.testing, TaskStatus.reviewing, TaskStatus.merging)
+
+
+def markHandoffWaiting(state, laterEvents):
+  # 本機在邊界之後有這個任務的事件，就是這裡已經接手，不再是另一台電腦留下的進度
+  touched = {taskKey(event["plan"], event["task"]) for event in laterEvents if event.get("task")}
+  for key, taskState in state["tasks"].items():
+    taskState["handoffWaiting"] = taskState["status"] in handoffRunningStatuses and key not in touched
 
 
 def progressView(state, base):
@@ -712,7 +726,7 @@ def progressView(state, base):
 
 def syncInfo(status, message, base, incoming):
   return {"status": status, "message": message, "baseRevision": base["revision"] if base else None,
-          "incomingRevision": incoming["revision"] if incoming else None, "blockedPlans": {}}
+          "incomingRevision": incoming["revision"] if incoming else None, "blockedPlans": {}, "adoptBranches": {}}
 
 
 def localState(context, checkpoint):
@@ -816,9 +830,61 @@ def blockChangedPlans(state, base, plans):
     continued = entry["status"] == PlanStatus.active and planState["status"] == PlanStatus.active
     reason = planFileProblem(plans.get(planIdValue), entry) if continued else None
     if reason:
-      planState["syncBlocked"] = reason
-      blocked[planIdValue] = reason
+      blockPlan(state, blocked, planIdValue, reason)
   return blocked
+
+
+def blockedPlanMessages(sync):
+  # status、看板和 Alfred 用同一句話說明，使用者看到哪一邊都知道要補什麼
+  return [f"交接檔｜{planIdValue} 不派工：{reason}" for planIdValue, reason in sync["blockedPlans"].items()]
+
+
+def blockPlan(state, blocked, planIdValue, reason):
+  # 同一份 plan 可能同時有 plan 檔和多個分支的問題，全部列出才知道要補哪些
+  blocked[planIdValue] = f"{blocked[planIdValue]}；{reason}" if planIdValue in blocked else reason
+  state["plans"][planIdValue]["syncBlocked"] = blocked[planIdValue]
+
+
+def continuedBranches(state, recorded):
+  # 只驗接下來還要在本機繼續做的分支：完成的 plan、完成或放棄的任務不再派工，分支被清掉也沒關係
+  wanted = {}
+  for planState in state["plans"].values():
+    if planState["status"] != PlanStatus.active:
+      continue
+    names = [board_git.planBranch(planState["id"])] + [
+      board_git.taskBranch(taskState["plan"], taskState["task"]) for taskState in state["tasks"].values()
+      if taskState["plan"] == planState["id"] and taskState["status"] not in (TaskStatus.done, TaskStatus.abandoned)]
+    wanted.update({name: planState["id"] for name in names if name in recorded})
+  return wanted
+
+
+def branchProblem(projectDir, branch, sha, refs):
+  local = refs.get(f"refs/heads/{branch}")
+  if local is None:
+    if sha in board_git.remoteShas(refs, branch):
+      return None
+    return (f"本機沒有分支 {branch}，遠端也沒有交接記錄的 {sha[:12]}；"
+            "請在來源電腦 push 這個分支，再到這台電腦執行 git fetch")
+  # 本機在交接後接著做，分支會往前走；只要還帶著交接記錄的成果就能接續
+  if local == sha or board_git.containsCommit(projectDir, f"refs/heads/{branch}", sha):
+    return None
+  return (f"本機分支 {branch} 沒有交接記錄的 {sha[:12]}（落後或和來源分岔），不會自動改寫本機分支；"
+          f"請比對兩邊的成果，把本機分支更新到包含 {sha[:12]} 後再接續")
+
+
+def blockUnreachableBranches(projectDir, state, base, blocked):
+  """缺分支或分支歧異的 plan 不派工；回傳本機還沒有、但遠端有相同 SHA、可以直接建立的分支。"""
+  recorded = base["branches"] if base else {}
+  wanted = continuedBranches(state, recorded)
+  refs = board_git.branchRefs(projectDir) if wanted else {}
+  adoptable = {}
+  for branch, planIdValue in wanted.items():
+    reason = branchProblem(projectDir, branch, recorded[branch], refs)
+    if reason:
+      blockPlan(state, blocked, planIdValue, reason)
+    elif f"refs/heads/{branch}" not in refs:
+      adoptable[branch] = recorded[branch]
+  return adoptable
 
 
 def holdIncoming(projectDir, plans, config, incoming):
@@ -834,7 +900,9 @@ def loadProgress(projectDir, config, plans=None, accept=True):
   if result["accept"] is not None:
     result = (acceptUnderLock(projectDir, plans, config) if accept
               else holdIncoming(projectDir, plans, config, result["base"]))
-  result["sync"]["blockedPlans"] = blockChangedPlans(result["state"], result["base"], plans)
+  blocked = blockChangedPlans(result["state"], result["base"], plans)
+  result["sync"]["adoptBranches"] = blockUnreachableBranches(projectDir, result["state"], result["base"], blocked)
+  result["sync"]["blockedPlans"] = blocked
   return {"plans": plans, "state": result["state"], "sync": result["sync"]}
 
 

@@ -9,7 +9,7 @@ from board_core import (PlanStatus, TaskStatus, agentLanes, boardDir, configProb
                         loadConfig, loadPlans, planTasks, readEvents, readUserConfig, roleNames,
                         roleSpec, taskKey, tasksWithStatus)
 from board_stats import approvedPlanIds, planStats, taskRounds
-from board_sync import loadProgress
+from board_sync import blockedPlanMessages, loadProgress
 from conductor import formatEvent, processAlive, readLockPid
 from rtm_graph import asList, formatList, parseArea
 
@@ -31,6 +31,7 @@ def loadSnapshot(projectDir):
   if loaded["sync"]["message"]:
     # 放進每次輪詢都重算的警告，畫面只要還在讀舊進度，提示就會一直在
     warnings.append("交接檔｜" + loaded["sync"]["message"])
+  warnings += blockedPlanMessages(loaded["sync"])
   return {"plans": plans, "events": events, "config": config, "warnings": warnings,
           "state": loaded["state"], "sync": loaded["sync"]}
 
@@ -127,6 +128,7 @@ def taskView(projectDir, taskState):
           "dependsOn": list(taskState["dependsOn"]),
           "reviews": [Path(notes).name for notes in taskState["reviews"] if notes],
           "lastTest": taskState["lastTest"], "needs": taskState["needs"],
+          "handoffWaiting": taskState.get("handoffWaiting", False),
           "worktree": str(board_git.taskWorktreePath(projectDir, taskState["plan"], taskState["task"]))}
 
 

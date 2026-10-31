@@ -122,6 +122,7 @@ function consoleDetail(state, log) {
     ['前置', task.dependsOn.length ? task.dependsOn.join('、') : '無'],
     ['worktree', task.worktree],
     task.needs ? ['等你處理', task.needs.reason] : null,
+    task.handoffWaiting ? ['等待接續', '另一台電腦交接時的階段，這台電腦的 Alfred 會重新執行，不沿用原本的對話'] : null,
     ['上次測試', task.lastTest ? (task.lastTest.passed ? '通過' : '失敗') : '還沒跑'],
   ].filter(Boolean);
   const testTail = task.lastTest && task.lastTest.tail

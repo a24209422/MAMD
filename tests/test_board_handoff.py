@@ -1,13 +1,16 @@
 """兩台電腦交接：電腦 1 匯出並 push，電腦 2 clone／pull 後 init、status、看板與 Alfred 讀到同一份進度。"""
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
 import board
+import board_agents
 import board_api
 import board_git
-from board_core import PlanStatus, TaskStatus, readEvents, tasksWithStatus
+import conductor as conductorModule
+from board_core import PlanStatus, TaskStatus, deriveState, loadConfig, loadPlans, readEvents, tasksWithStatus
 from board_setup.project import Options, initialize
 from board_sync import checkpointPath, progressPath, readCheckpoint, readSnapshot
 from conductor import Conductor
@@ -254,3 +257,190 @@ def test_stoppingAlfredAcceptsWaitingProgress(pulledWhileAlfredRuns, capsys):
 
   assert "  T1 寫程式中（第 2/3 輪）" in planLines(statusOutput(clone, capsys))
   assert board_api.stateView(clone)["sync"]["baseRevision"] == updated["revision"]
+
+
+def localSha(projectDir, branch):
+  return board_git.runGit(projectDir, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False)
+
+
+def test_alfredContinuesFromPushedBranchShasAtNewPath(computers):
+  source, clone, _ = computers
+  recorded = readSnapshot(clone)["branches"]
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+
+  plans, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+
+  assert alfred.sync["blockedPlans"] == {}
+  for branch in ("plan/P0001", "task/P0001-T1", "task/P0001-T3", "plan/P0005"):
+    assert localSha(clone, branch) == recorded[branch]
+  worktree = board_git.planWorktreePath(clone, "P0001")
+  assert board_git.headCommit(worktree) == recorded["plan/P0001"]
+  assert clone.parent in worktree.parents and source not in worktree.parents
+
+
+def test_missingPushedBranchShowsProgressButRefusesDispatch(computers, capsys, monkeypatch):
+  source, clone, _ = computers
+  expected = [line for line in planLines(statusOutput(source, capsys)) if not line.endswith(f"｜{PlanStatus.draft}")]
+  git(clone, "update-ref", "-d", "refs/remotes/origin/task/P0001-T1")
+  messages, launched = [], []
+  alfred = Conductor(clone, config=fakeConfig(), out=messages.append)
+  stubLaunches(alfred, monkeypatch, launched)
+
+  plans, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  alfred.startReviews(plans, state)
+  alfred.startWrites(plans, state)
+
+  output = statusOutput(clone, capsys)
+  assert planLines(output) == expected
+  assert "P0001 不派工" in output and "task/P0001-T1" in output
+  assert any("P0001 不派工" in warning for warning in board_api.stateView(clone)["warnings"])
+  assert [entry for entry in launched if entry[1] == "P0001"] == []
+  assert not board_git.planWorktreePath(clone, "P0001").exists()
+  assert localSha(clone, "task/P0001-T1") == ""
+  refusal = [message for message in messages if "P0001" in message and "task/P0001-T1" in message]
+  assert refusal and "push" in refusal[0] and "git fetch" in refusal[0]
+  # 其他分支都在的 plan 照常接續
+  assert localSha(clone, "plan/P0005") == readSnapshot(clone)["branches"]["plan/P0005"]
+
+
+def test_divergedLocalBranchIsKeptAndBlocksPlan(computers):
+  _, clone, _ = computers
+  git(clone, "branch", "task/P0001-T1", "main")
+  diverged = localSha(clone, "task/P0001-T1")
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+
+  _, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+
+  assert "task/P0001-T1" in alfred.sync["blockedPlans"]["P0001"]
+  assert localSha(clone, "task/P0001-T1") == diverged
+  assert tasksWithStatus(state, TaskStatus.mergedUntested) == []
+
+
+def test_finishedWorkKeepsItsStageWithoutDeletedTaskBranches(computers, capsys, monkeypatch):
+  source, clone, _ = computers
+  sourceState = deriveState(readEvents(source), loadPlans(source), loadConfig(source))
+  sourceStatuses = {key: task["status"] for key, task in sourceState["tasks"].items()}
+  jobs = []
+  recordAgentJobs(monkeypatch, jobs)
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+
+  plans, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  alfred.startReviews(plans, state)
+  alfred.startWrites(plans, state)
+
+  assert alfred.sync["blockedPlans"] == {}
+  assert state["tasks"]["P0001/T3"]["status"] == sourceStatuses["P0001/T3"] == TaskStatus.mergedUntested
+  assert state["tasks"]["P0005/T1"]["status"] == TaskStatus.done
+  # 完成的 plan 只看交付分支上的成果，task 分支沒 push、這台電腦也沒有都照樣顯示完成
+  for planIdValue in ("P0004", "P0006"):
+    assert state["plans"][planIdValue]["status"] == PlanStatus.completed
+    assert localSha(clone, f"task/{planIdValue}-T1") == ""
+  def finishedLines(projectDir):
+    return [line for line in planLines(statusOutput(projectDir, capsys)) if line.startswith(("P0004", "P0006"))]
+  shown = finishedLines(clone)
+  assert shown == finishedLines(source)
+  assert len(shown) == 2 and all(f"｜{PlanStatus.completed}｜" in line for line in shown)
+  restarted = {(event["plan"], event["task"]) for event in readEvents(clone) if event["type"] == "taskStarted"}
+  assert restarted & {("P0001", "T3"), ("P0005", "T1"), ("P0004", "T1"), ("P0006", "T1")} == set()
+
+
+def recordAgentJobs(monkeypatch, recorded):
+  # 只記下要啟動的指令與工作目錄，不真的跑 agent
+  class RecordedJob:
+    def __init__(self, argv, cwd, stdinText, *args, **kwargs):
+      recorded.append({"argv": [str(part) for part in argv], "cwd": Path(cwd), "stdin": stdinText or ""})
+
+    def start(self):
+      return self
+  monkeypatch.setattr(board_agents, "AgentJob", RecordedJob)
+
+
+def test_foreignWritingWaitsThenRestartsHereWithoutOldSession(computers, capsys, monkeypatch):
+  source, clone, remote = computers
+  sourceWorktree = board_git.taskWorktreePath(source, "P0001", "T1")
+  writeEvents(source, [makeEvent("taskStarted", plan="P0001", task="T1", roundNumber=2, agent="claude",
+                                 sessionId="來源對話", resume=False, worktree=str(sourceWorktree))])
+  recorded = publish(source, capsys, remote)["branches"]
+  git(clone, "pull", "-q", "--ff-only")
+
+  lines = statusOutput(clone, capsys).splitlines()
+  assert "等待接續" in lines[lines.index("  T1 寫程式中（第 2/3 輪）") + 1]
+  waiting = {task["task"]: task["handoffWaiting"] for task in board_api.stateView(clone)["tasks"] if task["plan"] == "P0001"}
+  assert waiting == {"T1": True, "T2": False, "T3": False}
+
+  jobs = []
+  recordAgentJobs(monkeypatch, jobs)
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+  plans, state = alfred.currentState()
+  alfred.recoverInterrupted(state)
+  plans, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  alfred.startWrites(plans, state)
+
+  startedHere = [event for event in readEvents(clone) if event["type"] == "taskStarted"][-1]
+  assert (startedHere["task"], startedHere["round"]) == ("T1", 2)
+  assert startedHere["data"]["resume"] is False and startedHere["data"]["sessionId"] != "來源對話"
+  worktree = board_git.taskWorktreePath(clone, "P0001", "T1")
+  assert [job["cwd"] for job in jobs] == [worktree]
+  assert board_git.headCommit(worktree) == recorded["task/P0001-T1"]
+  launchText = " ".join(jobs[0]["argv"]) + jobs[0]["stdin"]
+  assert str(source) not in launchText and "來源對話" not in launchText
+  assert "等待接續" not in statusOutput(clone, capsys)
+
+
+def test_waitingReviewIsReviewedHereInRebuiltWorktree(computers, capsys, monkeypatch):
+  source, clone, remote = computers
+  writeEvents(source, [makeEvent("taskWritten", plan="P0001", task="T1", summary="完成",
+                                 commit=localSha(source, "task/P0001-T1"))])
+  recorded = publish(source, capsys, remote)["branches"]
+  git(clone, "pull", "-q", "--ff-only")
+
+  jobs = []
+  recordAgentJobs(monkeypatch, jobs)
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+  plans, state = alfred.currentState()
+  waiting = tasksWithStatus(state, TaskStatus.toReview)
+  assert [task["task"] for task in waiting] == ["T1"]
+  alfred.ensurePlanWorktrees(state)
+  alfred.startReviews(plans, state)
+
+  # 審查在這台電腦的 task worktree 裡看交接記錄的成果，不是來源電腦的路徑
+  worktree = board_git.taskWorktreePath(clone, "P0001", "T1")
+  assert [job["cwd"] for job in jobs] == [worktree]
+  assert board_git.headCommit(worktree) == recorded["task/P0001-T1"]
+  assert str(source) not in " ".join(jobs[0]["argv"]) + jobs[0]["stdin"]
+  reviewStarted = [event for event in readEvents(clone) if event["type"] == "reviewStarted"][-1]
+  # 接手審查不消耗修正輪
+  assert (reviewStarted["task"], reviewStarted["round"]) == ("T1", waiting[0]["round"])
+
+
+def test_foreignTestingRerunsHereInRebuiltWorktree(computers, capsys, monkeypatch):
+  source, clone, remote = computers
+  command = "python -c pass"
+  writeEvents(source, [makeEvent("testBaseline", plan="P0001", command=command, passed=True, failures=[]),
+                       makeEvent("taskWritten", plan="P0001", task="T1", summary="完成", testing=True,
+                                 commit=localSha(source, "task/P0001-T1"))])
+  recorded = publish(source, capsys, remote)["branches"]
+  git(clone, "pull", "-q", "--ff-only")
+  assert "等待接續" in statusOutput(clone, capsys)
+
+  testedIn = []
+  monkeypatch.setattr(conductorModule, "BackgroundTestJob", lambda runTestCommand, worktree: type(
+    "RecordedTest", (), {"start": lambda self: testedIn.append(Path(worktree)) or self})())
+  alfred = Conductor(clone, config=fakeConfig(testCommand=command), out=lambda message: None)
+  _, state = alfred.currentState()
+  # 另一台電腦的測試基準只當歷史，這台電腦要先用自己的環境重跑基準
+  assert alfred.needsTestBaseline(state["plans"]["P0001"])
+  writeEvents(clone, [makeEvent("testBaseline", plan="P0001", command=command, passed=True, failures=[])])
+  _, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  alfred.startTests(state)
+
+  # 另一台電腦的測試結果不能當這台的快取，要在這台電腦的 worktree 重跑交接記錄的成果
+  worktree = board_git.taskWorktreePath(clone, "P0001", "T1")
+  assert testedIn == [worktree]
+  assert board_git.headCommit(worktree) == recorded["task/P0001-T1"]
