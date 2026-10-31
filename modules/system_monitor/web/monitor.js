@@ -2,7 +2,7 @@
 // 兩種畫面共用同一份快取和同一個輪詢排程，與儀表板 /api/state 的 2 秒輪詢分開。
 //
 // 主系統的接法（掛載節點和換頁時機由主系統決定，模組不碰導覽與 board 狀態）：
-//   const monitor = SystemMonitor.shared();
+//   const monitor = SystemMonitor.shared({ apiUrl: '/api/projects/<id>/system-monitor' });  // 不給 apiUrl 時用模組預設網址
 //   const page = monitor.mountPage(element);
 //   const summary = monitor.mountSummary(element, { href: '#system-monitor' });
 //   page.setVisible(true);   // 進入這一頁；離開時 setVisible(false)
@@ -89,8 +89,8 @@
     return read.state === 'ok' ? read.percent : null;
   }
 
-  async function fetchPayload(fetchImpl, signal) {
-    const response = await fetchImpl(apiPath, { cache: 'no-store', signal });
+  async function fetchPayload(fetchImpl, url, signal) {
+    const response = await fetchImpl(url, { cache: 'no-store', signal });
     const text = await response.text();
     if (!response.ok) {
       let message = '';
@@ -125,6 +125,8 @@
 
   function createMonitor(options = {}) {
     const fetchImpl = options.fetch || ((...args) => root.fetch(...args));
+    // 主系統依本頁專案給網址，每個專案讀自己的採集器；模組單獨使用時沿用預設網址
+    const url = options.apiUrl || apiPath;
     const now = options.now || (() => Date.now());
     const setTimer = options.setTimeout || ((fn, ms) => root.setTimeout(fn, ms));
     const clearTimer = options.clearTimeout || (id => root.clearTimeout(id));
@@ -175,7 +177,7 @@
       let payload = null;
       let failure = '';
       try {
-        payload = await fetchPayload(fetchImpl, controller.signal);
+        payload = await fetchPayload(fetchImpl, url, controller.signal);
       } catch (error) {
         if (controller.signal.aborted) failure = `server 超過 ${requestTimeoutMs / 1000} 秒沒有回應`;
         else failure = error instanceof LoadError ? error.message : '連不到 server';
@@ -425,8 +427,9 @@
   root.SystemMonitor = {
     create: createMonitor,
     // 主系統用這一個：完整頁和控制台摘要拿到同一個實例，才會共用快取與排程
-    shared() {
-      if (!shared) shared = createMonitor();
+    // 第一次呼叫的 options 決定網址；切換專案是整頁重新載入，所以一頁只會有一個網址
+    shared(options) {
+      if (!shared) shared = createMonitor(options);
       return shared;
     },
   };

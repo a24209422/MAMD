@@ -1010,6 +1010,8 @@ button, input, select { font: inherit; color: inherit; }
   border-bottom: 1px solid var(--line);
 }
 .chatbar-head h2 { flex: 1; margin: 0; font: 700 14px/1.4 var(--font-cjk); }
+.chatbar-head h2 { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-project { color: var(--fg-3); font-weight: 400; font-size: 12px; }
 .icon-btn {
   flex: none;
   display: grid;
@@ -1436,7 +1438,7 @@ button, input, select { font: inherit; color: inherit; }
     <div id="terminalResize" role="separator" aria-label="調整終端機寬度" tabindex="0" aria-orientation="vertical"></div>
     <div class="chatbar-strip"><button class="rail-btn" type="button" data-chat-toggle title="展開終端機">&gt;_</button></div>
     <section class="chatbar-panel">
-      <header class="chatbar-head"><h2>終端機</h2>
+      <header class="chatbar-head"><h2>終端機 <span class="terminal-project" id="terminalProject"></span></h2>
         <button class="icon-btn" id="terminalNew" title="新增終端機" type="button">＋</button>
         <button class="icon-btn" id="terminalMax" title="放大／還原終端機" type="button">⛶</button>
         <button class="icon-btn" data-chat-toggle title="收合終端機" type="button">›</button>

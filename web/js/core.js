@@ -216,6 +216,9 @@ function renderProjectBar() {
   $('#projectName').textContent = name;
   $('#projectPath').textContent = path;
   $('#projectPath').title = path;
+  // 終端機面板也標出所屬專案，新 shell 從這個資料夾啟動
+  $('#terminalProject').textContent = path ? name : '';
+  $('#terminalProject').title = path;
   $('#projectOpen').hidden = !app.token;
 }
 
@@ -417,8 +420,12 @@ function renderRail() {
 
 // 系統監控頁的內容由 modules/system_monitor 的 monitor.js 畫；這裡只掛上節點，進出這一頁時開始或停止它的 3 秒輪詢
 let monitorPage = null;
+// 完整頁和控制台摘要共用同一個實例；網址照本頁專案，讀的是該專案的採集器與磁碟
+function systemMonitor() {
+  return SystemMonitor.shared({ apiUrl: apiUrl('/api/system-monitor') });
+}
 onPageChange(page => {
-  if (!monitorPage) monitorPage = SystemMonitor.shared().mountPage($('#systemMonitorPage'));
+  if (!monitorPage) monitorPage = systemMonitor().mountPage($('#systemMonitorPage'));
   monitorPage.setVisible(page === 'system-monitor');
 });
 

@@ -1,3 +1,6 @@
+import json
+import subprocess
+import sys
 import threading
 
 import pytest
@@ -6,7 +9,9 @@ import board
 import board_core
 import board_projects
 from conftest import git
+from modules.terminal.service import TerminalService
 from test_server import call, cleanRows, eventTypes, post, serving
+from test_terminal import FakePty
 
 
 def initialized(projectDir):
@@ -115,6 +120,28 @@ def test_pendingRequestStaysOnItsProject(twoProjects, monkeypatch):
   assert eventTypes(first) == ["paused"] and eventTypes(second) == []
 
 
+def test_eachProjectShowsItsOwnAlfredAndSwitchingLeavesItAlone(tmp_path):
+  first, second = initialized(tmp_path / "專案 A"), initialized(tmp_path / "專案 B")
+  # A 的 Alfred 用一個還活著的程序代替；B 沒有啟動
+  alfred = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+  try:
+    lockPath = first / ".board" / "conductor.lock"
+    lockPath.write_text(str(alfred.pid), encoding="utf-8")
+    eventsBefore = eventTypes(first)
+    with serving(first) as httpServer:
+      port = httpServer.server_address[1]
+      post(port, "/api/projects/open", {"path": str(second)})
+      assert call(port, "GET", scoped(first, "/state"))[1]["conductor"] == {"running": True, "pid": alfred.pid}
+      assert call(port, "GET", scoped(second, "/state"))[1]["conductor"] == {"running": False, "pid": None}
+    # 開啟、切換和關閉 server 都不碰 Alfred 的程序與任務紀錄
+    assert alfred.poll() is None
+    assert lockPath.read_text(encoding="utf-8") == str(alfred.pid)
+    assert eventTypes(first) == eventsBefore
+  finally:
+    alfred.kill()
+    alfred.wait()
+
+
 class FakeTerminal:
   def __init__(self):
     self.calls, self.closed = [], False
@@ -150,6 +177,56 @@ def test_uninitializedFolderAllowsTerminalButRejectsWrites(tmp_path):
     # 使用者自己在這個資料夾初始化後，不用重新開啟就能操作
     initialized(plain)
     assert post(port, scoped(plain, "/stop"))[1]["ok"] is True
+
+
+class ProjectPty(FakePty):
+  # 記下 shell 從哪個資料夾啟動
+  def __init__(self, project):
+    super().__init__(project)
+    self.project = project
+
+
+def test_terminalsStayInTheirOwnProject(tmp_path):
+  pytest.importorskip("websockets")
+  from websockets.exceptions import ConnectionClosed
+  from websockets.sync.client import connect
+  first, second = initialized(tmp_path / "專案 A"), initialized(tmp_path / "專案 B")
+  with serving(first) as httpServer:
+    port = httpServer.server_address[1]
+    post(port, "/api/projects/open", {"path": str(second)})
+    registry = httpServer.RequestHandlerClass.registry
+    for project in registry.all():
+      project.dashboard.terminal = TerminalService(project.path, ProjectPty)
+    terminalOf = {projectDir: registry.get(board_projects.projectId(projectDir.resolve())).dashboard.terminal
+                  for projectDir in (first, second)}
+    firstId = post(port, scoped(first, "/terminals/create"))[1]["session"]["id"]
+    assert post(port, scoped(second, "/terminals/list"))[1]["sessions"] == []
+    # B 的範圍裡拿 A 的 id 連不上也關不掉
+    for action in ("connect", "close"):
+      status, refused = post(port, scoped(second, f"/terminals/{action}"), {"id": firstId})
+      assert status == 400 and refused["ok"] is False
+    # A 的票證拿到 B 的連線位址也不能用
+    ticket = post(port, scoped(first, "/terminals/connect"), {"id": firstId})[1]
+    secondUrl = f"ws://127.0.0.1:{terminalOf[second].port}/"
+    assert secondUrl != ticket["url"]
+    with connect(secondUrl, origin=f"http://127.0.0.1:{port}", proxy=None) as socket:
+      socket.send(json.dumps({"ticket": ticket["ticket"]}))
+      with pytest.raises(ConnectionClosed):
+        socket.recv(timeout=3)
+    # 8 個分頁的上限各專案分開算
+    for _ in range(8):
+      assert post(port, scoped(second, "/terminals/create"))[1]["ok"] is True
+    status, full = post(port, scoped(second, "/terminals/create"))
+    assert status == 400 and "上限" in full["message"]
+    assert post(port, scoped(first, "/terminals/create"))[1]["ok"] is True
+    firstSessions = post(port, scoped(first, "/terminals/list"))[1]["sessions"]
+    assert len(firstSessions) == 2 and firstSessions[0] == {"id": firstId, "title": "PowerShell 1", "running": True}
+    # 新 shell 從所屬專案的資料夾啟動
+    ptys = {projectDir: [item.pty for item in terminalOf[projectDir].manager.items.values()] for projectDir in (first, second)}
+    assert {pty.project for pty in ptys[first]} == {first.resolve()}
+    assert {pty.project for pty in ptys[second]} == {second.resolve()}
+  # server 關閉時兩個專案的 shell 都收掉
+  assert all(pty.closed for projectPtys in ptys.values() for pty in projectPtys)
 
 
 def test_closingServerClosesEveryProjectTerminal(tmp_path):
