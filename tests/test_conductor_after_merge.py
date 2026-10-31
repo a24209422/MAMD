@@ -78,6 +78,32 @@ def test_outcomeClearsSplitWhenReachingItsCommit():
   assert mergeTestOutcome(passedBefore, record(commit="m1", passed=True), ["T1"], {}, splitCommit="m3")["split"] is None
 
 
+def test_outcomeContractForRemainingBranches():
+  # 沒有比較對象：全部 unknown，不前進；有拆分時要清掉
+  unknown = mergeTestOutcome(None, record(failures=["t::a"]), ["T1"], {}, splitCommit="m3")
+  assert unknown == {"verdict": "unknown", "newFailures": [], "outcomes": {"T1": {"result": "unknown", "names": []}},
+                     "advance": False, "split": "clear"}
+  # 品質未檢查的基準遇到只有品質超標：unknown
+  qualityOnly = mergeTestOutcome(passedBefore, record(qualityChecked=True, qualityFailures=["品質門檻 a.py::x"]), ["T1"], {})
+  assert (qualityOnly["verdict"], qualityOnly["outcomes"], qualityOnly["advance"]) == \
+    ("unknown", {"T1": {"result": "unknown", "names": []}}, False)
+  # 已經在拆分中又涵蓋多次合併：重新開始拆分
+  split = mergeTestOutcome(passedBefore, record(failures=["t::a"]), ["T1", "T2"], {}, splitCommit="m3", staleSplit=True)
+  assert split == {"verdict": "newFailure", "newFailures": ["t::a"],
+                   "outcomes": {"T1": {"result": "split", "names": []}, "T2": {"result": "split", "names": []}},
+                   "advance": False, "split": "start"}
+  # 前進時 staleSplit 也要清掉
+  stale = mergeTestOutcome(passedBefore, record(passed=True), ["T1"], {}, staleSplit=True)
+  assert stale == {"verdict": "passed", "newFailures": [], "outcomes": {"T1": {"result": "verified", "names": []}},
+                   "advance": True, "split": "clear"}
+  # 之前退回的品質名稱仍超標：stillFailing
+  before = {**passedBefore, "qualityChecked": True, "qualityFailures": ["品質門檻 a.py::old"]}
+  quality = mergeTestOutcome(before, record(qualityChecked=True, qualityFailures=["品質門檻 a.py::old"]),
+                             ["T1"], {"T1": ["品質門檻 a.py::old"]})
+  assert quality["verdict"] == "preexisting"
+  assert quality["outcomes"] == {"T1": {"result": "stillFailing", "names": ["品質門檻 a.py::old"]}}
+
+
 def eventsOf(conductor, eventType):
   return [event for event in board_core.readEvents(conductor.projectDir) if event["type"] == eventType]
 

@@ -107,14 +107,7 @@ def comparePytestPart(baseline, pytestPassed, failures):
   return "preexisting", []
 
 
-def compareWithBaseline(baseline, passed, failures, qualityChecked=False, qualityFailures=()):
-  """依 plan「測試判定」回傳 (verdict, newFailures)；pytest 與品質門檻分開比再合併。"""
-  if passed:
-    return "passed", []
-  if baseline is None:
-    # 正常不會發生（基準記下來前不派工）；沒有東西可比時不擋，交給審查
-    return "unknown", []
-  verdict, newFailures = comparePytestPart(baseline, qualityChecked and bool(qualityFailures) and not failures, failures)
+def combineQualityPart(baseline, verdict, newFailures, qualityChecked, qualityFailures):
   if not (qualityChecked and baseline.get("qualityChecked")):
     # 有一方沒檢查品質：品質部分不判定為新增，也不能讓整體變成通過
     return ("unknown", []) if verdict == "passed" else (verdict, newFailures)
@@ -126,34 +119,64 @@ def compareWithBaseline(baseline, passed, failures, qualityChecked=False, qualit
   return ("preexisting", []) if verdict == "passed" else (verdict, newFailures)
 
 
-def mergeTestOutcome(predecessor, record, covers, mergeFailures, splitCommit=None, staleSplit=False):
-  """合併後測試的判定（plan「共同契約」的「判定」）；回傳要寫進 mergeTestRun 的欄位。"""
-  verdict, newFailures = compareWithBaseline(predecessor, record["passed"], record["failures"],
-                                             record["qualityChecked"], record["qualityFailures"])
-  hadSplit = bool(splitCommit) or staleSplit
-  if verdict == "unknown" or (verdict == "newFailure" and not newFailures):
-    # 分不出是哪些失敗，不能自動退回任何任務；這筆也不當之後的比較對象
-    outcomes = {taskId: {"result": "unknown", "names": []} for taskId in covers}
-    return {"verdict": verdict, "newFailures": newFailures, "outcomes": outcomes, "advance": False,
-            "split": "clear" if hadSplit else None}
-  if verdict == "newFailure" and len(covers) > 1:
-    # 涵蓋好幾次合併：先不退回，照合併順序逐一測，找出從哪次合併開始失敗
-    outcomes = {taskId: {"result": "split", "names": []} for taskId in covers}
-    return {"verdict": verdict, "newFailures": newFailures, "outcomes": outcomes, "advance": False, "split": "start"}
+def compareWithBaseline(baseline, passed, failures, qualityChecked=False, qualityFailures=()):
+  """依 plan「測試判定」回傳 (verdict, newFailures)；pytest 與品質門檻分開比再合併。"""
+  if passed:
+    return "passed", []
+  if baseline is None:
+    # 正常不會發生（基準記下來前不派工）；沒有東西可比時不擋，交給審查
+    return "unknown", []
+  pytestPassed = qualityChecked and bool(qualityFailures) and not failures
+  verdict, newFailures = comparePytestPart(baseline, pytestPassed, failures)
+  return combineQualityPart(baseline, verdict, newFailures, qualityChecked, qualityFailures)
+
+
+def unattributable(verdict, newFailures):
+  return verdict == "unknown" or (verdict == "newFailure" and not newFailures)
+
+
+def uniformOutcomes(covers, result):
+  return {taskId: {"result": result, "names": []} for taskId in covers}
+
+
+def taskOutcome(verdict, newFailures, still):
+  if still:
+    extra = [name for name in newFailures if name not in still] if verdict == "newFailure" else []
+    return {"result": "stillFailing", "names": still + extra}
+  if verdict == "newFailure":
+    return {"result": "newFailure", "names": list(newFailures)}
+  return {"result": "verified", "names": []}
+
+
+def attributedOutcomes(verdict, newFailures, record, covers, mergeFailures):
   names = set(record["failures"]) | set(record["qualityFailures"])
   outcomes = {}
   for taskId in covers:
     still = [name for name in mergeFailures.get(taskId, []) if name in names]
-    if still:
-      extra = [name for name in newFailures if name not in still] if verdict == "newFailure" else []
-      outcomes[taskId] = {"result": "stillFailing", "names": still + extra}
-    elif verdict == "newFailure":
-      outcomes[taskId] = {"result": "newFailure", "names": list(newFailures)}
-    else:
-      outcomes[taskId] = {"result": "verified", "names": []}
+    outcomes[taskId] = taskOutcome(verdict, newFailures, still)
+  return outcomes
+
+
+def clearSplitWhen(cleared):
+  return "clear" if cleared else None
+
+
+def mergeTestOutcome(predecessor, record, covers, mergeFailures, splitCommit=None, staleSplit=False):
+  """合併後測試的判定（plan「共同契約」的「判定」）；回傳要寫進 mergeTestRun 的欄位。"""
+  verdict, newFailures = compareWithBaseline(predecessor, record["passed"], record["failures"],
+                                             record["qualityChecked"], record["qualityFailures"])
+  if unattributable(verdict, newFailures):
+    # 分不出是哪些失敗，不能自動退回任何任務；這筆也不當之後的比較對象
+    return {"verdict": verdict, "newFailures": newFailures, "outcomes": uniformOutcomes(covers, "unknown"),
+            "advance": False, "split": clearSplitWhen(bool(splitCommit) or staleSplit)}
+  if verdict == "newFailure" and len(covers) > 1:
+    # 涵蓋好幾次合併：先不退回，照合併順序逐一測，找出從哪次合併開始失敗
+    return {"verdict": verdict, "newFailures": newFailures, "outcomes": uniformOutcomes(covers, "split"),
+            "advance": False, "split": "start"}
+  outcomes = attributedOutcomes(verdict, newFailures, record, covers, mergeFailures)
   reachedSplit = bool(splitCommit) and record["commit"] == splitCommit
   return {"verdict": verdict, "newFailures": newFailures, "outcomes": outcomes, "advance": True,
-          "split": "clear" if reachedSplit or staleSplit else None}
+          "split": clearSplitWhen(reachedSplit or staleSplit)}
 
 
 class BackgroundTestJob:

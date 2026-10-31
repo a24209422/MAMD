@@ -1258,6 +1258,20 @@ def test_compareWithBaselineComparesQualityFailures():
   assert compareWithBaseline({"passed": True, "failures": []}, False, [], True, [new]) == ("unknown", [])
 
 
+def test_compareWithBaselineWithoutBaselineOrMixedParts():
+  old = ["品質門檻 a.py::one"]
+  new = "品質門檻 c.py::four"
+  # 沒有基準：通過仍是通過，失敗不擋、交給審查
+  assert compareWithBaseline(None, True, []) == ("passed", [])
+  assert compareWithBaseline(None, False, ["t::x"], True, [new]) == ("unknown", [])
+  # 雙方都檢查品質時，pytest 部分的判定與新增名稱要保留，品質新增名稱接在後面
+  mixedBaseline = {"passed": False, "failures": ["t::old"], "qualityChecked": True, "qualityFailures": old}
+  assert compareWithBaseline(mixedBaseline, False, ["t::old"], True, old) == ("preexisting", [])
+  assert compareWithBaseline(mixedBaseline, False, ["t::old", "t::new"], True, old) == ("newFailure", ["t::new"])
+  assert compareWithBaseline(mixedBaseline, False, ["t::old", "t::new"], True, old + [new]) \
+    == ("newFailure", ["t::new", new])
+
+
 def conflictedTask(conductor):
   return next(event["task"] for event in eventsOf(conductor, "taskConflicted"))
 
