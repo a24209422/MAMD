@@ -2,6 +2,7 @@
 import json
 import re
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,7 @@ import server
 from browser import browserPages, serverRequests, sharedBrowser  # noqa: F401  測試模組裡要看得到 fixture
 from test_server import cleanRows, post, token
 from test_server_projects import initialized
-from test_web import fixedCollector, recordRequests
+from test_web import fixedCollector, gib, recordRequests
 
 waitMs = 15000
 recentKey = "boardRecentProjects"
@@ -33,7 +34,7 @@ def projects(tmp_path, writePlan):
   serverRequests[url] = requests
   thread = threading.Thread(target=httpServer.serve_forever, daemon=True)
   thread.start()
-  yield SimpleNamespace(first=first, second=second, port=port, url=url, requests=requests)
+  yield SimpleNamespace(first=first, second=second, port=port, url=url, requests=requests, server=httpServer)
   httpServer.shutdown()
   httpServer.server_close()
   serverRequests.pop(url)
@@ -57,9 +58,13 @@ def openPage(context, url, ready):
 
 
 def unscopedApi(requests):
-  # 系統監控的網址由下一個任務處理；開啟專案本來就不在專案範圍裡
+  # 開啟專案本來就不在專案範圍裡
   return [request["path"] for request in requests if request["path"].startswith("/api/")
-          and not request["path"].startswith(("/api/projects/", "/api/system-monitor"))]
+          and not request["path"].startswith("/api/projects/")]
+
+
+def monitorShows(text):
+  return f"document.querySelector('#systemMonitorPage')?.textContent.includes({json.dumps(text)})"
 
 
 def fillFolder(page, path):
@@ -112,6 +117,31 @@ def test_openFolderSwitchesWholePageAndRemembersProject(projects, browserPages):
   # 另一個分頁仍可看 A
   other = openPage(context, f"{projects.url}#token={token}", shows(projects.first))
   assert other.text_content("#projectName") == "專案 A"
+
+
+def test_systemMonitorAndTerminalPanelFollowPageProject(projects, browserPages):
+  # B 的磁碟替身用了 90%，A 是 25%：畫面上分得出讀的是哪一個專案的採集器
+  second = projects.server.RequestHandlerClass.registry.open(str(projects.second))
+  diskPaths = []
+  collector = fixedCollector(projects.second)
+  collector.readDisk = lambda path: diskPaths.append(Path(path)) or (500 * gib, 450 * gib, 50 * gib)
+  second.dashboard.systemMonitor.collector = collector
+  page = openPage(browserPages.newContext(), f"{projects.url}#token={token}", shows(projects.first))
+  assert page.text_content("#terminalProject") == "專案 A"
+  assert page.get_attribute("#terminalProject", "title") == str(projects.first.resolve())
+  page.evaluate("location.hash = 'system-monitor'")
+  page.wait_for_function(monitorShows("25.0%"), timeout=waitMs)
+  switchTo(page, str(projects.second), projects.second)
+  # A 頁在預設專案、網址本來就不帶專案範圍，從 B 頁載入後才開始檢查
+  before = len(projects.requests)
+  assert page.text_content("#terminalProject") == "專案 B"
+  page.evaluate("location.hash = 'system-monitor'")
+  page.wait_for_function(monitorShows("90.0%"), timeout=waitMs)
+  # 新頁從空的快取開始，A 的數值不會混進來
+  assert "25.0%" not in page.text_content("#systemMonitorPage")
+  assert diskPaths and set(diskPaths) == {projects.second.resolve()}
+  assert f"/api/projects/{idOf(projects.second)}/system-monitor" in [request["path"] for request in projects.requests]
+  assert unscopedApi(projects.requests[before:]) == []
 
 
 def test_failedOpenKeepsCurrentProject(projects, browserPages, tmp_path):

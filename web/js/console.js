@@ -260,6 +260,6 @@ onPageChange(page => {
 // 系統資源區塊用系統監控模組的摘要，和完整頁共用同一份資料；整塊是連到完整頁的連結
 let resourceSummary = null;
 onPageChange(page => {
-  if (!resourceSummary) resourceSummary = SystemMonitor.shared().mountSummary($('#systemMonitorSummary'), { href: '#system-monitor' });
+  if (!resourceSummary) resourceSummary = systemMonitor().mountSummary($('#systemMonitorSummary'), { href: '#system-monitor' });
   resourceSummary.setVisible(page === 'console');
 });
