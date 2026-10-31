@@ -904,28 +904,34 @@ def branchProblem(projectDir, branch, sha, refs):
           f"請比對兩邊的成果，把本機分支更新到包含 {sha[:12]} 後再接續")
 
 
-def conflictProblem(projectDir, taskState):
+def conflictProblem(path, label):
   # 分支 SHA 吻合時既有 worktree 會被直接沿用，裡面沒解完的衝突不會出現在分支 diff，測試和審查都看不到
-  path = board_git.taskWorktreePath(projectDir, taskState["plan"], taskState["task"])
   if not path.exists():
     return None
   files = board_git.unmergedFiles(path)
   if not files and not board_git.mergeInProgress(path):
     return None
   listed = f"（{'、'.join(files)}）" if files else ""
-  return (f"本機 task worktree {path} 還有未完成的合併{listed}；"
+  return (f"本機 {label} {path} 還有未完成的合併{listed}；"
           "請在該目錄解完衝突並 commit，或執行 git merge --abort 後再接續")
 
 
-def blockConflictedWorktrees(projectDir, state, wanted, blocked):
+def conflictedWorktrees(projectDir, state, wanted):
+  for planIdValue in dict.fromkeys(wanted.values()):
+    # plan worktree 的合併只會是你手動開的（Alfred 合併衝突時會自己 abort），不管任務在做什麼都要先處理完
+    yield planIdValue, board_git.planWorktreePath(projectDir, planIdValue), "plan worktree"
   for taskState in state["tasks"].values():
     branch = board_git.taskBranch(taskState["plan"], taskState["task"])
-    # 正在解衝突的任務本來就帶著衝突，交給本機的解衝突流程
-    if branch not in wanted or taskState.get("resolving"):
-      continue
-    reason = conflictProblem(projectDir, taskState)
+    # 正在解衝突、或你解完按了完成的任務本來就帶著合併，交給本機原本的解衝突與收尾流程（收尾會先檢查衝突標記）
+    if branch in wanted and not (taskState.get("resolving") or taskState.get("userDone")):
+      yield taskState["plan"], board_git.taskWorktreePath(projectDir, taskState["plan"], taskState["task"]), "task worktree"
+
+
+def blockConflictedWorktrees(projectDir, state, wanted, blocked):
+  for planIdValue, path, label in conflictedWorktrees(projectDir, state, wanted):
+    reason = conflictProblem(path, label)
     if reason:
-      blockPlan(state, blocked, taskState["plan"], reason)
+      blockPlan(state, blocked, planIdValue, reason)
 
 
 def blockUnreachableBranches(projectDir, state, base, blocked):

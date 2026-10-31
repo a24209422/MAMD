@@ -567,7 +567,9 @@ class Conductor:
       self.reuseOrStartTestBaseline(planState, key, candidates)
 
   def wantsTestBaseline(self, planState, key):
-    return planState["status"] == PlanStatus.active and key not in self.jobs and self.needsTestBaseline(planState)
+    # 交接被擋的 plan 連基準也不跑：基準會佔測試名額，而且要等分支和 worktree 處理好才有意義
+    return (planState["status"] == PlanStatus.active and not planState.get("syncBlocked")
+            and key not in self.jobs and self.needsTestBaseline(planState))
 
   def reusableBaselineSource(self, planState, candidates):
     # candidates 已由新到舊排好，取第一個程式碼相同的來源

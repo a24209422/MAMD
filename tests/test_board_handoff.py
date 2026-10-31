@@ -18,6 +18,7 @@ from conftest import git
 from helpers import fakeConfig, makeEvent
 from test_board_export import exportState, holdAlfredLock, legacyProject, pushListed, section  # noqa: F401
 from test_board_setup import toolRoot
+from test_board_sync import rows
 from test_board_sync_load import started, writeEvents
 
 
@@ -405,7 +406,9 @@ def test_finishedPlanNotYetDeliveredNeedsItsPushedPlanBranch(computers, capsys):
 def recordTestJobs(monkeypatch, recorded):
   # 只記下要在哪個工作目錄跑測試，不真的跑
   monkeypatch.setattr(conductorModule, "BackgroundTestJob", lambda runTestCommand, worktree: type(
-    "RecordedTest", (), {"start": lambda self: recorded.append(Path(worktree)) or self})())
+    "RecordedTest", (), {"start": lambda self: recorded.append(Path(worktree)) or self,
+                         "poll": lambda self: False, "kill": lambda self: None,
+                         "wait": lambda self, seconds: None})())
 
 
 def test_blockedPlanKeepsMergedUntestedWhenTestsAreOff(computers, monkeypatch):
@@ -452,6 +455,10 @@ def recordAgentJobs(monkeypatch, recorded):
 
     def start(self):
       return self
+
+    def poll(self):
+      # 一直跑著：同一個 Alfred 連續 tick 時不會去收結果
+      return False
   monkeypatch.setattr(board_agents, "AgentJob", RecordedJob)
 
 
@@ -488,14 +495,14 @@ def test_foreignWritingWaitsThenRestartsHereWithoutOldSession(computers, capsys,
   assert "等待接續" not in statusOutput(clone, capsys)
 
 
-def leaveConflictIn(worktree):
-  # 分支 SHA 不變，但 worktree 停在合併到一半、t1.txt 兩邊都有改的狀態
-  git(worktree, "checkout", "-q", "-b", "side", "HEAD~1")
-  (worktree / "t1.txt").write_text("這台電腦另外改的版本\n", encoding="utf-8")
-  git(worktree, "add", "t1.txt")
+def leaveConflictIn(worktree, branch="task/P0001-T1", fileName="t1.txt"):
+  # 分支 SHA 不變，但 worktree 停在合併到一半、同一個檔案兩邊都有改的狀態
+  git(worktree, "checkout", "-q", "-b", f"side-{fileName}", "HEAD~1")
+  (worktree / fileName).write_text("這台電腦另外改的版本\n", encoding="utf-8")
+  git(worktree, "add", fileName)
   git(worktree, "commit", "-q", "-m", "另一個版本")
-  git(worktree, "checkout", "-q", "task/P0001-T1")
-  board_git.runGit(worktree, "merge", "-q", "side", check=False)
+  git(worktree, "checkout", "-q", branch)
+  board_git.runGit(worktree, "merge", "-q", f"side-{fileName}", check=False)
 
 
 def test_conflictedLocalWorktreeBlocksReview(computers, capsys, monkeypatch):
@@ -533,6 +540,179 @@ def test_conflictedLocalWorktreeBlocksReview(computers, capsys, monkeypatch):
   assert [job["cwd"] for job in jobs] == [worktree]
 
 
+def approveOtherPlan(clone, writePlan):
+  # 跟交接無關、在這台電腦才核准的 plan：P0001 被擋時它要照常派工
+  writePlan("0007-other.md", rows[:1], planId="P0007", projectDir=clone)
+  writeEvents(clone, [makeEvent("planSubmitted", plan="P0007"),
+                      makeEvent("planApproved", plan="P0007", baseCommit=localSha(clone, "main"), branch="plan/P0007",
+                                testTiming="afterMerge",
+                                tasks=[{"id": "T1", "text": "T1 內容", "dependsOn": [], "requirementIds": ["R1"]}])])
+
+
+def p0001Progress(alfred):
+  state = alfred.currentState()[1]
+  return {key: (task["status"], task["round"]) for key, task in state["tasks"].items() if task["plan"] == "P0001"}
+
+
+def p0001EventsSince(clone, count):
+  return [event["type"] for event in readEvents(clone)[count:] if event.get("plan") == "P0001"]
+
+
+def test_conflictedPlanWorktreeHoldsEveryDispatchUntilResolved(computers, writePlan, capsys, monkeypatch):
+  _, clone, _ = computers
+  jobs, tested, messages = [], [], []
+  recordAgentJobs(monkeypatch, jobs)
+  recordTestJobs(monkeypatch, tested)
+  alfred = Conductor(clone, config=fakeConfig(), out=messages.append)
+  _, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  approveOtherPlan(clone, writePlan)
+  planWorktree = board_git.planWorktreePath(clone, "P0001")
+  # 你在 plan worktree 手動合併到一半；plan 分支 SHA 還是交接記錄的那個
+  leaveConflictIn(planWorktree, "plan/P0001", "t3.txt")
+  assert board_git.unmergedFiles(planWorktree) == ["t3.txt"]
+  before, eventCount = p0001Progress(alfred), len(readEvents(clone))
+
+  alfred.tick()
+
+  reason = alfred.sync["blockedPlans"]["P0001"]
+  assert str(planWorktree) in reason and "t3.txt" in reason and "git merge --abort" in reason
+  assert any("P0001 不派工" in message and "t3.txt" in message for message in messages)
+  assert "P0001 不派工" in statusOutput(clone, capsys)
+  # 寫程式、合併後測試的略過都不能動到 P0001；進度和輪次原封不動
+  assert p0001EventsSince(clone, eventCount) == [] and p0001Progress(alfred) == before
+  assert before["P0001/T3"] == (TaskStatus.mergedUntested, 1)
+  assert tested == []
+  assert [job["cwd"] for job in jobs] == [board_git.taskWorktreePath(clone, "P0007", "T1")]
+
+  # 模擬你放棄這次手動合併；同一個 Alfred 下一輪就接續，不必重新匯入或重啟
+  git(planWorktree, "merge", "--abort")
+  alfred.tick()
+
+  assert "P0001" not in alfred.sync["blockedPlans"]
+  assert board_git.taskWorktreePath(clone, "P0001", "T1") in [job["cwd"] for job in jobs]
+  writing = [event for event in readEvents(clone) if event["type"] == "taskStarted" and event["plan"] == "P0001"][-1]
+  assert (writing["task"], writing["round"]) == ("T1", before["P0001/T1"][1])
+  assert "mergeTestSkipped" in p0001EventsSince(clone, eventCount)
+
+
+@pytest.mark.parametrize("kind", ["plan", "task"])
+def test_mergeHeadWithoutConflictFilesHoldsUntilCommitted(computers, monkeypatch, kind):
+  _, clone, _ = computers
+  jobs = []
+  recordAgentJobs(monkeypatch, jobs)
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+  _, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  if kind == "plan":
+    worktree, branch, fileName = board_git.planWorktreePath(clone, "P0001"), "plan/P0001", "t3.txt"
+  else:
+    worktree, branch, fileName = board_git.ensureTaskWorktree(clone, "P0001", "T1"), "task/P0001-T1", "t1.txt"
+  leaveConflictIn(worktree, branch, fileName)
+  # 衝突內容已經解好也 git add 了，只差最後的 commit；分支 SHA 仍是交接記錄的那個
+  (worktree / fileName).write_text("解好的版本\n", encoding="utf-8")
+  git(worktree, "add", fileName)
+  assert board_git.unmergedFiles(worktree) == [] and board_git.mergeInProgress(worktree)
+  before = p0001Progress(alfred)
+
+  alfred.tick()
+
+  reason = alfred.sync["blockedPlans"]["P0001"]
+  assert f"{kind} worktree {worktree}" in reason and "commit" in reason and "git merge --abort" in reason
+  assert jobs == [] and p0001Progress(alfred) == before
+
+  # 模擬你在該目錄 commit 完成合併；分支往前走、仍帶著交接的成果，下一輪就接續
+  git(worktree, "commit", "-q", "--no-edit")
+  alfred.tick()
+
+  assert "P0001" not in alfred.sync["blockedPlans"]
+  assert [job["cwd"] for job in jobs] == [board_git.taskWorktreePath(clone, "P0001", "T1")]
+  assert p0001Progress(alfred)["P0001/T1"] == (TaskStatus.writing, before["P0001/T1"][1])
+
+
+def test_conflictedPlanDoesNotRunTestBaselineUntilResolved(computers, monkeypatch):
+  _, clone, _ = computers
+  tested = []
+  recordTestJobs(monkeypatch, tested)
+  # 名額夠兩份 plan 同時跑基準，P0001 沒跑才確定是被擋，不是排隊
+  alfred = Conductor(clone, config=fakeConfig(testCommand="python -c pass", maxParallelTests=2), out=lambda message: None)
+  _, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  planWorktree = board_git.planWorktreePath(clone, "P0001")
+  leaveConflictIn(planWorktree, "plan/P0001", "t3.txt")
+
+  alfred.tick()
+
+  # 交接來的基準不算數、這台電腦還沒有自己的基準；衝突沒解前 P0001 連基準都不跑，正常的 P0005 照跑
+  assert alfred.needsTestBaseline(alfred.currentState()[1]["plans"]["P0001"])
+  assert "P0001" in alfred.sync["blockedPlans"]
+  assert [path.name for path in tested] == ["P0005-baseline"]
+  assert not any(info["plan"] == "P0001" for info in alfred.jobs.values())
+
+  git(planWorktree, "merge", "--abort")
+  alfred.tick()
+
+  assert [path.name for path in tested] == ["P0005-baseline", "P0001-baseline"]
+  assert any(info["plan"] == "P0001" and info["kind"] == "baseline" for info in alfred.jobs.values())
+
+
+def test_resolvingTaskDoesNotHidePlanWorktreeConflict(computers, monkeypatch):
+  _, clone, _ = computers
+  jobs = []
+  recordAgentJobs(monkeypatch, jobs)
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+  _, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  # T1 在這台電腦合併衝突、進入解衝突；它的 task worktree 留著衝突是正常的解衝突流程
+  writeEvents(clone, [makeEvent("taskConflicted", plan="P0001", task="T1", conflicts=["t1.txt"])])
+  taskWorktree = board_git.ensureTaskWorktree(clone, "P0001", "T1")
+  leaveConflictIn(taskWorktree)
+  planWorktree = board_git.planWorktreePath(clone, "P0001")
+  leaveConflictIn(planWorktree, "plan/P0001", "t3.txt")
+  before = p0001Progress(alfred)
+  assert alfred.currentState()[1]["tasks"]["P0001/T1"]["resolving"]
+
+  alfred.tick()
+
+  reason = alfred.sync["blockedPlans"]["P0001"]
+  assert f"plan worktree {planWorktree}" in reason and str(taskWorktree) not in reason
+  assert jobs == [] and p0001Progress(alfred) == before
+
+  git(planWorktree, "merge", "--abort")
+  alfred.tick()
+
+  # plan worktree 處理好後，T1 照原本的解衝突流程接著解自己 worktree 裡的衝突，輪次不因被擋而改變
+  assert "P0001" not in alfred.sync["blockedPlans"]
+  assert [job["cwd"] for job in jobs] == [taskWorktree]
+  resolving = [event for event in readEvents(clone) if event["type"] == "taskStarted"][-1]
+  assert (resolving["task"], resolving["round"], resolving["data"]["mode"]) == ("T1", before["P0001/T1"][1], "resolve")
+  assert board_git.unmergedFiles(taskWorktree) == ["t1.txt"]
+
+
+def test_userDoneTaskWithResolvedMergeStillSettlesAndMerges(computers, monkeypatch):
+  _, clone, _ = computers
+  recordAgentJobs(monkeypatch, [])
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+  _, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  taskWorktree = board_git.ensureTaskWorktree(clone, "P0001", "T1")
+  leaveConflictIn(taskWorktree)
+  # 你在 task worktree 把衝突解好、git add 後按「完成」，原本就由 Alfred 檢查標記後 commit 再合併
+  (taskWorktree / "t1.txt").write_text("解好的版本\n", encoding="utf-8")
+  git(taskWorktree, "add", "t1.txt")
+  writeEvents(clone, [makeEvent("needsYou", plan="P0001", task="T1", kind="mergeConflict", conflicts=["t1.txt"],
+                                reason="合併衝突"),
+                      makeEvent("userDecision", plan="P0001", task="T1", action="done")])
+  assert alfred.currentState()[1]["tasks"]["P0001/T1"]["userDone"]
+
+  alfred.tick()
+
+  assert "P0001" not in alfred.sync["blockedPlans"]
+  assert not board_git.mergeInProgress(taskWorktree)
+  merged = [event for event in readEvents(clone) if event["type"] == "taskMerged" and event["task"] == "T1"]
+  assert merged and board_git.containsCommit(clone, "refs/heads/plan/P0001", localSha(clone, "task/P0001-T1"))
+
+
 def test_waitingReviewIsReviewedHereInRebuiltWorktree(computers, capsys, monkeypatch):
   source, clone, remote = computers
   writeEvents(source, [makeEvent("taskWritten", plan="P0001", task="T1", summary="完成",
@@ -557,6 +737,88 @@ def test_waitingReviewIsReviewedHereInRebuiltWorktree(computers, capsys, monkeyp
   reviewStarted = [event for event in readEvents(clone) if event["type"] == "reviewStarted"][-1]
   # 接手審查不消耗修正輪
   assert (reviewStarted["task"], reviewStarted["round"]) == ("T1", waiting[0]["round"])
+
+
+def reviewedInSource(source, *, passed):
+  commit = localSha(source, "task/P0001-T1")
+  events = [started("T1", roundNumber=2), makeEvent("taskWritten", plan="P0001", task="T1", summary="完成", commit=commit),
+            makeEvent("reviewStarted", plan="P0001", task="T1", roundNumber=2, agent="codex")]
+  if passed:
+    events.append(makeEvent("reviewPassed", plan="P0001", task="T1", roundNumber=2, agent="codex",
+                            notes="reviews/P0001-T1-r2.md", mustFix=0, suggest=0))
+  return events
+
+
+def test_foreignReviewingIsReviewedAgainHereInSameRound(computers, capsys, monkeypatch):
+  source, clone, remote = computers
+  writeEvents(source, reviewedInSource(source, passed=False))
+  recorded = publish(source, capsys, remote)["branches"]
+  git(clone, "pull", "-q", "--ff-only")
+  assert "等待接續" in statusOutput(clone, capsys)
+  jobs = []
+  recordAgentJobs(monkeypatch, jobs)
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+
+  alfred.tick()
+
+  # 另一台電腦審到一半的結果拿不回來，在這台電腦的 task worktree 從頭審同一輪，不算修正輪
+  worktree = board_git.taskWorktreePath(clone, "P0001", "T1")
+  reviews = [event for event in readEvents(clone) if event["type"] == "reviewStarted"]
+  assert (reviews[-1]["task"], reviews[-1]["round"], reviews[-1]["agent"]) == ("T1", 2, "reviewer")
+  assert [job["cwd"] for job in jobs] == [worktree]
+  assert board_git.headCommit(worktree) == recorded["task/P0001-T1"]
+  assert str(source) not in " ".join(jobs[0]["argv"]) + jobs[0]["stdin"]
+  assert p0001Progress(alfred)["P0001/T1"] == (TaskStatus.reviewing, 2)
+
+
+def test_foreignMergingIsMergedHereInLocalPlanWorktree(computers, capsys, monkeypatch):
+  source, clone, remote = computers
+  writeEvents(source, reviewedInSource(source, passed=True))
+  recorded = publish(source, capsys, remote)["branches"]
+  git(clone, "pull", "-q", "--ff-only")
+  assert taskStatuses(clone)["P0001/T1"] == TaskStatus.merging
+  recordAgentJobs(monkeypatch, [])
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+
+  alfred.tick()
+
+  # 審查通過、還沒合併的任務在這台電腦的 plan worktree 合併，輪次沿用交接記錄的
+  planWorktree = board_git.planWorktreePath(clone, "P0001")
+  merged = [event for event in readEvents(clone) if event["type"] == "taskMerged" and event["task"] == "T1"]
+  assert len(merged) == 1 and merged[0]["round"] == 2
+  assert board_git.headCommit(planWorktree) == merged[0]["data"]["commit"]
+  assert board_git.containsCommit(clone, merged[0]["data"]["commit"], recorded["task/P0001-T1"])
+  assert board_git.containsCommit(clone, merged[0]["data"]["commit"], recorded["plan/P0001"])
+  assert p0001Progress(alfred)["P0001/T1"][1] == 2
+
+
+def test_foreignMergedUntestedRunsMergeTestHere(computers, monkeypatch):
+  _, clone, _ = computers
+  command = "python -c pass"
+  tested = []
+  recordTestJobs(monkeypatch, tested)
+  alfred = Conductor(clone, config=fakeConfig(testCommand=command), out=lambda message: None)
+  alfred.currentState()
+  # 交接檔的基準不帶指令，先讓這台電腦有自己的基準，才輪得到合併後測試
+  writeEvents(clone, [makeEvent("testBaseline", plan=planIdValue, command=command, passed=True, failures=[])
+                      for planIdValue in ("P0001", "P0005")])
+  before = p0001Progress(alfred)
+
+  alfred.tick()
+
+  # 另一台電腦合併完、還沒驗的任務，在這台電腦的 mergetest worktree 驗交接記錄的合併 commit
+  mergedCommit = alfred.currentState()[1]["tasks"]["P0001/T3"]["mergedCommit"]
+  worktree = board_git.mergeTestWorktreePath(clone, "P0001")
+  assert tested == [worktree]
+  assert alfred.jobs["P0001/mergetest"]["commit"] == mergedCommit
+  assert alfred.jobs["P0001/mergetest"]["covers"] == ["T3"]
+  assert board_git.headCommit(worktree) == mergedCommit
+  assert p0001Progress(alfred)["P0001/T3"] == before["P0001/T3"] == (TaskStatus.mergedUntested, 1)
+
+
+def taskStatuses(clone):
+  state = Conductor(clone, config=fakeConfig(), out=lambda message: None).currentState()[1]
+  return {key: task["status"] for key, task in state["tasks"].items()}
 
 
 def test_foreignTestingRerunsHereInRebuiltWorktree(computers, capsys, monkeypatch):
