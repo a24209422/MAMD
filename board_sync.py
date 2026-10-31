@@ -82,9 +82,14 @@ def newProjectId():
   return uuid.uuid4().hex
 
 
-def portableText(text, limit=maxNoteLength):
+def maskText(text):
   for pattern, replacement in maskRules:
     text = pattern.sub(replacement, text)
+  return text
+
+
+def portableText(text, limit=maxNoteLength):
+  text = maskText(text)
   if len(text) > limit:
     # 截在遮蔽標記中間會讓下次清理又補回標記，結果對不上，所以連同半個標記一起丟掉
     text = unclosedPlaceholderPattern.sub("", text[:limit - 1]) + "…"
@@ -198,8 +203,9 @@ def parseReviewMarkdown(text, refs):
 
 
 def portableConclusion(conclusion):
-  return {**conclusion, "suggest": portableList(conclusion["suggest"]),
-          "mustFix": [{"ref": portableText(item["ref"]), "text": portableText(item["text"])}
+  # 必改與建議是另一台電腦接續時要照做的內容，只遮蔽不截斷
+  return {**conclusion, "suggest": [maskText(item) for item in conclusion["suggest"]],
+          "mustFix": [{"ref": maskText(item["ref"]), "text": maskText(item["text"])}
                       for item in conclusion["mustFix"]]}
 
 
@@ -234,8 +240,9 @@ def reviewConclusions(taskState, lookup):
 
 def taskEntry(taskState, lookup):
   entry = {"id": taskState["task"], **{field: taskState[field] for field in taskCopyFields}}
-  entry["text"] = portableText(entry["text"])
-  entry["userNote"] = portableText(entry["userNote"])
+  # 任務內容和使用者補充是接續時的指示，截掉尾端就會漏掉要求，所以只遮蔽不截斷
+  entry["text"] = maskText(entry["text"])
+  entry["userNote"] = maskText(entry["userNote"])
   entry["mergeFailures"] = portableList(entry["mergeFailures"])
   entry["lastTest"] = testSummary(taskState["lastTest"], lastTestFields)
   entry["needs"] = portableNeeds(taskState["needs"])
@@ -256,7 +263,7 @@ def planFileInfo(planIdValue, plans, previous):
 def planEntry(state, planState, fileInfo, lookup):
   mergeTest = planState["mergeTest"]
   return {**{field: planState[field] for field in planCopyFields}, **fileInfo,
-          "rejectReason": portableText(planState["rejectReason"]),
+          "rejectReason": maskText(planState["rejectReason"]),
           "testBaseline": testSummary(planState["testBaseline"], testSummaryFields),
           "mergeTest": {"lastTested": testSummary(mergeTest["lastTested"], testSummaryFields),
                         "split": testSummary(mergeTest["split"], testSummaryFields)},
@@ -400,11 +407,12 @@ idText = matches(r"[A-Za-z0-9][A-Za-z0-9_.-]*", "不含路徑的編號")
 relativePath = matches(r"(?![A-Za-z]:|[\\/~])(?!(?:.*[\\/])?\.\.(?:[\\/]|$)).+", "專案內的相對路徑")
 reviewNote = matches(r"reviews/[^/\\:]+\.md", " reviews/ 底下的審查意見檔")
 noteText = portableCheck(portableText)
+fullText = portableCheck(maskText)
 reasonText = portableCheck(briefReason)
 textList = optional(listOf(noteText))
 conclusionSpec = objectOf({
   "round": isPositive, "verdict": oneOf(("pass", "fail")),
-  "mustFix": listOf(objectOf({"ref": noteText, "text": noteText})), "suggest": listOf(noteText),
+  "mustFix": listOf(objectOf({"ref": fullText, "text": fullText})), "suggest": listOf(fullText),
 })
 
 testSummarySpec = objectOf({}, {
@@ -422,8 +430,8 @@ taskStatuses = tuple(value for name, value in vars(TaskStatus).items() if not na
 planStatuses = tuple(value for name, value in vars(PlanStatus).items()
                      if not name.startswith("_") and value != PlanStatus.draft)
 taskSpec = objectOf({
-  "id": idText, "text": noteText, "dependsOn": listOf(idText), "requirementIds": listOf(noteText),
-  "status": oneOf(taskStatuses), "round": isPositive, "maxRounds": isPositive, "userNote": noteText,
+  "id": idText, "text": fullText, "dependsOn": listOf(idText), "requirementIds": listOf(noteText),
+  "status": oneOf(taskStatuses), "round": isPositive, "maxRounds": isPositive, "userNote": fullText,
   "userDone": isBool, "failStreak": isCount, "lastCommit": optional(shaText), "mergedCommit": optional(shaText),
   "resolving": isBool, "conflictFiles": listOf(relativePath), "conflictCount": isCount, "lastWriteMode": noteText,
   "mergeFix": isBool, "mergeFailures": listOf(noteText), "reviews": listOf(optional(reviewNote)),
@@ -431,7 +439,7 @@ taskSpec = objectOf({
   "reviewConclusions": mapOf(reviewNote, conclusionSpec),
 })
 planSpec = objectOf({
-  "status": oneOf(planStatuses), "rejectReason": noteText, "baseCommit": optional(shaText),
+  "status": oneOf(planStatuses), "rejectReason": fullText, "baseCommit": optional(shaText),
   "testTiming": oneOf((None, "afterMerge")), "file": matches(r"plans/[^/\\:]+\.md", " plans/ 底下的 .md 檔"),
   "sha256": hashText, "testBaseline": optional(testSummarySpec),
   "mergeTest": objectOf({"lastTested": optional(testSummarySpec), "split": optional(testSummarySpec)}),

@@ -278,6 +278,147 @@ def test_portableTextMasksMachineLocalData(text, expected):
   assert board_sync.portableText(expected) == expected
 
 
+# 依輸入分類列出原文、預期結果和不該留下的片段；片段是直接寫死的字串，不靠清理規則自己判斷有沒有清乾淨
+cleaningCases = [
+  # Windows 路徑：英文與中文目錄、有無引號、緊接中文、JSON 的雙反斜線
+  ("windows", "改 C:\\Users\\alice\\a.py 後重跑", "改 <路徑> 後重跑", ("alice", "Users", "a.py")),
+  ("windows", "改 C:/Users/alice/a.py 後重跑", "改 <路徑> 後重跑", ("alice", "Users", "a.py")),
+  ("windows", "存到 D:\\資料\\機密\\報告.md", "存到 <路徑>", ("資料", "機密", "報告")),
+  ("windows", "請修正C:\\使用者\\alice\\a.py。", "請修正<路徑>。", ("使用者", "alice")),
+  ("windows", '讀 "C:\\Program Files\\alice app\\a.txt" 後', '讀 "<路徑>" 後', ("Program", "alice")),
+  ("windows", "讀 'D:\\專案 資料\\a.md'", "讀 '<路徑>'", ("專案 資料", "a.md")),
+  ("windows", '{"path":"C:\\\\Users\\\\alice\\\\a.py"}', '{"path":"<路徑>"}', ("alice", "Users")),
+  ("windows", '見 "C:\\\\alice\\\\" 後', '見 "<路徑>" 後', ("alice",)),
+  # UNC 路徑
+  ("unc", "共享 \\\\server\\share\\alice.txt", "共享 <路徑>", ("server", "share", "alice")),
+  ("unc", "共享\\\\伺服器\\共用\\alice", "共享<路徑>", ("伺服器", "共用", "alice")),
+  ("unc", '開 "\\\\server\\my share\\a.txt"', '開 "<路徑>"', ("server", "my share")),
+  # Unix 路徑
+  ("unix", "看 /home/alice/a.py 後", "看 <路徑> 後", ("alice", "home")),
+  ("unix", "看 /資料/機密/a.md", "看 <路徑>", ("資料", "機密")),
+  ("unix", "請看/home/alice/a.py", "請看<路徑>", ("alice", "home")),
+  ("unix", "複製到「/srv/alice」或（/opt/alice）", "複製到「<路徑>」或（<路徑>）", ("alice", "srv", "opt")),
+  ("unix", '讀 "/home/alice/my file.txt"', '讀 "<路徑>"', ("alice", "my file")),
+  ("unix", "讀 '/資料/我的 專案'", "讀 '<路徑>'", ("資料", "我的 專案")),
+  ("unix", '{"note":"見 \\"/home/alice/a b\\""}', '{"note":"見 \\"<路徑>"}', ("alice", "home")),
+  # 憑證：一般賦值、JSON／dict、單雙引號、跳脫引號與反斜線
+  ("secret", "設定 token=abc123secret 後", "設定 token=<已遮蔽> 後", ("abc123secret",)),
+  ("secret", "密碼 password：hunter2secret", "密碼 password：<已遮蔽>", ("hunter2",)),
+  ("secret", 'JSON {"api_key": "k-123secret", "user":"bob"}', 'JSON {"api_key": "<已遮蔽>", "user":"bob"}',
+   ("k-123secret",)),
+  ("secret", "{'secret': 'abc 123', 'name': 'x'}", "{'secret': '<已遮蔽>', 'name': 'x'}", ("abc 123",)),
+  ("secret", "PASSWORD='p@ss word' 和 Token=\"tok en\"", "PASSWORD='<已遮蔽>' 和 Token=\"<已遮蔽>\"",
+   ("p@ss", "tok en")),
+  ("secret", '{"password":"prefix\\"remaining-secret"}', '{"password":"<已遮蔽>"}', ("prefix", "remaining-secret")),
+  ("secret", "token='a\\'b c'", "token='<已遮蔽>'", ("\\'b", "b c")),
+  ("secret", 'password="ab\\\\cd secret"', 'password="<已遮蔽>"', ("cd secret",)),
+  ("secret", "secret: 'xyz9\\\\' 後", "secret: '<已遮蔽>' 後", ("xyz9",)),
+  ("secret", 'password="a\\"b 與 token=c\\ d', 'password="<已遮蔽> 與 token=<已遮蔽>', ('\\"b', "\\ d")),
+  ("secret", "連線 https://bob:hunter2@example.com/repo", "連線 https://<已遮蔽>@example.com/repo",
+   ("hunter2", "bob:")),
+  ("secret", "Authorization: Bearer abc.def-ghijklmn", "Authorization: Bearer <已遮蔽>", ("abc.def",)),
+  ("secret", "金鑰 ghp_abcdefghijklmnopqrstuvwxyz0123 外洩", "金鑰 <已遮蔽> 外洩", ("ghp_",)),
+  ("local", "程序 pid=31337 卡住", "程序 pid <已遮蔽> 卡住", ("31337",)),
+  ("local", "\x1b[31m失敗\x1b[0m", "失敗", ("\x1b", "[31m")),
+  # 正常文字：網址、相對路徑、分類寫法都要原樣保留
+  ("normal", "見 https://example.com/資料/a?x=1", None, ()),
+  ("normal", "啟動 http://localhost:8000/api/上傳", None, ()),
+  ("normal", "改 src/資料/c.py 與 ./docs/說明.md、~/設定、..\\上層\\a.md、tests\\test_a.py", None, ()),
+  ("normal", "見 reviews/P0001-T1-r1.md 與 plan/P0001", None, ()),
+  ("normal", "改 前端/上傳，前端/上傳和/或 後端", None, ()),
+  ("normal", "比例 1/2、A/B 測試、TCP/IP", None, ()),
+  ("normal", "token 數量：5、tokenizer 正常", None, ()),
+]
+cleaningIds = [f"{kind}-{index}" for index, (kind, *_) in enumerate(cleaningCases)]
+
+
+def expectedOf(text, expected):
+  return text if expected is None else expected
+
+
+@pytest.mark.parametrize("kind, text, expected, forbidden", cleaningCases, ids=cleaningIds)
+def test_cleaningCategoriesLeaveNoForbiddenFragment(kind, text, expected, forbidden):
+  cleaned = board_sync.portableText(text)
+  assert cleaned == expectedOf(text, expected)
+  assert board_sync.portableText(cleaned) == cleaned
+  for fragment in forbidden:
+    assert fragment in text
+    assert fragment not in cleaned
+
+
+@pytest.mark.parametrize("kind, text, expected, forbidden", cleaningCases, ids=cleaningIds)
+def test_exportedNoteHasNoForbiddenFragment(tmp_path, writePlan, kind, text, expected, forbidden):
+  projectDir = makeProject(tmp_path / "proj", writePlan)
+  events = [
+    makeEvent("planSubmitted", plan="P0001"), approved("P0001"),
+    makeEvent("needsYou", plan="P0001", task="T1", kind="noChanges", reason="沒有改動"),
+    makeEvent("userDecision", plan="P0001", task="T1", action="retry", note=text),
+  ]
+  plans, state = eventsState(projectDir, events)
+  serialized = serializeSnapshot(buildSnapshot(state, plans, projectId))
+  userNote = parseSnapshot(serialized.encode("utf-8"))["plans"]["P0001"]["tasks"][0]["userNote"]
+  assert userNote == expectedOf(text, expected)
+  for fragment in forbidden:
+    assert fragment not in serialized and fragment not in userNote
+
+
+@pytest.mark.parametrize("kind, text, expected, forbidden",
+                         [case for case in cleaningCases if case[2] is not None],
+                         ids=[caseId for caseId, case in zip(cleaningIds, cleaningCases) if case[2] is not None])
+def test_parsingRejectsUncleanedCategoryText(tmp_path, writePlan, kind, text, expected, forbidden):
+  data = snapshotBytes(tmp_path, writePlan)
+  mutate(data, ("plans", "P0001", "tasks", 0, "userNote"), text)
+  with pytest.raises(SyncError, match="userNote"):
+    parseSnapshot(resign(data))
+  mutate(data, ("plans", "P0001", "tasks", 0, "userNote"), expected)
+  assert parseSnapshot(resign(data))["plans"]["P0001"]["tasks"][0]["userNote"] == expected
+
+
+def test_longInstructionsSurviveRoundTrip(tmp_path, writePlan):
+  projectDir = makeProject(tmp_path / "proj", writePlan)
+  approval = approved("P0001")
+  taskText = "依序處理每個欄位。" * 300 + "最後補上 T1 的測試"
+  approval["data"]["tasks"][0]["text"] = taskText
+  # 超過舊的 2,000 字上限，尾端的要求以前會被截掉
+  note = "補充：" + "保留輸入順序，" * 285 + "參考 C:\\Users\\alice\\a.py，最後一定要補測試"
+  reason = "退回：" + "範圍要再拆小。" * 300 + "最後請附驗證步驟"
+  events = [
+    makeEvent("planSubmitted", plan="P0001"), approval,
+    makeEvent("needsYou", plan="P0001", task="T1", kind="noChanges", reason="沒有改動"),
+    makeEvent("userDecision", plan="P0001", task="T1", action="retry", note=note),
+    makeEvent("planSubmitted", plan="P0002"),
+    makeEvent("planRejected", plan="P0002", reason=reason),
+  ]
+  assert len(note) > board_sync.maxNoteLength
+  plans, state = eventsState(projectDir, events)
+  snapshot = buildSnapshot(state, plans, projectId)
+  serialized = serializeSnapshot(snapshot)
+  assert "alice" not in serialized
+  restored = stateFromSnapshot(parseSnapshot(serialized.encode("utf-8")), plans)
+  task = restored["tasks"]["P0001/T1"]
+  assert task["userNote"] == note.replace("C:\\Users\\alice\\a.py", "<路徑>")
+  assert task["userNote"].endswith("最後一定要補測試")
+  assert task["text"] == taskText
+  assert restored["plans"]["P0002"]["rejectReason"] == reason
+  assert buildSnapshot(restored, plans, projectId, previous=snapshot) is snapshot
+
+
+def test_longReviewItemsSurviveRoundTrip(tmp_path, writePlan):
+  first = makeProject(tmp_path / "電腦1", writePlan)
+  second = makeProject(tmp_path / "電腦2", writePlan)
+  longItem = "請補測試：" + "空字串、" * 700 + "最後檢查錯誤訊息"
+  review = {"verdict": "fail", "mustFix": [{"ref": "R1", "text": longItem}], "suggest": ["建議：" + "拆函式、" * 700]}
+  original = writeReview(first, 1, review)
+  plans, state = projectState(first)
+  snapshot = buildSnapshot(state, plans, projectId, readReview=board_sync.reviewReader(first / ".board"))
+  parsed = parseSnapshot(serializeSnapshot(snapshot).encode("utf-8"))
+  conclusion = parsed["plans"]["P0001"]["tasks"][0]["reviewConclusions"]["reviews/P0001-T1-r1.md"]
+  assert conclusion["mustFix"] == review["mustFix"]
+  assert conclusion["suggest"] == review["suggest"]
+  board_sync.restoreReviewNotes(parsed, second / ".board")
+  assert (second / ".board" / "reviews" / "P0001-T1-r1.md").read_text(encoding="utf-8") == original
+
+
 def writeReview(projectDir, roundNumber, result, taskId="T1"):
   reviewsDir = projectDir / ".board" / "reviews"
   reviewsDir.mkdir(parents=True, exist_ok=True)
@@ -520,7 +661,7 @@ def mutate(data, path, value):
   (("plans", "P0001", "tasks", 1, "needs", "reason"), "失敗 pid 4242", "reason"),
   (("plans", "P0001", "tasks", 0, "userNote"), "見 C:\\Users\\me\\a.txt", "userNote"),
   (("plans", "P0001", "tasks", 0, "userNote"), "token=abcd1234secret", "userNote"),
-  (("plans", "P0001", "tasks", 0, "userNote"), "x" * 5000, "userNote"),
+  (("plans", "P0001", "tasks", 0, "mergeFailures"), ["x" * 5000], "mergeFailures"),
   (("plans", "P0001", "tasks", 0, "userNote"), "暫存在 /secret", "userNote"),
   (("plans", "P0001", "tasks", 0, "userNote"), 'password="abc123secret"', "userNote"),
   (("plans", "P0001", "tasks", 0, "userNote"), '{"token":"abc123secret"}', "userNote"),
