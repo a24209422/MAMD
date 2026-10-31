@@ -7,6 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
+import board_git
 from board_core import (BoardError, PlanStatus, TaskStatus, applyEvents, boardDir, boardDirName, deriveState,
                         eventsFileName, fileLock, loadPlans, lockFileName, newTaskState, readEvents, taskKey)
 from board_review import renderReviewMarkdown, verifyRef
@@ -700,7 +701,20 @@ def deriveFromBase(base, events, eventCount, plans, config):
   # 邊界之前的事件已經算在交接快照裡，再重播會重複核准、多加輪次；只有暫停是本機設定要沿用
   state = stateFromSnapshot(base, plans)
   earlier = [event for event in events[:eventCount] if event.get("type") in pauseEvents]
-  return applyEvents(state, earlier + events[eventCount:], plans, config)
+  state = applyEvents(state, earlier + events[eventCount:], plans, config)
+  markHandoffWaiting(state, events[eventCount:])
+  return state
+
+
+# 交接時另一台電腦正在跑的階段：這台電腦沒有對應的 agent 或測試，要由這裡的 Alfred 重新執行
+handoffRunningStatuses = (TaskStatus.writing, TaskStatus.testing, TaskStatus.reviewing, TaskStatus.merging)
+
+
+def markHandoffWaiting(state, laterEvents):
+  # 本機在邊界之後有這個任務的事件，就是這裡已經接手，不再是另一台電腦留下的進度
+  touched = {taskKey(event["plan"], event["task"]) for event in laterEvents if event.get("task")}
+  for key, taskState in state["tasks"].items():
+    taskState["handoffWaiting"] = taskState["status"] in handoffRunningStatuses and key not in touched
 
 
 def progressView(state, base):
@@ -712,7 +726,7 @@ def progressView(state, base):
 
 def syncInfo(status, message, base, incoming):
   return {"status": status, "message": message, "baseRevision": base["revision"] if base else None,
-          "incomingRevision": incoming["revision"] if incoming else None, "blockedPlans": {}}
+          "incomingRevision": incoming["revision"] if incoming else None, "blockedPlans": {}, "adoptBranches": {}}
 
 
 def localState(context, checkpoint):
@@ -816,9 +830,124 @@ def blockChangedPlans(state, base, plans):
     continued = entry["status"] == PlanStatus.active and planState["status"] == PlanStatus.active
     reason = planFileProblem(plans.get(planIdValue), entry) if continued else None
     if reason:
-      planState["syncBlocked"] = reason
-      blocked[planIdValue] = reason
+      blockPlan(state, blocked, planIdValue, reason)
   return blocked
+
+
+def blockedPlanMessages(sync):
+  # status、看板和 Alfred 用同一句話說明，使用者看到哪一邊都知道要補什麼
+  return [f"交接檔｜{planIdValue} 不派工：{reason}" for planIdValue, reason in sync["blockedPlans"].items()]
+
+
+def blockPlan(state, blocked, planIdValue, reason):
+  # 同一份 plan 可能同時有 plan 檔和多個分支的問題，全部列出才知道要補哪些
+  blocked[planIdValue] = f"{blocked[planIdValue]}；{reason}" if planIdValue in blocked else reason
+  state["plans"][planIdValue]["syncBlocked"] = blocked[planIdValue]
+
+
+def requiredCommits(state):
+  # 分支尖端吻合不代表歷史齊全：基準測試要用核准基底，合併後測試要找到合併 commit
+  for planState in state["plans"].values():
+    if planState["status"] == PlanStatus.active and planState["baseCommit"]:
+      yield planState["id"], "核准基底", planState["baseCommit"]
+  for taskState in state["tasks"].values():
+    if taskState["status"] == TaskStatus.mergedUntested and taskState["mergedCommit"]:
+      yield taskState["plan"], f"{taskState['task']} 的合併 commit", taskState["mergedCommit"]
+
+
+def blockMissingCommits(projectDir, state, base, blocked):
+  # 只檢查接手的進度：本機自己產生的事件，commit 本來就在這台電腦上
+  if not base:
+    return
+  required = list(requiredCommits(state))
+  missing = board_git.missingCommits(projectDir, [commit for _, _, commit in required])
+  for planIdValue, label, commit in required:
+    if commit in missing:
+      blockPlan(state, blocked, planIdValue,
+                f"本機缺少接續需要的{label} {commit[:12]}（可能是淺層 clone 或還沒抓到這段歷史）；"
+                "請執行 git fetch --unshallow 或 git fetch origin 補齊歷史後再接續")
+
+
+def continuedBranches(projectDir, state, recorded):
+  # 只驗接下來還要在本機繼續做或還要交付的分支：完成或放棄的任務不再派工，task 分支被清掉也沒關係
+  wanted = {}
+  for planState in state["plans"].values():
+    if planState["status"] != PlanStatus.active:
+      wanted.update(undeliveredPlanBranch(projectDir, planState, recorded))
+      continue
+    names = [board_git.planBranch(planState["id"])] + [
+      board_git.taskBranch(taskState["plan"], taskState["task"]) for taskState in state["tasks"].values()
+      if taskState["plan"] == planState["id"] and taskState["status"] not in (TaskStatus.done, TaskStatus.abandoned)]
+    wanted.update({name: planState["id"] for name in names if name in recorded})
+  return wanted
+
+
+def undeliveredPlanBranch(projectDir, planState, recorded):
+  # 結束的 plan 只有成果還沒進交付分支時才會記 plan 分支；本機 HEAD 已帶著它就不必再要求這個分支
+  name = board_git.planBranch(planState["id"])
+  if name not in recorded or board_git.containsCommit(projectDir, "HEAD", recorded[name]):
+    return {}
+  return {name: planState["id"]}
+
+
+def branchProblem(projectDir, branch, sha, refs):
+  local = refs.get(f"refs/heads/{branch}")
+  if local is None:
+    if sha in board_git.remoteShas(refs, branch):
+      return None
+    return (f"本機沒有分支 {branch}，遠端也沒有交接記錄的 {sha[:12]}；"
+            "請在來源電腦 push 這個分支，再到這台電腦執行 git fetch")
+  # 本機在交接後接著做，分支會往前走；只要還帶著交接記錄的成果就能接續
+  if local == sha or board_git.containsCommit(projectDir, f"refs/heads/{branch}", sha):
+    return None
+  return (f"本機分支 {branch} 沒有交接記錄的 {sha[:12]}（落後或和來源分岔），不會自動改寫本機分支；"
+          f"請比對兩邊的成果，把本機分支更新到包含 {sha[:12]} 後再接續")
+
+
+def conflictProblem(path, label):
+  # 分支 SHA 吻合時既有 worktree 會被直接沿用，裡面沒解完的衝突不會出現在分支 diff，測試和審查都看不到
+  if not path.exists():
+    return None
+  files = board_git.unmergedFiles(path)
+  if not files and not board_git.mergeInProgress(path):
+    return None
+  listed = f"（{'、'.join(files)}）" if files else ""
+  return (f"本機 {label} {path} 還有未完成的合併{listed}；"
+          "請在該目錄解完衝突並 commit，或執行 git merge --abort 後再接續")
+
+
+def conflictedWorktrees(projectDir, state, wanted):
+  for planIdValue in dict.fromkeys(wanted.values()):
+    # plan worktree 的合併只會是你手動開的（Alfred 合併衝突時會自己 abort），不管任務在做什麼都要先處理完
+    yield planIdValue, board_git.planWorktreePath(projectDir, planIdValue), "plan worktree"
+  for taskState in state["tasks"].values():
+    branch = board_git.taskBranch(taskState["plan"], taskState["task"])
+    # 正在解衝突、或你解完按了完成的任務本來就帶著合併，交給本機原本的解衝突與收尾流程（收尾會先檢查衝突標記）
+    if branch in wanted and not (taskState.get("resolving") or taskState.get("userDone")):
+      yield taskState["plan"], board_git.taskWorktreePath(projectDir, taskState["plan"], taskState["task"]), "task worktree"
+
+
+def blockConflictedWorktrees(projectDir, state, wanted, blocked):
+  for planIdValue, path, label in conflictedWorktrees(projectDir, state, wanted):
+    reason = conflictProblem(path, label)
+    if reason:
+      blockPlan(state, blocked, planIdValue, reason)
+
+
+def blockUnreachableBranches(projectDir, state, base, blocked):
+  """缺分支、分支歧異或 worktree 衝突未解的 plan 不派工；回傳本機還沒有、但遠端有相同 SHA、可以直接建立的分支。"""
+  recorded = base["branches"] if base else {}
+  wanted = continuedBranches(projectDir, state, recorded)
+  refs = board_git.branchRefs(projectDir) if wanted else {}
+  adoptable = {}
+  for branch, planIdValue in wanted.items():
+    reason = branchProblem(projectDir, branch, recorded[branch], refs)
+    if reason:
+      blockPlan(state, blocked, planIdValue, reason)
+    elif f"refs/heads/{branch}" not in refs:
+      adoptable[branch] = recorded[branch]
+  blockConflictedWorktrees(projectDir, state, wanted, blocked)
+  return adoptable
 
 
 def holdIncoming(projectDir, plans, config, incoming):
@@ -834,7 +963,10 @@ def loadProgress(projectDir, config, plans=None, accept=True):
   if result["accept"] is not None:
     result = (acceptUnderLock(projectDir, plans, config) if accept
               else holdIncoming(projectDir, plans, config, result["base"]))
-  result["sync"]["blockedPlans"] = blockChangedPlans(result["state"], result["base"], plans)
+  blocked = blockChangedPlans(result["state"], result["base"], plans)
+  blockMissingCommits(projectDir, result["state"], result["base"], blocked)
+  result["sync"]["adoptBranches"] = blockUnreachableBranches(projectDir, result["state"], result["base"], blocked)
+  result["sync"]["blockedPlans"] = blocked
   return {"plans": plans, "state": result["state"], "sync": result["sync"]}
 
 

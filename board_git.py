@@ -85,6 +85,24 @@ def branchExists(projectDir, branch):
   return runGit(projectDir, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False) != ""
 
 
+def branchRefs(projectDir):
+  # 交接時每個分支都要比對本機與遠端，一次列出來，不必每個分支問一次 git；不是 git 專案時當成沒有任何分支
+  output = runGit(projectDir, "for-each-ref", "--format=%(objectname) %(refname)", "refs/heads", "refs/remotes",
+                  check=False)
+  return {name: sha for sha, name in (line.split(" ", 1) for line in output.splitlines())}
+
+
+def remoteShas(refs, branch):
+  return {sha for name, sha in refs.items() if name.startswith("refs/remotes/") and name.endswith("/" + branch)}
+
+
+def adoptRemoteBranch(projectDir, branch, sha):
+  # 只認 SHA 完全吻合的 remote-tracking ref：遠端之後被 push 成別的版本時，不能接到不是交接記錄的成果
+  if sha not in remoteShas(branchRefs(projectDir), branch):
+    raise GitError(f"遠端沒有 SHA 為 {sha[:12]} 的 {branch}，請先 git fetch")
+  runGit(projectDir, "branch", branch, sha)
+
+
 def addWorktree(projectDir, path, branch, startPoint):
   path.parent.mkdir(parents=True, exist_ok=True)
   if branchExists(projectDir, branch):
@@ -196,6 +214,19 @@ def commitAll(path, message):
 
 def taskDiff(projectDir, planIdValue, taskId):
   return runGit(projectDir, "diff", f"{planBranch(planIdValue)}...{taskBranch(planIdValue, taskId)}")
+
+
+def missingCommits(projectDir, commits):
+  # 一次問完所有 commit；不是 git 專案時 git 會失敗，無從驗證就不擋
+  if not commits:
+    return set()
+  completed = subprocess.run(["git", "cat-file", "--batch-check"], cwd=projectDir, capture_output=True, text=True,
+                             input="".join(f"{commit}\n" for commit in commits))
+  if completed.returncode != 0:
+    return set()
+  present = {parts[0] for parts in (line.split() for line in completed.stdout.splitlines())
+             if len(parts) == 3 and parts[1] == "commit"}
+  return set(commits) - present
 
 
 def containsCommit(projectDir, ref, commit):

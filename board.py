@@ -17,7 +17,8 @@ from board_core import (PlanStatus, TaskStatus, appendEvent, boardDir, deriveSta
 from board_index import buildIndex
 from board_prompts import tddCrapDir
 from board_stats import approvedPlanIds, boardStats, planStats, taskRounds
-from board_sync import ExportError, SyncError, commitPaths, exportProgress, loadProgress, unexportedProgress
+from board_sync import (ExportError, SyncError, blockedPlanMessages, commitPaths, exportProgress, loadProgress,
+                        unexportedProgress)
 from conductor import processAlive, readLockPid
 
 humanOnlyCommands = {"approve", "reject", "abandon", "decide", "stop", "resume", "cleanup"}
@@ -195,6 +196,9 @@ def taskStatusLine(task):
   detail = f"  {task['task']} {task['status']}（第 {task['round']}/{task['maxRounds']} 輪{'，' + who if who else ''}）"
   if task["needs"]:
     detail += f"｜{task['needs']['reason']}"
+  if task.get("handoffWaiting"):
+    # 另起一行，不改狀態本身：交接進度要和來源電腦看到的一致，只補充這裡還沒有人在做
+    detail += "\n    等待接續：這是另一台電腦交接時的階段，這台電腦啟動 Alfred 後會重新執行，不會沿用原本的對話"
   return detail
 
 
@@ -205,6 +209,8 @@ def cmdStatus(projectDir, planIdValue=None):
   printLoadWarnings(loadErrors)
   if loaded["sync"]["message"]:
     print("交接檔｜" + loaded["sync"]["message"])
+  for message in blockedPlanMessages(loaded["sync"]):
+    print(message)
   if state["paused"]:
     print(f"已暫停：{state['pauseReason']}")
   for planState in state["plans"].values():

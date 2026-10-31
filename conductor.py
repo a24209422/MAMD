@@ -20,7 +20,7 @@ from board_core import (BoardError, PlanStatus, TaskStatus, agentLanes, appendEv
                         readUserConfig, readyTasks, roleChoiceText, roleNames, roleSpec, taskKey, tasksWithStatus)
 from board_prompts import buildResolvePrompt, buildReviewPrompt, buildWritePrompt, reviewerRules, writerRules
 from board_scheduling import availableLane
-from board_sync import loadProgress
+from board_sync import blockedPlanMessages, loadProgress
 from board_review import (renderReviewMarkdown, reviewFileName, reviewResultSchema, validateReview,
                           validateWriteResult, writeResultSchema)
 
@@ -309,6 +309,8 @@ mergeTestRecordFields = ("commit", "command", "passed", "failures", "qualityChec
 detachedTestKinds = ("baseline", "mergeTest")
 # 交接檔有新版本卻沒接納的狀態：分歧要等使用者決定接續哪一邊，不能自己往下派
 heldSyncStatuses = ("waiting", "diverged")
+# 沒有 job 卻停在這兩個階段的任務，恢復時記成哪個階段中斷
+interruptedStages = {TaskStatus.writing: "write", TaskStatus.reviewing: "review"}
 
 
 class Conductor:
@@ -320,6 +322,7 @@ class Conductor:
     self.out = out
     self.jobs = {}
     self.recovered = False
+    self.pendingRecovery = set()
     self.notified = set()
     self.onlyPlansCache = {}
     # 只在啟動後第一次讀進度時接納交接檔；之後換基底會讓執行中的任務和進度對不上
@@ -367,7 +370,20 @@ class Conductor:
     self.sync = loaded["sync"]
     if self.sync["message"]:
       self.notifyOnce("交接檔｜" + self.sync["message"])
+    for message in blockedPlanMessages(self.sync):
+      self.notifyOnce(message)
+    if not self.handoffHeld():
+      # 卡住的新交接檔可能記著不同的 SHA，照舊基底建分支，接納新版後反而會變成歧異
+      self.adoptHandoffBranches()
     return plans, loaded["state"]
+
+  def adoptHandoffBranches(self):
+    # 只有 Alfred 會建分支；status 和看板只讀進度，不動 git
+    for branch, sha in self.sync["adoptBranches"].items():
+      try:
+        board_git.adoptRemoteBranch(self.projectDir, branch, sha)
+      except Exception as error:
+        self.notifyOnce(f"交接檔｜無法從遠端建立分支 {branch}：{error}")
 
   def notifyOnce(self, message):
     # 每隔幾秒就跑一輪，問題沒解決前每輪都會再遇到同一個錯誤；只印第一次，終端機才不會被洗版
@@ -400,9 +416,7 @@ class Conductor:
   def tick(self):
     self.refreshRoles()
     plans, state = self.currentState()
-    if not self.recovered:
-      self.recoverInterrupted(state)
-      self.recovered = True
+    if self.recoverInterrupted(state):
       plans, state = self.currentState()
     if state["paused"]:
       self.stopJobs(list(self.jobs), recordInterruption=True)
@@ -436,12 +450,31 @@ class Conductor:
       self.recovered = False
 
   def recoverInterrupted(self, state):
-    # 剛啟動時手上沒有任何 agent；事件裡還在寫或審的任務，代表上次 conductor 中途結束
-    for key, taskState in state["tasks"].items():
-      stage = {TaskStatus.writing: "write", TaskStatus.reviewing: "review"}.get(taskState["status"])
-      if stage and key not in self.jobs and state["plans"][taskState["plan"]]["status"] == PlanStatus.active:
+    if not self.recovered:
+      # 剛啟動時手上沒有任何 agent；事件裡還在寫或審的任務，代表上次 conductor 中途結束
+      self.pendingRecovery.update(key for key, taskState in state["tasks"].items()
+                                  if taskState["status"] in interruptedStages)
+      self.recovered = True
+    recoveredAny = False
+    for key in sorted(self.pendingRecovery):
+      taskState = state["tasks"].get(key)
+      stage = self.recoveryStage(state, key)
+      if stage and state["plans"][taskState["plan"]].get("syncBlocked"):
+        # 交接被擋時記中斷會改掉交接進度；留在待恢復清單，解除後同一個 Alfred 的下一輪再補做
+        continue
+      self.pendingRecovery.discard(key)
+      if stage:
         appendEvent(self.projectDir, "taskInterrupted", plan=taskState["plan"], task=taskState["task"],
                     roundNumber=taskState["round"], data={"stage": stage})
+        recoveredAny = True
+    return recoveredAny
+
+  def recoveryStage(self, state, key):
+    taskState = state["tasks"].get(key)
+    # 本機已經有 job、任務已離開寫或審、plan 不再進行中，都不需要再恢復
+    if taskState is None or key in self.jobs or state["plans"][taskState["plan"]]["status"] != PlanStatus.active:
+      return None
+    return interruptedStages.get(taskState["status"])
 
   def stopJobs(self, keys, recordInterruption):
     for key in keys:
@@ -526,7 +559,8 @@ class Conductor:
 
   def ensurePlanWorktrees(self, state):
     for planState in state["plans"].values():
-      if planState["status"] == PlanStatus.active:
+      # 交接缺分支時從核准基底建 plan 分支，會假裝重建出一份沒有任何成果的進度
+      if planState["status"] == PlanStatus.active and not planState.get("syncBlocked"):
         try:
           board_git.ensurePlanWorktree(self.projectDir, planState["id"], planState["baseCommit"])
         except Exception as error:
@@ -553,7 +587,9 @@ class Conductor:
       self.reuseOrStartTestBaseline(planState, key, candidates)
 
   def wantsTestBaseline(self, planState, key):
-    return planState["status"] == PlanStatus.active and key not in self.jobs and self.needsTestBaseline(planState)
+    # 交接被擋的 plan 連基準也不跑：基準會佔測試名額，而且要等分支和 worktree 處理好才有意義
+    return (planState["status"] == PlanStatus.active and not planState.get("syncBlocked")
+            and key not in self.jobs and self.needsTestBaseline(planState))
 
   def reusableBaselineSource(self, planState, candidates):
     # candidates 已由新到舊排好，取第一個程式碼相同的來源
@@ -685,9 +721,9 @@ class Conductor:
     return not self.needsTestBaseline(planState)
 
   def awaitsMergeTests(self, planState):
-    # 每份 plan 同時只跑一個合併後測試
+    # 每份 plan 同時只跑一個合併後測試；交接缺分支或分支歧異時不能測，也不能把待測試任務跳過成完成
     return (planState["status"] == PlanStatus.active and mergeTestKey(planState["id"]) not in self.jobs
-            and planState["testTiming"] == "afterMerge")
+            and planState["testTiming"] == "afterMerge" and not planState.get("syncBlocked"))
 
   def skipMergeTests(self, planState, state):
     # 合併後才把測試關掉時，已合併待測試的任務沒有測試可等；記下來讓重播也得到同樣結果
@@ -989,7 +1025,8 @@ class Conductor:
   def startTest(self, taskState):
     info = {"kind": "test", "plan": taskState["plan"], "task": taskState["task"], "round": taskState["round"],
             "agent": taskState["agent"]}
-    worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
+    # 接手另一台電腦交接的測試中任務時，這台電腦還沒有 task worktree，要先依本機路徑建好
+    worktree = board_git.ensureTaskWorktree(self.projectDir, info["plan"], info["task"])
     # 記下被測的 commit 和指令：之後程式碼相同時才能沿用這次的結果
     info["commit"] = board_git.headCommit(worktree)
     info["command"] = self.config["testCommand"]
@@ -1059,7 +1096,8 @@ class Conductor:
             "agent": lane, "attempt": attempt, "cli": launch["spec"]["cli"], "model": launch["spec"]["model"],
             "launch": launch}
     try:
-      worktree = board_git.taskWorktreePath(self.projectDir, info["plan"], info["task"])
+      # 接手另一台電腦交接的待審查任務時，這台電腦還沒有 task worktree，要先依本機路徑建好
+      worktree = board_git.ensureTaskWorktree(self.projectDir, info["plan"], info["task"])
       diff = board_git.taskDiff(self.projectDir, info["plan"], info["task"])
       resolvedConflicts = taskState["conflictFiles"] if taskState["lastWriteMode"] == "resolve" else None
       afterMerge = taskState["testAfterMerge"] and bool(self.config.get("testCommand"))         and not self.config.get("skipTests", False)
@@ -1207,7 +1245,9 @@ class Conductor:
 
   def completeFinishedPlans(self, state):
     for planState in state["plans"].values():
-      if planState["status"] == PlanStatus.active and isPlanFinished(state, planState["id"]):
+      # 交接被擋的 plan 不判定完成：完成會改掉交接進度，要等分支和 worktree 處理好
+      if (planState["status"] == PlanStatus.active and not planState.get("syncBlocked")
+          and isPlanFinished(state, planState["id"])):
         appendEvent(self.projectDir, "planCompleted", plan=planState["id"])
 
   def runForever(self):

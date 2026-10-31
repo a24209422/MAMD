@@ -93,11 +93,12 @@ def legacyProject(gitProject, writePlan):
   commitIn(planPath, "t3.txt", "T3 的成果\n")
   git(planPath, "checkout", "-q", "plan/P0001")
   git(planPath, "merge", "-q", "--no-ff", "-m", "合併 T3", "task/P0001-T3")
-  commits = {"2" * 40: revParse(gitProject, "task/P0001-T1"), "3" * 40: revParse(gitProject, "task/P0001-T3"),
-             "4" * 40: revParse(gitProject, "plan/P0001")}
-  writeEvents(gitProject, withRealCommits(projectEvents(gitProject) + doneEvents, commits)
-              + oldMergeEvents("P0005", *oldMerged) + oldMergeEvents("P0006", *unmerged)
-              + [makeEvent("planCompleted", plan="P0006")])
+  # 核准基底也換成真的 commit：接手的電腦要驗證它在本機，假 SHA 會讓每份進行中的 plan 都被擋
+  commits = {"1" * 40: revParse(gitProject, "main"), "2" * 40: revParse(gitProject, "task/P0001-T1"),
+             "3" * 40: revParse(gitProject, "task/P0001-T3"), "4" * 40: revParse(gitProject, "plan/P0001")}
+  writeEvents(gitProject, withRealCommits(projectEvents(gitProject) + doneEvents
+                                          + oldMergeEvents("P0005", *oldMerged) + oldMergeEvents("P0006", *unmerged)
+                                          + [makeEvent("planCompleted", plan="P0006")], commits))
   git(gitProject, "branch", "task/P0004-T1")
   return gitProject
 
