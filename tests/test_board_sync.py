@@ -205,6 +205,24 @@ def test_taskTextAndQuotedSecretsAreMasked(tmp_path, writePlan):
   assert buildSnapshot(restored, plans, projectId, previous=snapshot) is snapshot
 
 
+def test_pathsRightAfterChineseAreMasked(tmp_path, writePlan):
+  projectDir = makeProject(tmp_path / "proj", writePlan)
+  approval = approved("P0001")
+  approval["data"]["tasks"][0]["text"] = "請看/home/alice/a.py 並改前端/上傳"
+  events = [
+    makeEvent("planSubmitted", plan="P0001"), approval,
+    makeEvent("needsYou", plan="P0001", task="T1", kind="noChanges", reason="沒有改動"),
+    makeEvent("userDecision", plan="P0001", task="T1", action="retry", note="請修正C:\\Users\\alice\\a.py"),
+  ]
+  plans, state = eventsState(projectDir, events)
+  snapshot = buildSnapshot(state, plans, projectId)
+  task = snapshot["plans"]["P0001"]["tasks"][0]
+  assert (task["text"], task["userNote"]) == ("請看<路徑> 並改前端/上傳", "請修正<路徑>")
+  text = serializeSnapshot(snapshot)
+  assert "alice" not in text
+  assert parseSnapshot(text.encode("utf-8")) == snapshot
+
+
 @pytest.mark.parametrize("text, expected", [
   ("\x1b[1;31m失敗\x1b[0m\x07", "失敗"),
   ("連線 https://me:hunter2@example.com/repo 失敗", "連線 https://<已遮蔽>@example.com/repo 失敗"),
@@ -216,6 +234,10 @@ def test_taskTextAndQuotedSecretsAreMasked(tmp_path, writePlan):
   ('設定 token="abc123secret" 與 password=\'p@ss word\'', '設定 token="<已遮蔽>" 與 password=\'<已遮蔽>\''),
   ("暫存在 /tmp 與 /secret，再看 C:\\x", "暫存在 <路徑> 與 <路徑>，再看 <路徑>"),
   ("改 前端/上傳 與 plan/P0001，比例 1/2", "改 前端/上傳 與 plan/P0001，比例 1/2"),
+  ("請修正C:\\Users\\me\\a.py，請看/home/me/a.py，暫存在/tmp，共享\\\\server\\share\\x",
+   "請修正<路徑>，請看<路徑>，暫存在<路徑>，共享<路徑>"),
+  ("請看https://example.com/a/b 與 src/a.py，改前端/上傳和/或 plan/P0001",
+   "請看https://example.com/a/b 與 src/a.py，改前端/上傳和/或 plan/P0001"),
   ('{"token":"abc123secret", "password": "p@ssword", \'api_key\':\'k 1\'}',
    '{"token":"<已遮蔽>", "password": "<已遮蔽>", \'api_key\':\'<已遮蔽>\'}'),
 ])
@@ -470,6 +492,9 @@ def mutate(data, path, value):
   (("plans", "P0001", "tasks", 0, "userNote"), "暫存在 /secret", "userNote"),
   (("plans", "P0001", "tasks", 0, "userNote"), 'password="abc123secret"', "userNote"),
   (("plans", "P0001", "tasks", 0, "userNote"), '{"token":"abc123secret"}', "userNote"),
+  (("plans", "P0001", "tasks", 0, "userNote"), "請修正C:\\Users\\me\\a.py", "userNote"),
+  (("plans", "P0001", "tasks", 0, "text"), "請看/home/me/a.py", "text"),
+  (("plans", "P0002", "rejectReason"), "暫存在/tmp", "rejectReason"),
   (("plans", "P0001", "tasks", 0, "text"), "讀 C:/Users/alice/private.txt", "text"),
   (("plans", "P0001", "tasks", 0, "text"), "設定 token=abc123", "text"),
   (("plans", "P0001", "tasks", 0, "requirementIds"), ["/tmp"], "requirementIds"),

@@ -36,9 +36,11 @@ contentFields = ("format", "version", "projectId", "plans", "branches")
 
 quotedPathPattern = re.compile(r"""(['"])(?:[A-Za-z]:[\\/]|\\\\|/)[^'"\n]*\1""")
 # 前面接著網址的 :/ 或相對路徑的字元時不算絕對路徑，plan/P0001、https://… 才不會被誤遮；
+# 中文常不空格就接路徑（請看/home/…），所以前一字只排除 ASCII，不能用會吃中文的 \w；
+# 斜線後是中文時視為「前端/上傳」這類分類寫法，不是路徑；
 # 全形標點視為路徑結尾，中文句子裡「路徑，後文」的後文才不會一起被吃掉
-barePathPattern = re.compile(r"""(?<![\w.~-])(?:[A-Za-z]:[\\/]|\\\\)[^\s'"，。；、）」]*"""
-                             r"""|(?<![\w.:~/-])/[^\s'"，。；、）」]+""")
+barePathPattern = re.compile(r"""(?<![A-Za-z0-9_.~-])(?:[A-Za-z]:[\\/]|\\\\)[^\s'"，。；、）」]*"""
+                             r"""|(?<![A-Za-z0-9_.:~/-])/[A-Za-z0-9_.~-][^\s'"，。；、）」]*""")
 conflictMarkerPattern = re.compile(r"^(?:<{7}|={7}|>{7})(?: |$)", re.MULTILINE)
 # 遮蔽值遇到全形標點與截斷用的「…」就停，重複清理同一段文字結果才會一樣
 secretValue = r"""[^\s'"，。；、）」…]+"""
