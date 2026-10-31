@@ -305,6 +305,33 @@ def test_missingPushedBranchShowsProgressButRefusesDispatch(computers, capsys, m
   assert localSha(clone, "plan/P0005") == readSnapshot(clone)["branches"]["plan/P0005"]
 
 
+def test_shallowCloneWithoutApprovedBaseBlocksUntilHistoryIsFetched(computers, tmp_path, capsys, monkeypatch):
+  source, _, remote = computers
+  expected = [line for line in planLines(statusOutput(source, capsys)) if not line.endswith(f"｜{PlanStatus.draft}")]
+  shallow = tmp_path / "電腦3" / "淺層"
+  shallow.parent.mkdir()
+  # 分支尖端都抓得到、SHA 也吻合，但核准基底在 depth 1 之外
+  git(tmp_path, "clone", "-q", "--depth", "1", "--no-single-branch", "-b", "main", remote.as_uri(), str(shallow))
+  baseCommit = readSnapshot(shallow)["plans"]["P0001"]["baseCommit"]
+  messages, launched = [], []
+  alfred = Conductor(shallow, config=fakeConfig(), out=messages.append)
+  stubLaunches(alfred, monkeypatch, launched)
+
+  plans, state = alfred.currentState()
+  alfred.startWrites(plans, state)
+
+  output = statusOutput(shallow, capsys)
+  assert planLines(output) == expected
+  assert "P0001 不派工" in output and baseCommit[:12] in output and "git fetch --unshallow" in output
+  assert any("P0001" in message and "git fetch --unshallow" in message for message in messages)
+  assert [entry for entry in launched if entry[1] == "P0001"] == []
+
+  git(shallow, "fetch", "-q", "--unshallow")
+  alfred.currentState()
+
+  assert "P0001" not in alfred.sync["blockedPlans"]
+
+
 def test_divergedLocalBranchIsKeptAndBlocksPlan(computers):
   _, clone, _ = computers
   git(clone, "branch", "task/P0001-T1", "main")
@@ -459,6 +486,51 @@ def test_foreignWritingWaitsThenRestartsHereWithoutOldSession(computers, capsys,
   launchText = " ".join(jobs[0]["argv"]) + jobs[0]["stdin"]
   assert str(source) not in launchText and "來源對話" not in launchText
   assert "等待接續" not in statusOutput(clone, capsys)
+
+
+def leaveConflictIn(worktree):
+  # 分支 SHA 不變，但 worktree 停在合併到一半、t1.txt 兩邊都有改的狀態
+  git(worktree, "checkout", "-q", "-b", "side", "HEAD~1")
+  (worktree / "t1.txt").write_text("這台電腦另外改的版本\n", encoding="utf-8")
+  git(worktree, "add", "t1.txt")
+  git(worktree, "commit", "-q", "-m", "另一個版本")
+  git(worktree, "checkout", "-q", "task/P0001-T1")
+  board_git.runGit(worktree, "merge", "-q", "side", check=False)
+
+
+def test_conflictedLocalWorktreeBlocksReview(computers, capsys, monkeypatch):
+  source, clone, remote = computers
+  writeEvents(source, [makeEvent("taskWritten", plan="P0001", task="T1", summary="完成",
+                                 commit=localSha(source, "task/P0001-T1"))])
+  recorded = publish(source, capsys, remote)["branches"]
+  git(clone, "pull", "-q", "--ff-only")
+  jobs, messages = [], []
+  recordAgentJobs(monkeypatch, jobs)
+  alfred = Conductor(clone, config=fakeConfig(), out=messages.append)
+  alfred.currentState()
+  worktree = board_git.ensureTaskWorktree(clone, "P0001", "T1")
+  leaveConflictIn(worktree)
+  assert board_git.unmergedFiles(worktree) == ["t1.txt"]
+
+  plans, state = alfred.currentState()
+  alfred.ensurePlanWorktrees(state)
+  alfred.startReviews(plans, state)
+  alfred.startTests(state)
+
+  assert localSha(clone, "task/P0001-T1") == recorded["task/P0001-T1"]
+  reason = alfred.sync["blockedPlans"]["P0001"]
+  assert "t1.txt" in reason and "git merge --abort" in reason
+  assert jobs == []
+  assert any("P0001 不派工" in message and "t1.txt" in message for message in messages)
+  assert "P0001 不派工" in statusOutput(clone, capsys)
+
+  # 衝突處理掉之後就照常接續審查
+  git(worktree, "merge", "--abort")
+  plans, state = alfred.currentState()
+  alfred.startReviews(plans, state)
+
+  assert "P0001" not in alfred.sync["blockedPlans"]
+  assert [job["cwd"] for job in jobs] == [worktree]
 
 
 def test_waitingReviewIsReviewedHereInRebuiltWorktree(computers, capsys, monkeypatch):

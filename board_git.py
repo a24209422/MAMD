@@ -216,6 +216,19 @@ def taskDiff(projectDir, planIdValue, taskId):
   return runGit(projectDir, "diff", f"{planBranch(planIdValue)}...{taskBranch(planIdValue, taskId)}")
 
 
+def missingCommits(projectDir, commits):
+  # 一次問完所有 commit；不是 git 專案時 git 會失敗，無從驗證就不擋
+  if not commits:
+    return set()
+  completed = subprocess.run(["git", "cat-file", "--batch-check"], cwd=projectDir, capture_output=True, text=True,
+                             input="".join(f"{commit}\n" for commit in commits))
+  if completed.returncode != 0:
+    return set()
+  present = {parts[0] for parts in (line.split() for line in completed.stdout.splitlines())
+             if len(parts) == 3 and parts[1] == "commit"}
+  return set(commits) - present
+
+
 def containsCommit(projectDir, ref, commit):
   # commit 不存在於本機時 merge-base 也會失敗，一樣當成分支沒帶著它
   completed = subprocess.run(["git", "merge-base", "--is-ancestor", commit, ref],

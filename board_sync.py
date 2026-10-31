@@ -845,6 +845,29 @@ def blockPlan(state, blocked, planIdValue, reason):
   state["plans"][planIdValue]["syncBlocked"] = blocked[planIdValue]
 
 
+def requiredCommits(state):
+  # 分支尖端吻合不代表歷史齊全：基準測試要用核准基底，合併後測試要找到合併 commit
+  for planState in state["plans"].values():
+    if planState["status"] == PlanStatus.active and planState["baseCommit"]:
+      yield planState["id"], "核准基底", planState["baseCommit"]
+  for taskState in state["tasks"].values():
+    if taskState["status"] == TaskStatus.mergedUntested and taskState["mergedCommit"]:
+      yield taskState["plan"], f"{taskState['task']} 的合併 commit", taskState["mergedCommit"]
+
+
+def blockMissingCommits(projectDir, state, base, blocked):
+  # 只檢查接手的進度：本機自己產生的事件，commit 本來就在這台電腦上
+  if not base:
+    return
+  required = list(requiredCommits(state))
+  missing = board_git.missingCommits(projectDir, [commit for _, _, commit in required])
+  for planIdValue, label, commit in required:
+    if commit in missing:
+      blockPlan(state, blocked, planIdValue,
+                f"本機缺少接續需要的{label} {commit[:12]}（可能是淺層 clone 或還沒抓到這段歷史）；"
+                "請執行 git fetch --unshallow 或 git fetch origin 補齊歷史後再接續")
+
+
 def continuedBranches(projectDir, state, recorded):
   # 只驗接下來還要在本機繼續做或還要交付的分支：完成或放棄的任務不再派工，task 分支被清掉也沒關係
   wanted = {}
@@ -881,8 +904,32 @@ def branchProblem(projectDir, branch, sha, refs):
           f"請比對兩邊的成果，把本機分支更新到包含 {sha[:12]} 後再接續")
 
 
+def conflictProblem(projectDir, taskState):
+  # 分支 SHA 吻合時既有 worktree 會被直接沿用，裡面沒解完的衝突不會出現在分支 diff，測試和審查都看不到
+  path = board_git.taskWorktreePath(projectDir, taskState["plan"], taskState["task"])
+  if not path.exists():
+    return None
+  files = board_git.unmergedFiles(path)
+  if not files and not board_git.mergeInProgress(path):
+    return None
+  listed = f"（{'、'.join(files)}）" if files else ""
+  return (f"本機 task worktree {path} 還有未完成的合併{listed}；"
+          "請在該目錄解完衝突並 commit，或執行 git merge --abort 後再接續")
+
+
+def blockConflictedWorktrees(projectDir, state, wanted, blocked):
+  for taskState in state["tasks"].values():
+    branch = board_git.taskBranch(taskState["plan"], taskState["task"])
+    # 正在解衝突的任務本來就帶著衝突，交給本機的解衝突流程
+    if branch not in wanted or taskState.get("resolving"):
+      continue
+    reason = conflictProblem(projectDir, taskState)
+    if reason:
+      blockPlan(state, blocked, taskState["plan"], reason)
+
+
 def blockUnreachableBranches(projectDir, state, base, blocked):
-  """缺分支或分支歧異的 plan 不派工；回傳本機還沒有、但遠端有相同 SHA、可以直接建立的分支。"""
+  """缺分支、分支歧異或 worktree 衝突未解的 plan 不派工；回傳本機還沒有、但遠端有相同 SHA、可以直接建立的分支。"""
   recorded = base["branches"] if base else {}
   wanted = continuedBranches(projectDir, state, recorded)
   refs = board_git.branchRefs(projectDir) if wanted else {}
@@ -893,6 +940,7 @@ def blockUnreachableBranches(projectDir, state, base, blocked):
       blockPlan(state, blocked, planIdValue, reason)
     elif f"refs/heads/{branch}" not in refs:
       adoptable[branch] = recorded[branch]
+  blockConflictedWorktrees(projectDir, state, wanted, blocked)
   return adoptable
 
 
@@ -910,6 +958,7 @@ def loadProgress(projectDir, config, plans=None, accept=True):
     result = (acceptUnderLock(projectDir, plans, config) if accept
               else holdIncoming(projectDir, plans, config, result["base"]))
   blocked = blockChangedPlans(result["state"], result["base"], plans)
+  blockMissingCommits(projectDir, result["state"], result["base"], blocked)
   result["sync"]["adoptBranches"] = blockUnreachableBranches(projectDir, result["state"], result["base"], blocked)
   result["sync"]["blockedPlans"] = blocked
   return {"plans": plans, "state": result["state"], "sync": result["sync"]}
