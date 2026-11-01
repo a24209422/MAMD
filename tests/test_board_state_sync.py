@@ -8,11 +8,13 @@ import pytest
 import board
 import board_api
 import board_git
+from board_review import renderReviewMarkdown
 from board_setup.project import Options, initialize
 from board_sync import (backupDirName, checkpointPath, isChoosable, newProjectId, progressPath, readCheckpoint,
                         readSnapshot, revisionOf, writeSnapshot)
 from browser import browserPages, sharedBrowser  # noqa: F401  測試模組裡要看得到 fixture
 from conftest import git
+from helpers import makeEvent
 from test_board_export import holdAlfredLock, legacyProject  # noqa: F401
 from test_board_handoff import computers, planLines, publish, statusOutput  # noqa: F401
 from test_board_setup import toolRoot
@@ -30,17 +32,38 @@ def restoreBranches(clone):
     git(clone, "branch", "-f", name, sha)
 
 
-@pytest.fixture
-def diverged(computers, capsys):
-  # 兩台從同一版各自往下走：電腦 2 跑到第 3 輪，電腦 1 跑到第 2 輪並交接
+def divergeWith(computers, capsys, localEvents, sourceEvents, prepare=lambda source, clone: None):
   source, clone, remote = computers
   assert initialize(clone, Options(skipTests=True), toolRoot) == 0
   restoreBranches(clone)
-  writeEvents(clone, [started("T1", roundNumber=3)])
-  writeEvents(source, [started("T1", roundNumber=2)])
+  writeEvents(clone, localEvents)
+  writeEvents(source, sourceEvents)
+  prepare(source, clone)
   incoming = publish(source, capsys, remote)
   git(clone, "pull", "-q", "--ff-only")
   return source, clone, remote, incoming
+
+
+@pytest.fixture
+def diverged(computers, capsys):
+  # 兩台從同一版各自往下走：電腦 2 跑到第 3 輪，電腦 1 跑到第 2 輪並交接
+  return divergeWith(computers, capsys, [started("T1", roundNumber=3)], [started("T1", roundNumber=2)])
+
+
+def reviewedRound2():
+  return [started("T1", roundNumber=2),
+          makeEvent("reviewStarted", plan="P0001", task="T1", roundNumber=2, agent="codex"),
+          makeEvent("reviewFailed", plan="P0001", task="T1", roundNumber=2, agent="codex",
+                    notes="reviews/P0001-T1-r2.md", mustFix=1, suggest=0)]
+
+
+def reviewNote(projectDir, mustFix):
+  text = renderReviewMarkdown("P0001", "T1", 2, {"verdict": "fail", "mustFix": [{"ref": "R1", "text": mustFix}],
+                                                 "suggest": []})
+  path = projectDir / ".board" / "reviews" / "P0001-T1-r2.md"
+  path.parent.mkdir(parents=True, exist_ok=True)
+  path.write_text(text, encoding="utf-8")
+  return text
 
 
 def fileBytes(clone):
@@ -126,6 +149,47 @@ def test_takeIncomingBacksUpAndContinuesFromHandoff(diverged, capsys):
   capsys.readouterr()
   assert board.cmdExportState(clone) == 0
   assert readSnapshot(clone)["revision"] == incoming["revision"]
+
+
+def test_takeIncomingReplacesConflictingReviewNote(computers, capsys):
+  # 兩台在同一任務同一輪各自審查，結論不同；選交接檔後 writer 要照交接檔的必改重寫
+  notes = {}
+
+  def prepare(source, clone):
+    notes["local"] = reviewNote(clone, "本機審查：請補 A 的測試")
+    notes["incoming"] = reviewNote(source, "交接檔審查：請補 B 的測試")
+
+  _, clone, _, incoming = divergeWith(computers, capsys, reviewedRound2(), reviewedRound2(), prepare)
+  assert board_api.stateView(clone)["sync"]["choosable"] is True
+
+  code, output = stateSync(clone, "incoming", capsys)
+
+  assert code == 0, output
+  [backup] = backups(clone)
+  assert (backup / "reviews" / "P0001-T1-r2.md").read_text(encoding="utf-8") == notes["local"]
+  assert (clone / ".board" / "reviews" / "P0001-T1-r2.md").read_text(encoding="utf-8") == notes["incoming"]
+  # 沒有衝突的審查檔照舊留在原處，不搬進備份
+  assert sorted(path.name for path in (backup / "reviews").iterdir()) == ["P0001-T1-r2.md"]
+  capsys.readouterr()
+  assert board.cmdExportState(clone) == 0
+  assert readSnapshot(clone)["revision"] == incoming["revision"]
+
+
+def test_takeLocalWithSameContentStillHandsOffNewRevision(computers, capsys):
+  # 兩台各自走出一樣的進度：內容相同但歷史不同，選本機仍要記下兩邊的版本鏈
+  _, clone, _, incoming = divergeWith(computers, capsys, [started("T1", roundNumber=2)],
+                                      [started("T1", roundNumber=2)])
+  localBase = readCheckpoint(clone)["base"]
+  assert board_api.stateView(clone)["sync"]["choosable"] is True
+
+  code, output = stateSync(clone, "local", capsys)
+
+  assert code == 0, output
+  chosen = readSnapshot(clone)
+  assert chosen["revision"] != incoming["revision"]
+  assert chosen["previousRevision"] == incoming["revision"]
+  assert localBase["revision"] in chosen["ancestors"]
+  assert readCheckpoint(clone)["base"]["revision"] == chosen["revision"]
 
 
 def test_choosingKeepsGitBranchesAndWorktreeFiles(diverged, capsys):
@@ -297,6 +361,15 @@ def test_uninitializedProjectCannotChoose(tmp_path):
     status, refused = post(port, scoped(plain, "/sync/local"))
   assert status == 409 and refused["ok"] is False
   assert list(plain.iterdir()) == []
+
+
+def test_uninitializedDefaultProjectCannotChoose(tmp_path):
+  plain = tmp_path / "空資料夾"
+  plain.mkdir()
+  with serving(plain) as httpServer:
+    status, refused = post(httpServer.server_address[1], "/api/sync/local")
+  assert status == 409 and refused["ok"] is False and "不是 git repo" in refused["message"]
+  assert not (plain / ".board").exists()
 
 
 def choosableSync(monkeypatch):

@@ -295,7 +295,7 @@ def sameContent(previous, body):
   return previous is not None and all(previous[field] == body[field] for field in contentFields)
 
 
-def buildSnapshot(state, plans, projectId, previous=None, branches=None, readReview=None, known=()):
+def buildSnapshot(state, plans, projectId, previous=None, branches=None, readReview=None, known=(), force=False):
   if previous is not None and previous["projectId"] != projectId:
     raise SyncError("交接檔的專案識別和這個專案不同，不能接在它後面")
   if branches is None:
@@ -304,8 +304,9 @@ def buildSnapshot(state, plans, projectId, previous=None, branches=None, readRev
           "plans": portablePlans(state, plans, previous, reviewLookup(readReview, previous))}
   # 經過一次 JSON 轉換：不和 state 共用物件，也確定內容寫得進檔案
   body = json.loads(canonicalJson(body))
-  # 內容沒變就沿用上一版，重複匯出不會一直長出新的 revision
-  if sameContent(previous, body):
+  # 內容沒變就沿用上一版，重複匯出不會一直長出新的 revision；
+  # 使用者選本機時兩邊歷史不同，即使內容一樣也要產生新版本記下本機的版本鏈
+  if not force and sameContent(previous, body):
     return previous
   snapshot = chainAfter(body, previous, known)
   validateSnapshot(snapshot)
@@ -1104,11 +1105,30 @@ def localChoiceProblems(projectDir, result, plans, loadErrors):
           + list(blockChangedPlans(result["state"], result["base"], plans).values()))
 
 
+def localConclusion(path, task):
+  refs = {ref.upper() for ref in task["requirementIds"]} | {verifyRef}
+  conclusion = parseReviewMarkdown(path.read_bytes().decode("utf-8", errors="replace"), refs)
+  return portableConclusion(conclusion) if conclusion else None
+
+
+def replaceReviewNotes(snapshot, boardDirectory, backup):
+  # 本機同名審查檔若是另一個結論，writer 會照本機舊必改重寫、再匯出也會蓋掉交接檔的結論；
+  # 先搬進這次的備份再寫入所選版本。結論相同的保留本機原稿，它比遮蔽過的內容完整
+  for planIdValue, plan in snapshot["plans"].items():
+    for task in plan["tasks"]:
+      for notes, conclusion in task["reviewConclusions"].items():
+        path = Path(boardDirectory) / notes
+        if path.exists() and localConclusion(path, task) != conclusion:
+          (backup / notes).parent.mkdir(parents=True, exist_ok=True)
+          shutil.move(path, backup / notes)
+        writeReviewNote(path, planIdValue, task["id"], conclusion)
+
+
 def chooseLocal(projectDir, result, plans, incoming, branches):
   base = result["base"]
   known = [base["revision"], *base["ancestors"]] if base else []
   snapshot = buildSnapshot(result["state"], plans, incoming["projectId"], incoming, branches,
-                           reviewReader(boardDir(projectDir)), known)
+                           reviewReader(boardDir(projectDir)), known, force=True)
   writeSnapshot(projectDir, snapshot)
   return snapshot
 
@@ -1132,6 +1152,6 @@ def takeProgress(projectDir, config, side, checkSource):
     backup = backupProgress(projectDir)
     chosen = chooseLocal(projectDir, result, plans, incoming, branches) if side == "local" else incoming
     if side != "local":
-      restoreReviewNotes(incoming, directory)
+      replaceReviewNotes(incoming, directory, backup)
     writeCheckpoint(projectDir, chosen, len(readEvents(projectDir)))
   return chosen, backup

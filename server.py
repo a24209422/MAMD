@@ -56,6 +56,8 @@ postRoutes = [
 projectRoute = re.compile(r"/api/projects/([^/]+)(/.+)")
 # 這些會改看板狀態或設定；未初始化的專案只能看和用終端機，不能替使用者寫入
 boardWrites = {"approve", "reject", "abandon", "decide", "stop", "resume", "stateSync", "saveRole"}
+# 同步選擇是新入口，沒有舊 API 的行為要維持，預設專案也一樣先檢查能不能操作
+defaultRouteChecked = {"stateSync"}
 # 指令函式把結果印到 stdout；接住時 stdout 是整個程式共用的，不同專案的 Dashboard 也只能同時有一個寫入在跑
 writeLock = threading.RLock()
 
@@ -320,9 +322,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
   def writeRefusal(self, methodName):
     # 舊 API 維持原本的行為；專案範圍的寫入每次重新檢查，使用者在終端機 init 完就能直接操作
-    if self.project is None or methodName not in boardWrites:
+    if methodName not in boardWrites or (self.project is None and methodName not in defaultRouteChecked):
       return None
-    status = board_projects.readiness(self.project.path)
+    status = board_projects.readiness(self.requestDashboard.projectDir)
     if status["ready"]:
       return None
     return 409, {"ok": False, "message": "這個專案還不能用看板操作：" + "；".join(status["problems"]),
