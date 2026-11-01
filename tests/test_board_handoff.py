@@ -876,6 +876,75 @@ def test_blockedFinishedPlanIsCompletedOnlyAfterResolved(computers, monkeypatch)
   assert len(completions()) == 1
 
 
+def test_blockedRunAbandonedBeforeResolvedIsNotRecovered(computers, capsys, monkeypatch):
+  source, clone, remote = computers
+  writeEvents(source, [started("T1", roundNumber=2)])
+  publish(source, capsys, remote)
+  git(clone, "pull", "-q", "--ff-only")
+  jobs = []
+  recordAgentJobs(monkeypatch, jobs)
+  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
+  unblock = blockFor(clone, alfred, "missingBranch")
+  eventCount = len(readEvents(clone))
+  alfred.tick()
+
+  # 等待解除期間使用者放棄這份 plan：待恢復的任務不再補記中斷，也不重新派工
+  writeEvents(clone, [makeEvent("planAbandoned", plan="P0001")])
+  unblock()
+  alfred.tick()
+  alfred.tick()
+
+  assert p0001EventsSince(clone, eventCount) == ["planAbandoned"]
+  assert alfred.currentState()[1]["plans"]["P0001"]["status"] == PlanStatus.abandoned
+  assert jobs == []
+
+
+def test_remoteBranchIsAdoptedOnlyAtRecordedSha(computers):
+  _, clone, _ = computers
+  recorded = readSnapshot(clone)["branches"]
+  otherSha = board_git.runGit(clone, "rev-parse", "HEAD")
+
+  board_git.adoptRemoteBranch(clone, "task/P0001-T1", recorded["task/P0001-T1"])
+  assert localSha(clone, "task/P0001-T1") == recorded["task/P0001-T1"]
+
+  # 遠端分支不是交接記錄的 SHA 時拒絕建立，避免接到別的成果
+  with pytest.raises(board_git.GitError, match="請先 git fetch"):
+    board_git.adoptRemoteBranch(clone, "task/P0001-T3", otherSha)
+  assert localSha(clone, "task/P0001-T3") == ""
+
+  # 本機已有同名分支時 git 建立失敗，既有分支維持原樣
+  with pytest.raises(board_git.GitError):
+    board_git.adoptRemoteBranch(clone, "task/P0001-T1", recorded["task/P0001-T1"])
+  assert localSha(clone, "task/P0001-T1") == recorded["task/P0001-T1"]
+
+
+def test_remoteMovedBeforeAdoptIsReportedAndOtherBranchesStillAdopted(computers, monkeypatch):
+  _, clone, _ = computers
+  recorded = readSnapshot(clone)["branches"]
+  movedSha = board_git.runGit(clone, "rev-parse", "HEAD")
+  realLoad = conductorModule.loadProgress
+
+  def fetchAfterCheck(*args, **kwargs):
+    loaded = realLoad(*args, **kwargs)
+    # 檢查完、建分支前剛好 fetch 到被改寫的遠端分支
+    git(clone, "update-ref", "refs/remotes/origin/task/P0001-T1", movedSha)
+    return loaded
+
+  monkeypatch.setattr(conductorModule, "loadProgress", fetchAfterCheck)
+  messages = []
+  alfred = Conductor(clone, config=fakeConfig(), out=messages.append)
+
+  alfred.currentState()
+  alfred.currentState()
+
+  failures = [message for message in messages if "無法從遠端建立分支 task/P0001-T1" in message]
+  assert len(failures) == 1 and "請先 git fetch" in failures[0]
+  assert localSha(clone, "task/P0001-T1") == ""
+  assert localSha(clone, "task/P0001-T3") == recorded["task/P0001-T3"]
+  # 下一輪重新比對就看到遠端不符，改成擋住派工
+  assert "P0001" in alfred.sync["blockedPlans"]
+
+
 def test_foreignMergingIsMergedHereInLocalPlanWorktree(computers, capsys, monkeypatch):
   source, clone, remote = computers
   writeEvents(source, reviewedInSource(source, passed=True))
