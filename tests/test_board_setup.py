@@ -277,6 +277,10 @@ def test_saved_non_tdd_setup_rebuilds_local_config(gitProject):
 def test_only_runtime_assets_are_bundled():
     from board_setup.assets import runtimeFiles
     files = runtimeFiles(toolRoot)
+    # 換電腦交接靠 board_sync 與 export-state、state-sync 入口，少一個 clone 後就接不到進度
+    for entry in ("board.py", "board_sync.py", "board_core.py", "board_git.py", "conductor.py"):
+        assert Path(entry) in files
+    assert Path("skills/agent-board-init/scripts/init.py") in files
     assert Path("board_setup/project.py") in files
     assert Path("skills/tdd-crap/scripts/quality.py") in files
     assert Path("requirements-terminal.txt") in files
@@ -284,6 +288,15 @@ def test_only_runtime_assets_are_bundled():
     assert Path("web/vendor/xterm.js") in files
     assert Path("web/js/terminal.js") in files
     assert not any("tests" in path.parts or "__pycache__" in path.parts for path in files)
+
+
+def test_initialized_skill_explains_handoff(gitProject):
+    assert initialize(gitProject, Options(skipTests=True), toolRoot) == 0
+    for host in (".agents", ".claude"):
+        text = (gitProject / host / "skills/agent-board-init/SKILL.md").read_text(encoding="utf-8")
+        # 一般專案只拿得到隨 init 複製的 skill，交接步驟和限制要跟著帶過去
+        for keyword in ("export-state", "git pull", "停止 Alfred", "同時寫入", "最近一次成功匯出"):
+            assert keyword in text
 
 
 runtimeDriver = """

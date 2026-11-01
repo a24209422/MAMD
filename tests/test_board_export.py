@@ -532,6 +532,22 @@ def test_statusHintsBranchCommitWithoutNewEvent(legacyProject, capsys):
   assert "export-state" not in capsys.readouterr().out
 
 
+def test_statusDoesNotHintWhenLocalBranchIsBehindHandoff(legacyProject, capsys):
+  taskPath = board_git.taskWorktreePath(legacyProject, "P0001", "T1")
+  commitIn(taskPath, "t1.txt", "另一台電腦做的新成果\n")
+  writeEvents(legacyProject, [started("T1", roundNumber=2),
+                              makeEvent("taskWritten", plan="P0001", task="T1", commit=revParse(legacyProject, "task/P0001-T1"),
+                                        summary="完成")])
+  assert exportState(legacyProject) == 0
+  # 交接檔記著較新的成果、本機分支還停在舊版：等同另一台推了新進度、這台只 pull 了主分支
+  git(taskPath, "reset", "-q", "--hard", "HEAD~1")
+  capsys.readouterr()
+
+  assert board.cmdStatus(legacyProject) == 0
+
+  assert "export-state" not in capsys.readouterr().out
+
+
 def test_statusWithoutPlansHasNoHint(gitProject, capsys):
   assert board.cmdStatus(gitProject) == 0
 
