@@ -145,6 +145,30 @@ def test_safeTickReportsErrorAndKeepsRunning(startBoard, monkeypatch):
   assert any("錯誤（GitError）：模擬失敗" in line for line in lines)
 
 
+def test_tickErrorDoesNotInterruptTaskWithRunningJob(startBoard, monkeypatch):
+  conductor, _ = startBoard(oneTask, {"write": {"T1": ["hang"]}})
+  runUntil(conductor, lambda state: "P0001/T1" in conductor.jobs)
+  job = conductor.jobs["P0001/T1"]["job"]
+  realEnsure = conductor.ensurePlanWorktrees
+  failures = []
+
+  def failOnce(state):
+    if not failures:
+      failures.append(True)
+      raise board_git.GitError("模擬失敗")
+    return realEnsure(state)
+
+  monkeypatch.setattr(conductor, "ensurePlanWorktrees", failOnce)
+  for _ in range(3):
+    conductor.safeTick()
+
+  # 出錯後重跑恢復，但 agent 還在本機跑：不能記中斷，也不能換掉手上的 job
+  assert failures == [True]
+  assert "taskInterrupted" not in eventTypes(conductor)
+  assert conductor.currentState()[1]["tasks"]["P0001/T1"]["status"] == TaskStatus.writing
+  assert conductor.jobs["P0001/T1"]["job"] is job
+
+
 def test_eventWriteFailureDoesNotStrandTask(startBoard, monkeypatch):
   import time
 
