@@ -1,0 +1,2136 @@
+{
+  "ancestors": [],
+  "branches": {},
+  "format": "agent-board-progress",
+  "plans": {
+    "P0002": {
+      "baseCommit": null,
+      "file": "plans/0002-test-gate-and-stats.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "2127ad7fcc407b41d622adf556eb936c839fe16b24f8a806a50840e09cf4a8f2",
+      "status": "放棄",
+      "tasks": [],
+      "testBaseline": null,
+      "testTiming": null
+    },
+    "P0003": {
+      "baseCommit": null,
+      "file": "plans/0003-plan-file-reaches-agents.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "36ec028f9179773b7e6564c31cf0e6511ef8ab0291577a5ed73a8d8e55b68194",
+      "status": "放棄",
+      "tasks": [],
+      "testBaseline": null,
+      "testTiming": null
+    },
+    "P0005": {
+      "baseCommit": "064939f492f79c7cc7451c48d4d86eb50fdc8904",
+      "file": "plans/0005-agent-board-init.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "81940e5850b14c4833f67a1e49d904d58e7e68b26e8955440bb18e3e19e29cb2",
+      "status": "放棄",
+      "tasks": [
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T1",
+          "lastCommit": null,
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": null,
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {},
+          "reviews": [],
+          "round": 1,
+          "status": "放棄",
+          "text": "建立 agent-board-init 的可發現入口、共用腳本介面與隨 repo 交付的資源配置，補入口及資源完整性測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T1"
+          ],
+          "failStreak": 0,
+          "id": "T2",
+          "lastCommit": null,
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": null,
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {},
+          "reviews": [],
+          "round": 1,
+          "status": "放棄",
+          "text": "實作一次設定兩個 skill 與專案規則的流程，保留使用者既有內容並支援安全重跑，擴充初始化與安裝測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T2"
+          ],
+          "failStreak": 0,
+          "id": "T3",
+          "lastCommit": null,
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": null,
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {},
+          "reviews": [],
+          "round": 1,
+          "status": "放棄",
+          "text": "接通 TDD 設定、環境準備、skill 路徑解析與 writer／reviewer 指引，補初始化及提示詞回歸測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T3"
+          ],
+          "failStreak": 0,
+          "id": "T4",
+          "lastCommit": null,
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": null,
+          "needs": null,
+          "requirementIds": [
+            "R2"
+          ],
+          "resolving": false,
+          "reviewConclusions": {},
+          "reviews": [],
+          "round": 1,
+          "status": "放棄",
+          "text": "完成 clone 後的工具定位與首次設定流程，讓初始化入口及必要來源資訊隨目標專案交付，加入隔離使用者目錄與搬移路徑測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T4"
+          ],
+          "failStreak": 0,
+          "id": "T5",
+          "lastCommit": null,
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": null,
+          "needs": null,
+          "requirementIds": [
+            "R2"
+          ],
+          "resolving": false,
+          "reviewConclusions": {},
+          "reviews": [],
+          "round": 1,
+          "status": "放棄",
+          "text": "更新使用說明並完成首次初始化、重跑、換電腦 clone 的端到端驗證與既有測試回歸",
+          "userDone": false,
+          "userNote": ""
+        }
+      ],
+      "testBaseline": {
+        "commit": "064939f492f79c7cc7451c48d4d86eb50fdc8904",
+        "failures": [
+          "tests/test_conductor.py::test_noReviewUntilBaselineForChangedCommandIsRecorded"
+        ],
+        "passed": false
+      },
+      "testTiming": null
+    },
+    "P0006": {
+      "baseCommit": null,
+      "file": "plans/0006-auto-compact-context.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "2756cb33acb802643f910de4c7596c1ce5e3404591907de697a701f0faabdbe5",
+      "status": "放棄",
+      "tasks": [],
+      "testBaseline": null,
+      "testTiming": null
+    },
+    "P0007": {
+      "baseCommit": "4db833c5c40d5e4f786fc37933d6baf555e0aaff",
+      "file": "plans/0007-interruptible-test-baseline.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "69c7c4bb7484a3d609c9eb2c153c8d9f7b7cc38180e6023d6f830aa32739dfab",
+      "status": "完成",
+      "tasks": [
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T1",
+          "lastCommit": "762a6e108fdd88b83ce964cee90f2567811dc4fd",
+          "lastReviewNotes": "reviews/P0007-T1-r1.md",
+          "lastTest": {
+            "newFailures": [],
+            "passed": false,
+            "verdict": "preexisting"
+          },
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": null,
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0007-T1-r1.md": {
+              "mustFix": [
+                {
+                  "ref": "R1",
+                  "text": "conductor.py:282–284 會跳過已完成但尚未收集的 baseline job。若測試在兩輪 tick 之間完成，此時 Ctrl+C 呼叫 stopJobs(..., recordInterruption=True)，job 與 baseline worktree 都會留下，且退出後不再有 collectFinishedJobs 清理，違反 D1 的停止清理要求。請讓 baseline 不受此跳過條件影響，並補上「已完成但尚未收集時停止」的回歸測試。"
+                }
+              ],
+              "round": 1,
+              "suggest": [
+                "已排除你列出的既有失敗。品質報告因 pytest 失敗提前結束，未產生函式品質數據；本次環境的 Python 路徑失效，無法另行執行驗證。"
+              ],
+              "verdict": "fail"
+            },
+            "reviews/P0007-T1-r2.md": {
+              "mustFix": [],
+              "round": 2,
+              "suggest": [
+                "`.quality/report.json` 因既有測試失敗而未產生函式品質指標，建議補驗覆蓋率與循環複雜度門檻。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0007-T1-r1.md",
+            "reviews/P0007-T1-r2.md"
+          ],
+          "round": 2,
+          "status": "完成",
+          "text": "conductor 的基準測試改用背景 job：runTestBaselines 啟動 baseline job，collectFinishedJobs 寫 testBaseline 並移除 worktree，stopJobs 和 plan 不再進行中時結束程式樹並移除 worktree；補 tests/test_conductor.py",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T1"
+          ],
+          "failStreak": 0,
+          "id": "T2",
+          "lastCommit": "3650c3988190a7439b65e56cb8d1fc91ab79dd4f",
+          "lastReviewNotes": null,
+          "lastTest": {
+            "newFailures": [
+              "tests/test_web.py::test_opsFeedAndBadges"
+            ],
+            "passed": false,
+            "verdict": "newFailure"
+          },
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": null,
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {},
+          "reviews": [],
+          "round": 2,
+          "status": "完成",
+          "text": "更新 README 的 testCommand 說明和「測試把關」第 1 步，說明基準在背景執行、放棄與停止會中斷、resume 後重跑",
+          "userDone": true,
+          "userNote": ""
+        }
+      ],
+      "testBaseline": {
+        "commit": "4db833c5c40d5e4f786fc37933d6baf555e0aaff",
+        "failures": [
+          "tests/test_conductor.py::test_noReviewUntilBaselineForChangedCommandIsRecorded",
+          "tests/test_web.py::test_consoleShowsBusyAgentDetail"
+        ],
+        "passed": false
+      },
+      "testTiming": null
+    },
+    "P0008": {
+      "baseCommit": null,
+      "file": "plans/0008-layered-checks-and-stop-after-result.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "d33ab6b2cfc51c104fdfd46b147a214c314c698ff01e226310b37cd1a822c524",
+      "status": "放棄",
+      "tasks": [],
+      "testBaseline": null,
+      "testTiming": null
+    },
+    "P0009": {
+      "baseCommit": "ef395b6bd69e34cb178b4065345e9ba5b41998c6",
+      "file": "plans/0009-stable-browser-tests.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "a7f9ace5617de650163a2cd14e7fcf64e0af6ed4573b5ab72d5d34945cdacfa6",
+      "status": "完成",
+      "tasks": [
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T1",
+          "lastCommit": "63a0ff9bf144e6e72526bd74f862b1bee21c7fdd",
+          "lastReviewNotes": "reviews/P0009-T1-r2.md",
+          "lastTest": {
+            "newFailures": [],
+            "passed": false,
+            "verdict": "preexisting"
+          },
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": null,
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0009-T1-r2.md": {
+              "mustFix": [
+                {
+                  "ref": "驗證",
+                  "text": "tests/test_web.py:275–295 的替身直接回傳預製 DOM，並把 503 紀錄塞入 serverRequests，沒有實際讓 server 回應 503。這只驗證重試迴圈，未達成 plan 指定的 server 前兩次失敗、第三次重畫成功驗證。請保留單元測試，並補回透過 dashboard server 與瀏覽器執行的整合測試，確認第三次取得資料且 warning 記錄次數。"
+                }
+              ],
+              "round": 2,
+              "suggest": [],
+              "verdict": "fail"
+            },
+            "reviews/P0009-T1-r3.md": {
+              "mustFix": [],
+              "round": 3,
+              "suggest": [
+                "建議在重試測試中斷言每次使用不同的 user-data-dir，直接保護 D1 要求的新瀏覽器設定目錄行為。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0009-T1-r1.md",
+            "reviews/P0009-T1-r2.md",
+            "reviews/P0009-T1-r3.md"
+          ],
+          "round": 3,
+          "status": "完成",
+          "text": "新增 renderUntil 與診斷資訊：renderDom 回傳 stderr 與耗時、dashboard fixture 記錄 server 請求、重畫最多 3 次並在重試時發出 warning；補測試確認重試與失敗訊息",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T1"
+          ],
+          "failStreak": 0,
+          "id": "T2",
+          "lastCommit": "d18dc7b607e639894f7e80bbddb41a414761115e",
+          "lastReviewNotes": null,
+          "lastTest": {
+            "newFailures": [],
+            "passed": false,
+            "verdict": "preexisting"
+          },
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": null,
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0009-T2-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0009-T2-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "把 test_web.py 用瀏覽器的測試改用 renderUntil，ready 用各測試第一個要看的內容",
+          "userDone": false,
+          "userNote": ""
+        }
+      ],
+      "testBaseline": {
+        "commit": "ef395b6bd69e34cb178b4065345e9ba5b41998c6",
+        "failures": [
+          "tests/test_conductor.py::test_noReviewUntilBaselineForChangedCommandIsRecorded"
+        ],
+        "passed": false
+      },
+      "testTiming": null
+    },
+    "P0010": {
+      "baseCommit": null,
+      "file": "plans/0010-reuse-test-baseline.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "2f1655e42b144136e1c4cbf065b23e5127631df4bd77148e592f25caefb1db0f",
+      "status": "完成",
+      "tasks": [],
+      "testBaseline": null,
+      "testTiming": null
+    },
+    "P0011": {
+      "baseCommit": null,
+      "file": "plans/0011-shared-browser-tests.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "6aa6ccbe16d96d1a058f57b75b20ca3dcafbdbf7ddcf2023e5b0dbdd58f52d21",
+      "status": "完成",
+      "tasks": [],
+      "testBaseline": null,
+      "testTiming": null
+    },
+    "P0012": {
+      "baseCommit": null,
+      "file": "plans/0012-limit-parallel-tests.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "199c467c64b148cd85660bc19faac19b4c2f976684dc5eeb87ff9a38958481cf",
+      "status": "完成",
+      "tasks": [],
+      "testBaseline": null,
+      "testTiming": null
+    },
+    "P0013": {
+      "baseCommit": null,
+      "file": "plans/0013-quality-failures-in-baseline-compare.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "8e95d6427308a8be8836ab3adc92719973f54d8d64c409b2b8b0c9721df4978d",
+      "status": "完成",
+      "tasks": [],
+      "testBaseline": null,
+      "testTiming": null
+    },
+    "P0014": {
+      "baseCommit": "588e095cec89956d4e50a284913f1baf4242317e",
+      "file": "plans/0014-fix-quality-gate-functions.md",
+      "mergeTest": {
+        "lastTested": {
+          "commit": "faad4fdcfe469df8688a14aeb57012dfb98a604d",
+          "comparedTo": "d3dfe74c5167ff63a60825bef79a988c3a87ca3f",
+          "covers": [
+            "T5",
+            "T7",
+            "T2",
+            "T8",
+            "T6",
+            "T9",
+            "T10",
+            "T11",
+            "T3",
+            "T4"
+          ],
+          "failures": [
+            "tests/test_conductor.py::test_noReviewUntilBaselineForChangedCommandIsRecorded"
+          ],
+          "passed": false,
+          "qualityChecked": false,
+          "qualityFailures": []
+        },
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "471774b9a5335f8b086893a13d546b2d8da8bf61bd300e534fc9141928a46957",
+      "status": "完成",
+      "tasks": [
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T1",
+          "lastCommit": "4e4cd76b424e944946e93899b8a6e8c38339bb1b",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "d3dfe74c5167ff63a60825bef79a988c3a87ca3f",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T1-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [
+                "重構與原行為一致，既有斷言未修改，新增測試有驗證具體行為。worktree 未提供 .quality/report.json，三個函式的品質 PASS 尚無報告可核對。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T1-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "rtm_graph.py 重構 RtmGraph.addRow（複雜度 28）、analyzePlan（13）、RtmGraph.finish（12），補 tests/test_rtm_graph.py",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T1"
+          ],
+          "failStreak": 0,
+          "id": "T2",
+          "lastCommit": "921f989834223e876fb3aa6f8ba3ae5e6d0a788a",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "4c7be93e1cf49557ea37189db4ad0bdd82f0dc1c",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T2-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T2-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "rtm_graph.py 補 printSummary（覆蓋率 0%）、buildSingle（0%）、main（62%）、formatList（67%）的測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T3",
+          "lastCommit": "b704b2d7f6c000a875a9710c8f019e605826abdd",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "926016bef753c585a902e21ad9ec09cf091021c1",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T3-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [
+                "合併後請確認品質報告中這 3 個函式均為 PASS。本次未執行完整測試；worktree 無品質報告，且 Python 啟動器失效，無法核實品質數值。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T3-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "conductor.py 重構 Conductor.mergeOneTask（複雜度 16）、Conductor.finishWrite（14）、formatEvent（13），補 tests/test_conductor.py",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T3"
+          ],
+          "failStreak": 0,
+          "id": "T4",
+          "lastCommit": "f7edf09155767b4349bcb1c3d796391f39a87852",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "faad4fdcfe469df8688a14aeb57012dfb98a604d",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T4-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [
+                "tests/test_conductor.py 的 POSIX 測試可記錄並斷言 os.kill 收到 (1234, 0)，確保確實使用訊號 0。現有品質報告顯示本任務四個函式覆蓋率皆為 100%、複雜度皆低於 10，均符合門檻；未執行完整測試。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T4-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "conductor.py 補 Conductor.runForever（0%）、processAlive（30%）、Conductor.startReviews（67%）、Conductor.startWrites（78%）的測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T5",
+          "lastCommit": "009836f5a69f425875aa8f4d6c5de24998b92c3f",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "788224f7465f9831b6d691c6ee36461b05334ff1",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T5-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T5-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "board.py 重構 cmdInit（複雜度 34）、cmdStatus（12），補 tests/test_board_cli.py",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T5"
+          ],
+          "failStreak": 0,
+          "id": "T6",
+          "lastCommit": "e501f91abc2c31fdcb9127e68dfd7a468c11947a",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "0e365b47a9e3e65a40d31c4db7f11bea9544d5c5",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T6-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T6-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "board.py 補 missingPackages（0%）、isHuman（67%）、hasWindowsConsole（78%）的測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T7",
+          "lastCommit": "68900e32c7e62db710d6b834072b40414fc46560",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "13f2b43a54a56eccae3729275bfd5a9efd00c6de",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T7-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T7-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "board_logs.py 重構 summarizeRecords（複雜度 21）、claudeDetail（17），補 toolTarget（覆蓋率 38%）、toolResultText（40%）的測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T8",
+          "lastCommit": "c9810ad43625dfd0e518688653d991ccd77c8f4d",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "1703f059c947c31fdc2228966337f0a3fe267ca4",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T8-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [
+                "test_runCommandReturnsBoardErrorMessage 以同一執行緒再次取得 RLock，無法證明例外後已釋放鎖；建議用另一執行緒搭配逾時驗證。",
+                "本次未跑完整測試；工作樹沒有品質報告，且 Python 執行環境失效，因此無法確認實測品質數值。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T8-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "server.py 重構 DashboardHandler.routePost（複雜度 11），補 main（覆蓋率 33%）、Dashboard.modelCommand（73%）、Dashboard.runCommand（75%）的測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T9",
+          "lastCommit": "ea45a2bed125d7a81f1a0d1f00e99499bdc9217b",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "5dc0e07f3427f9406745ed80a9e3c3b71a91c203",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T9-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T9-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "board_agents.py 補 killProcessTree（覆蓋率 43%）、codexFinalResult（78%）、AgentJob.kill（75%）的測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T10",
+          "lastCommit": "b3825268c9d12b88ac8a7e4c3f1a2cdf13affeda",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "e5da607fc50e4e217b3779bd7a3cde3a07970eb7",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T10-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T10-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "重構 board_stats.py 的 collectStats（複雜度 15）與 board_review.py 的 validateReview（14），補 tests/test_board_stats.py 與 tests/test_board_review.py",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T11",
+          "lastCommit": "bc2b62d272e3c9d52738f1c12be3ab36c6e26095",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "d2246390ba63f47590742172eb8f358003265f12",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0014-T11-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0014-T11-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "補 modules/system_monitor/metrics.py 的 volumeLabel（覆蓋率 43%）、board_api.py 的 lastEventTime（75%）、board_git.py 的 addWorktree（75%）的測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T2",
+            "T4",
+            "T6",
+            "T7",
+            "T8",
+            "T9",
+            "T10",
+            "T11"
+          ],
+          "failStreak": 0,
+          "id": "T12",
+          "lastCommit": null,
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": null,
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {},
+          "reviews": [],
+          "round": 1,
+          "status": "完成",
+          "text": "全部合併後跑一次完整品質檢查，確認沒有任何 FAIL；有的話只修造成 FAIL 的地方",
+          "userDone": true,
+          "userNote": ""
+        }
+      ],
+      "testBaseline": {
+        "commit": "588e095cec89956d4e50a284913f1baf4242317e",
+        "failures": [
+          "tests/test_conductor.py::test_noReviewUntilBaselineForChangedCommandIsRecorded"
+        ],
+        "passed": false,
+        "qualityChecked": false,
+        "qualityFailures": []
+      },
+      "testTiming": "afterMerge"
+    },
+    "P0015": {
+      "baseCommit": null,
+      "file": "plans/0015-batch-integration-review.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "73408d0bd8b40f647ee994aba6eee101bbbd54a35299c65d34c0cfc8848765fd",
+      "status": "被取代",
+      "tasks": [],
+      "testBaseline": null,
+      "testTiming": null
+    },
+    "P0020": {
+      "baseCommit": "2eeb3256c2be320d519b37e92c089975370f944d",
+      "file": "plans/0020-stabilize-review-baseline-test.md",
+      "mergeTest": {
+        "lastTested": {
+          "commit": "9832e2b6a6953be1a70fd8f42971097b3a24c5ac",
+          "comparedTo": "2eeb3256c2be320d519b37e92c089975370f944d",
+          "covers": [
+            "T1",
+            "T2"
+          ],
+          "failures": [],
+          "passed": true,
+          "qualityChecked": true,
+          "qualityFailures": []
+        },
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "c899394d40c544ad7b160e2cb671fc20257ecebae1b1e7d3aafef8dd5b152582",
+      "status": "完成",
+      "tasks": [
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T1",
+          "lastCommit": "c820ea00c62a2fac0dbf1543ec88cc10b5ce8b50",
+          "lastReviewNotes": "reviews/P0020-T1-r1.md",
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "a8782b5a8c154e6a7310e77a54ee2b9ae5a132c9",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0020-T1-r1.md": {
+              "mustFix": [
+                {
+                  "ref": "R1",
+                  "text": "tests/test_conductor.py:418 只等待呼叫檔案存在，但 fake_agent.startCall 使用 write_text，檔案建立時 JSON 可能尚未寫完。此時暫停會殺掉 reviewer，留下空白或不完整紀錄，讓新增回歸測試最後的 readCalls 因 JSONDecodeError 偶發失敗。請以有上限的輪詢確認首次呼叫紀錄可完整解析後才暫停，並容忍寫入期間的暫時讀取失敗。"
+                }
+              ],
+              "round": 1,
+              "suggest": [],
+              "verdict": "fail"
+            },
+            "reviews/P0020-T1-r2.md": {
+              "mustFix": [],
+              "round": 2,
+              "suggest": [
+                "延遲啟動回歸測試目前在呼叫暫停 helper 前就開閘；可改成確認 helper 已進入等待後才開閘，讓移除同步等待時必定失敗，進一步強化競態保護。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0020-T1-r1.md",
+            "reviews/P0020-T1-r2.md"
+          ],
+          "round": 2,
+          "status": "完成",
+          "text": "修正 reviewer 啟動與暫停的測試競態，加入延遲啟動回歸驗證",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T1"
+          ],
+          "failStreak": 0,
+          "id": "T2",
+          "lastCommit": "466cbc93c230259a525ed9726fd02917bbd66d67",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "42324b280150a3381c61bfe7456af31e86adc1e0",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0020-T2-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [
+                "第 4 節建議補充：T12 worktree 不存在但 task/P0014-T12 分支仍存在時，流程會沿用既有分支，不保證從最新 plan/P0014 建立；應重建 worktree 後確認並整合修正。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0020-T2-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "撰寫 P0014 T12 復原與完整品質驗收操作說明",
+          "userDone": false,
+          "userNote": ""
+        }
+      ],
+      "testBaseline": {
+        "commit": "2eeb3256c2be320d519b37e92c089975370f944d",
+        "failures": [
+          "tests/test_conductor.py::test_noReviewUntilBaselineForChangedCommandIsRecorded"
+        ],
+        "passed": false,
+        "qualityChecked": false,
+        "qualityFailures": []
+      },
+      "testTiming": "afterMerge"
+    },
+    "P0021": {
+      "baseCommit": "c5fcafc09868ca4b773e1586cd43734d53b5cbc9",
+      "file": "plans/0021-fix-remaining-quality-failures.md",
+      "mergeTest": {
+        "lastTested": {
+          "commit": "9832e2b6a6953be1a70fd8f42971097b3a24c5ac",
+          "comparedTo": "dc878f0bd31cb2a87b0923b6216120305e3afc55",
+          "covers": [
+            "T3",
+            "T4"
+          ],
+          "failures": [],
+          "passed": true,
+          "qualityChecked": true,
+          "qualityFailures": []
+        },
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "d80faef8d74360cbb982e9cf0761ecf995c5b16988c2629b7a2e388a3ad5ccae",
+      "status": "完成",
+      "tasks": [
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T1",
+          "lastCommit": "0edbf37bcc6ece69f62e3a2be89c286aaae09a5e",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "127f3b29ba7382a9221a4fa39151c6dae4e5af82",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0021-T1-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0021-T1-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "重構 compareWithBaseline 與 mergeTestOutcome，保留所有結果判定契約",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T1"
+          ],
+          "failStreak": 0,
+          "id": "T2",
+          "lastCommit": "be72e2cae5c6d7bba5e823c2767c5f5a4bf13d59",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "dc878f0bd31cb2a87b0923b6216120305e3afc55",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0021-T2-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0021-T2-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "重構 runTestBaselines，保留基準沿用與等待規則",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T2"
+          ],
+          "failStreak": 0,
+          "id": "T3",
+          "lastCommit": "59d87c6664e9ff11b7d12556f8c18967f4c4aad3",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "f89d2e6a6d532bb8ec0b25b28c0c5db9dc39daf7",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0021-T3-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [
+                "靜態審查未發現行為差異或弱化測試。本機缺少品質報告，Python 路徑亦失效；測試與品質 PASS 仍待合併後流程確認。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0021-T3-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "重構合併後測試排程與目標選擇",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T3"
+          ],
+          "failStreak": 0,
+          "id": "T4",
+          "lastCommit": "8006c125edcb1598398801c5ce5ff297f78bb21c",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "9832e2b6a6953be1a70fd8f42971097b3a24c5ac",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0021-T4-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0021-T4-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "補 finishMergeTest 與 removeMergeTestWorktree 的錯誤路徑測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T5",
+          "lastCommit": "26adb4d39705fcca359f1be03ee92b6407691d2b",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "c094ff5b665f55c8997a65d1d6c4e559886dff6b",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0021-T5-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0021-T5-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "重構 onUserDecision，保留人工決定的重播結果",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T6",
+          "lastCommit": "5ba34f24062d06c79aafb73796d08e9abc58734f",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "1a3831af4b07271e40ebfdefe91b3313b69ce3e0",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0021-T6-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0021-T6-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "重構 cmdApprove，保留核准檢查與輸出",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T7",
+          "lastCommit": "f79ce51fcc94a939bc3e4b57ff5a4abc6b899d3d",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "c2a7c1cc96a60d18999410d6d14bcf9571501616",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0021-T7-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0021-T7-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "重構 buildReviewPrompt，保留提示詞內容與順序",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T8",
+          "lastCommit": "9ee546c5bba6dc84dd5a61811cbe0d2b06034a00",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "b3c713007269c6186388c32e6aab5dc74451fd30",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0021-T8-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [
+                "靜態審查確認計數語意保留，新增測試未弱化斷言。本機 Python 路徑失效，且無 .quality/report.json，未能實測局部測試與品質；請由後續測試流程確認。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0021-T8-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "重構 testStats，保留測試與退回次數的統計",
+          "userDone": false,
+          "userNote": ""
+        }
+      ],
+      "testBaseline": {
+        "commit": "c5fcafc09868ca4b773e1586cd43734d53b5cbc9",
+        "failures": [],
+        "passed": false,
+        "qualityChecked": true,
+        "qualityFailures": [
+          "品質門檻 conductor.py::mergeTestOutcome",
+          "品質門檻 conductor.py::Conductor.startMergeTests",
+          "品質門檻 board_stats.py::testStats",
+          "品質門檻 conductor.py::Conductor.startMergeTest",
+          "品質門檻 conductor.py::compareWithBaseline",
+          "品質門檻 board_prompts.py::buildReviewPrompt",
+          "品質門檻 board_core.py::onUserDecision",
+          "品質門檻 board.py::cmdApprove",
+          "品質門檻 conductor.py::Conductor.runTestBaselines",
+          "品質門檻 conductor.py::Conductor.finishMergeTest",
+          "品質門檻 conductor.py::Conductor.removeMergeTestWorktree"
+        ]
+      },
+      "testTiming": "afterMerge"
+    },
+    "P0022": {
+      "baseCommit": "0533ca6607a62d4b5e621cfd89922ba4d805a5f4",
+      "file": "plans/0022-project-switcher.md",
+      "mergeTest": {
+        "lastTested": {
+          "commit": "5f61bcfc780835e4a41bd1ed45f7207f3d3bd35b",
+          "comparedTo": "44416008b53d5a7059573cbff40ecc3d8570fdd8",
+          "covers": [
+            "T4",
+            "T2",
+            "T5"
+          ],
+          "failures": [],
+          "passed": true,
+          "qualityChecked": true,
+          "qualityFailures": []
+        },
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "d6dce87c0c3b02b0928cb478cb15e618adb8580ed58d55b02a9bcfdefd7c4cb3",
+      "status": "完成",
+      "tasks": [
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T1",
+          "lastCommit": "3dd7962b337a88bac4d24dd4b0610915e722a95e",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "e7849e4cff50b83389e36c68841ff2a761dbff41",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0022-T1-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [
+                "建議補上多執行緒同時登錄同一路徑的測試，確認 makeDashboard 只呼叫一次，且所有呼叫取得同一份 Project。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0022-T1-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "新增專案 registry、路徑驗證、獨立資源與共用寫入鎖，補獨立測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T1"
+          ],
+          "failStreak": 0,
+          "id": "T2",
+          "lastCommit": "317e4d8e58583d8f853e6d90feb4582194788d0c",
+          "lastReviewNotes": null,
+          "lastTest": {
+            "commit": "5ff1eb2b1319e73e928faa24d25149ed412b9f79",
+            "newFailures": [
+              "websockets.server:server.py:601 opening handshake failed"
+            ],
+            "source": "mergeTest",
+            "verdict": "newFailure"
+          },
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "6a3f9f84995dda291019e3d5653b059eb4842281",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0022-T2-r2.md": {
+              "mustFix": [],
+              "round": 2,
+              "suggest": [
+                "建議保留完整失敗 traceback：opening handshake failed 也可能來自既有的非法 Origin 測試；本次 diff 修正的是 Ctrl+C 繼承與 tasklist 解碼，僅憑該行日誌無法確認與原始失敗的關係。測試原有的中斷及程序清理斷言均保留，未見弱化驗證。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0022-T2-r1.md",
+            "reviews/P0022-T2-r2.md"
+          ],
+          "round": 2,
+          "status": "完成",
+          "text": "接入專案開啟、清單與有專案範圍的 API，補初始化狀態及隔離測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T2"
+          ],
+          "failStreak": 0,
+          "id": "T3",
+          "lastCommit": "af61dcd19131092a2928994c8cb82815557567a2",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "44416008b53d5a7059573cbff40ecc3d8570fdd8",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0022-T3-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [
+                "tests/test_web_projects.py：建議讓 A、B 使用不同的模型設定與 agent 日誌，切換後直接斷言 B 的內容及請求 id；目前僅確認頁籤切換成功且 API 有專案前綴，無法排除請求仍指向 A。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0022-T3-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "新增專案選擇介面、最近紀錄及整頁切換，改共用 API 與啟動流程並補瀏覽器測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T3"
+          ],
+          "failStreak": 0,
+          "id": "T4",
+          "lastCommit": "5f84219435f09769423c78743977630948a6b3e8",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "cb4e0425fa98c3aac5421ee3e45d9892b8bf7c7b",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0022-T4-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [
+                "建議在跨專案終端測試中，先讓 A 的 shell 切到子目錄，切回 A 後再確認工作目錄仍保留，以涵蓋既有 shell 不被重新設定目錄的情境。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0022-T4-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "完成終端與監控的專案切換、整體服務清理，補跨專案端到端測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T4"
+          ],
+          "failStreak": 0,
+          "id": "T5",
+          "lastCommit": "4214b1b9bb4a1f61bdb676d85e12349a180ec2fe",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "5f61bcfc780835e4a41bd1ed45f7207f3d3bd35b",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0022-T5-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0022-T5-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "補可攜性與相容性驗證、使用文件及完整回歸",
+          "userDone": false,
+          "userNote": ""
+        }
+      ],
+      "testBaseline": {
+        "commit": "0533ca6607a62d4b5e621cfd89922ba4d805a5f4",
+        "failures": [
+          "websockets.server:server.py:601 opening handshake failed",
+          "tests/test_terminal_service.py::test_real_powershell_unicode_resize_and_job_cleanup"
+        ],
+        "passed": false,
+        "qualityChecked": false,
+        "qualityFailures": []
+      },
+      "testTiming": "afterMerge"
+    },
+    "P0023": {
+      "baseCommit": "ac0e8c5c34eb48e61246a1e12b19b2f3dc13fcea",
+      "file": "plans/0023-portable-plan-progress.md",
+      "mergeTest": {
+        "lastTested": {
+          "commit": "87e4f4aa9d2b7d474dad3860584f26da8a711d29",
+          "comparedTo": "02f7a8f7fdc875f689aa116066b2389d977b663c",
+          "covers": [
+            "T6",
+            "T7"
+          ],
+          "failures": [],
+          "passed": true,
+          "qualityChecked": true,
+          "qualityFailures": []
+        },
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "5a36fa31ba5fd4d8f3a54d46784245d382e49d21563353ea22283bddd19415e9",
+      "status": "完成",
+      "tasks": [
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T1",
+          "lastCommit": "681b53d798558b959ca8964aadf3f42af7994cc0",
+          "lastReviewNotes": "reviews/P0023-T1-r6.md",
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 7,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "d9fe725774199d5619689c5e63359eb2fd38a3c6",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0023-T1-r6.md": {
+              "mustFix": [
+                {
+                  "ref": "R1",
+                  "text": "board_sync.py 的 taskEntry 對 userNote 呼叫 portableText，會將使用者補充截斷為 2,000 字元。已重現：2,019 字元的補充往返後只剩 2,000 字元，尾端指示消失，導致另一台電腦接續時遺失要求。請保留完整且已清理的補充，或超限時明確報錯阻止匯出，並補上超長補充的往返測試。"
+                }
+              ],
+              "round": 6,
+              "suggest": [],
+              "verdict": "fail"
+            },
+            "reviews/P0023-T1-r7.md": {
+              "mustFix": [],
+              "round": 7,
+              "suggest": [
+                "建議補上 mergeTest.lastTested、mergeTest.split 與 mergeFix 非空時的快照往返測試，確認合併後待測及修正中的接續資料完整保留。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0023-T1-r1.md",
+            "reviews/P0023-T1-r2.md",
+            "reviews/P0023-T1-r3.md",
+            "reviews/P0023-T1-r4.md",
+            "reviews/P0023-T1-r5.md",
+            "reviews/P0023-T1-r6.md",
+            "reviews/P0023-T1-r7.md"
+          ],
+          "round": 7,
+          "status": "完成",
+          "text": "建立可攜進度格式、欄位白名單與驗證，補快照往返及版本測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T1"
+          ],
+          "failStreak": 0,
+          "id": "T2",
+          "lastCommit": "58e2a62394187f31bc5801d6767cf35360ff466f",
+          "lastReviewNotes": "reviews/P0023-T2-r1.md",
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "2d8199218bb5a0e8033d00ebf46e62794422519d",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0023-T2-r1.md": {
+              "mustFix": [
+                {
+                  "ref": "R1",
+                  "text": "board_core.py:735 的 syncBlocked 檢查只阻擋 queued 任務。tasksWithStatus 仍會回傳該 plan 的 testing、toReview、merging 任務，而 conductor 透過它啟動測試、審查及合併，未達成檔案不符時拒絕接續該 plan。請涵蓋所有接續入口，並補上非 queued 狀態的阻擋測試。"
+                },
+                {
+                  "ref": "R1",
+                  "text": "board_sync.py:810 的 blockChangedPlans 只檢查目前是否 active，未區分基底快照是否已核准。若快照中的 plan 是退回狀態，使用者還原後合法修改、重新送出並核准，這裡仍會拿退回時的舊 sha256 比較，錯誤阻擋新核准的任務。請區分舊快照與本機新核准的版本，並補上修改退回 plan 後重新核准、可正常接續的測試。"
+                }
+              ],
+              "round": 1,
+              "suggest": [],
+              "verdict": "fail"
+            },
+            "reviews/P0023-T2-r2.md": {
+              "mustFix": [],
+              "round": 2,
+              "suggest": [
+                "建議補測接納前新增本機持久進度的競態，確認 acceptUnderLock 重新判斷後會保留本機進度、不前移 checkpoint。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0023-T2-r1.md",
+            "reviews/P0023-T2-r2.md"
+          ],
+          "round": 2,
+          "status": "完成",
+          "text": "整合快照基底、本機事件增量與交接版本判斷，補重播及衝突測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T2"
+          ],
+          "failStreak": 0,
+          "id": "T3",
+          "lastCommit": "61ac265b492a9dc6c21ff3c96d73f611e8a5b949",
+          "lastReviewNotes": "reviews/P0023-T3-r5.md",
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 6,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "336b517e4f30770c8c681c86eaef13484178ff21",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0023-T3-r5.md": {
+              "mustFix": [
+                {
+                  "ref": "R1",
+                  "text": "board.py 的 branchNeeds 忽略放棄的 plan。但部分完成後才放棄的 plan 仍保留已完成任務及 commit；若成果尚未合併進交付分支，匯出會成功卻不列出承載成果的 plan 分支，照清單 push 後另一台電腦拿不到已完成成果。請納入這些完成任務的可達性檢查與必要分支，並補回歸測試。"
+                },
+                {
+                  "ref": "驗證",
+                  "text": "board.py 的 worktreeProblems 只檢查進行中的 plan，但 requiredBranches 也會要求交付尚未合併的完成／被取代 plan 分支。因此這些必要 plan worktree 即使有未提交改動或合併衝突，匯出仍會成功，違反來源一致性驗證。請檢查所有交付所需的 worktree，並補測確認失敗時交接檔與 checkpoint 保持原樣。"
+                }
+              ],
+              "round": 5,
+              "suggest": [],
+              "verdict": "fail"
+            },
+            "reviews/P0023-T3-r6.md": {
+              "mustFix": [],
+              "round": 6,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0023-T3-r1.md",
+            "reviews/P0023-T3-r2.md",
+            "reviews/P0023-T3-r3.md",
+            "reviews/P0023-T3-r4.md",
+            "reviews/P0023-T3-r5.md",
+            "reviews/P0023-T3-r6.md"
+          ],
+          "round": 6,
+          "status": "完成",
+          "text": "新增交接匯出、來源一致性檢查與必要分支清單，補既有專案遷移測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T3"
+          ],
+          "failStreak": 0,
+          "id": "T4",
+          "lastCommit": "6be20be0737ecbac2ab256b34efa860379101fd9",
+          "lastReviewNotes": null,
+          "lastTest": {
+            "commit": "dd4795f43d6191ad7f5536d940e0358d930809c4",
+            "newFailures": [
+              "品質門檻 board_setup/project.py::acceptHandoff"
+            ],
+            "source": "mergeTest",
+            "verdict": "newFailure"
+          },
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "237c090023e3a0064c58eec523126906363f31fa",
+          "needs": null,
+          "requirementIds": [
+            "R2"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0023-T4-r3.md": {
+              "mustFix": [],
+              "round": 3,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0023-T4-r1.md",
+            "reviews/P0023-T4-r2.md",
+            "reviews/P0023-T4-r3.md"
+          ],
+          "round": 3,
+          "status": "完成",
+          "text": "接入初始化、CLI、API 與看板輪詢，補首次 clone 和後續 pull 的整合測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 1,
+          "conflictFiles": [
+            "tests/test_board_handoff.py"
+          ],
+          "dependsOn": [
+            "T4"
+          ],
+          "failStreak": 0,
+          "id": "T5",
+          "lastCommit": "8bb92ff29bfe34625e4ae949f6b8a1adec351d5f",
+          "lastReviewNotes": null,
+          "lastTest": {
+            "commit": "fc19299a4c1dc813baa603cd01d1115e63135d0d",
+            "newFailures": [
+              "品質門檻 conductor.py::Conductor.recoveryStage",
+              "品質門檻 conductor.py::Conductor.adoptHandoffBranches",
+              "品質門檻 board_git.py::adoptRemoteBranch"
+            ],
+            "source": "mergeTest",
+            "verdict": "newFailure"
+          },
+          "lastWriteMode": "write",
+          "maxRounds": 7,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "02f7a8f7fdc875f689aa116066b2389d977b663c",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0023-T5-r7.md": {
+              "mustFix": [],
+              "round": 7,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0023-T5-r1.md",
+            "reviews/P0023-T5-r2.md",
+            "reviews/P0023-T5-r3.md",
+            "reviews/P0023-T5-r4.md",
+            "reviews/P0023-T5-r5.md",
+            "reviews/P0023-T5-r6.md",
+            "reviews/P0023-T5-r7.md"
+          ],
+          "round": 7,
+          "status": "完成",
+          "text": "補跨機接續的分支驗證、工作目錄重建與執行狀態轉換測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T5"
+          ],
+          "failStreak": 0,
+          "id": "T6",
+          "lastCommit": "7a122ae029a9e68c01fd948deafb3eb17acb745c",
+          "lastReviewNotes": "reviews/P0023-T6-r3.md",
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 4,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "ac316140dbf4ac30261d43738430d73658c89d71",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0023-T6-r3.md": {
+              "mustFix": [
+                {
+                  "ref": "R1",
+                  "text": "board_sync.py 的 take local 後續交接仍會混用舊審查結論：兩台對同一任務同一輪產生不同必改後，電腦 2 選 local 並 push，電腦 1 pull 時會自動接納新版本，但 restoreReviewNotes／writeReviewNote 會跳過既有同名審查檔。因此 writer 仍讀到電腦 1 被捨棄的必改，再次 export-state 也會經 reviewLookup 把舊結論寫回快照。請讓自動接納所選版本時同步處理衝突審查檔並保留備份，補上 take local → 另一台 pull → writer 讀取及再次匯出的回歸測試。"
+                }
+              ],
+              "round": 3,
+              "suggest": [],
+              "verdict": "fail"
+            },
+            "reviews/P0023-T6-r4.md": {
+              "mustFix": [],
+              "round": 4,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0023-T6-r1.md",
+            "reviews/P0023-T6-r2.md",
+            "reviews/P0023-T6-r3.md",
+            "reviews/P0023-T6-r4.md"
+          ],
+          "round": 4,
+          "status": "完成",
+          "text": "加入同步提示與明確的分歧處理入口，補本機進度保留及使用者限制測試",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T6"
+          ],
+          "failStreak": 0,
+          "id": "T7",
+          "lastCommit": "77a782bd3d52eb76e657b5a1d28525c1ed64a43c",
+          "lastReviewNotes": "reviews/P0023-T7-r1.md",
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "87e4f4aa9d2b7d474dad3860584f26da8a711d29",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0023-T7-r1.md": {
+              "mustFix": [
+                {
+                  "ref": "驗證",
+                  "text": "tests/test_board_handoff_e2e.py:95–99 的任務接續仍使用原始碼的 Conductor，且直接 writeEvents 注入 taskStarted，沒有讓交付的 runtime 實際接續任務。即使 runtime 無法重建 worktree 或派工，這個測試仍可能通過，未達 D7 的 runtime 跨電腦端到端驗證。請透過目標專案交付的 runtime 執行接續流程（可用假 agent），確認從記錄的 SHA 重建 worktree、實際產生任務進度與成果，再匯出回傳並驗證 A 只 pull 即接納。"
+                }
+              ],
+              "round": 1,
+              "suggest": [],
+              "verdict": "fail"
+            },
+            "reviews/P0023-T7-r2.md": {
+              "mustFix": [],
+              "round": 2,
+              "suggest": [
+                "README「換電腦交接」建議補充：原電腦 pull 後，若既有 plan／task 分支落後交接記錄，Alfred 會暫停該 plan 派工，須依 status 提示更新分支後才能接續。"
+              ],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0023-T7-r1.md",
+            "reviews/P0023-T7-r2.md"
+          ],
+          "round": 2,
+          "status": "完成",
+          "text": "補交接文件、runtime 交付與雙 clone 端到端回歸",
+          "userDone": false,
+          "userNote": ""
+        }
+      ],
+      "testBaseline": {
+        "commit": "ac0e8c5c34eb48e61246a1e12b19b2f3dc13fcea",
+        "failures": [],
+        "passed": true,
+        "qualityChecked": true,
+        "qualityFailures": []
+      },
+      "testTiming": "afterMerge"
+    }
+  },
+  "previousRevision": null,
+  "projectId": "84e628a14491426da76af56735198958",
+  "revision": "be8ffbe4bec1167f3ad69015847b77334402b10aacc16b0f898254fb8a2baa6a",
+  "version": 1
+}
