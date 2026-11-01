@@ -824,9 +824,28 @@ def acceptUnderLock(projectDir, plans, config):
   with fileLock(directory / lockFileName):
     result = evaluateProgress(projectDir, plans, config)
     if result["accept"] is not None:
-      writeCheckpoint(projectDir, result["base"], result["accept"])
-      restoreReviewNotes(result["base"], directory)
+      acceptWithReviewNotes(projectDir, result["base"], result["accept"])
   return result
+
+
+def acceptWithReviewNotes(projectDir, base, eventCount):
+  # 另一台選本機後交接回來時，本機同名審查檔可能還是被捨棄的結論；審查檔和 checkpoint 要一起換，
+  # 任一步失敗就全部還原，writer 才不會照新基底讀到舊必改，或照舊基底讀到新必改
+  directory = boardDir(projectDir)
+  changes = list(reviewNoteChanges(base, directory))
+  # 只有要蓋掉本機審查檔時才留備份；單純補上新電腦沒有的檔不必
+  replacing = any((directory / notes).exists() for _, _, notes, _ in changes)
+  backup, replaced = backupProgress(projectDir) if replacing else None, []
+  try:
+    replaceReviewNotes(changes, directory, backup, replaced)
+    writeCheckpoint(projectDir, base, eventCount)
+  except (SyncError, OSError) as error:
+    undoReviewNotes(replaced)
+    if backup:
+      shutil.rmtree(backup)
+    if isinstance(error, SyncError):
+      raise
+    raise SyncError(f"接納交接進度失敗，本機進度沒有更動：{error}") from error
 
 
 def planFileProblem(plan, entry):
@@ -1111,30 +1130,40 @@ def localConclusion(path, task):
   return portableConclusion(conclusion) if conclusion else None
 
 
-def replaceReviewNotes(snapshot, boardDirectory, backup, replaced):
+def reviewNoteChanges(snapshot, boardDirectory):
   # 本機同名審查檔若是另一個結論，writer 會照本機舊必改重寫、再匯出也會蓋掉交接檔的結論；
-  # 先搬進這次的備份再寫入所選版本。結論相同的保留本機原稿，它比遮蔽過的內容完整
+  # 結論相同的保留本機原稿，它比遮蔽過的內容完整
   for planIdValue, plan in snapshot["plans"].items():
     for task in plan["tasks"]:
       for notes, conclusion in task["reviewConclusions"].items():
-        path, moved = Path(boardDirectory) / notes, None
-        if path.exists():
-          if localConclusion(path, task) == conclusion:
-            continue
-          moved = backup / notes
-          moved.parent.mkdir(parents=True, exist_ok=True)
-          shutil.move(path, moved)
-        # 寫之前先記下，寫到一半失敗也還原得回來
-        replaced.append((path, moved))
-        writeReviewNote(path, planIdValue, task["id"], conclusion)
+        path = Path(boardDirectory) / notes
+        if not path.exists() or localConclusion(path, task) != conclusion:
+          yield planIdValue, task["id"], notes, conclusion
 
 
-def undoChoice(projectDir, backup, replaced):
-  # 選擇沒寫完就回到選擇前：本機狀態沒換時，writer 讀到的必改和交接檔也不能換，否則兩者對不上
+def replaceReviewNotes(changes, boardDirectory, backup, replaced):
+  # 被換掉的本機審查檔先搬進這次的備份，再寫入所選版本
+  for planIdValue, taskId, notes, conclusion in changes:
+    path, moved = Path(boardDirectory) / notes, None
+    if path.exists():
+      moved = backup / notes
+      moved.parent.mkdir(parents=True, exist_ok=True)
+      shutil.move(path, moved)
+    # 寫之前先記下，寫到一半失敗也還原得回來
+    replaced.append((path, moved))
+    writeReviewNote(path, planIdValue, taskId, conclusion)
+
+
+def undoReviewNotes(replaced):
   for path, moved in reversed(replaced):
     path.unlink(missing_ok=True)
     if moved:
       shutil.move(moved, path)
+
+
+def undoChoice(projectDir, backup, replaced):
+  # 選擇沒寫完就回到選擇前：本機狀態沒換時，writer 讀到的必改和交接檔也不能換，否則兩者對不上
+  undoReviewNotes(replaced)
   saved = backup / progressPath(projectDir).name
   if saved.exists():
     shutil.copy2(saved, progressPath(projectDir))
@@ -1147,7 +1176,8 @@ def applyChoice(projectDir, side, result, plans, branches, backup):
   try:
     chosen = chooseLocal(projectDir, result, plans, incoming, branches) if side == "local" else incoming
     if side != "local":
-      replaceReviewNotes(incoming, boardDir(projectDir), backup, replaced)
+      directory = boardDir(projectDir)
+      replaceReviewNotes(list(reviewNoteChanges(incoming, directory)), directory, backup, replaced)
     writeCheckpoint(projectDir, chosen, len(readEvents(projectDir)))
   except (SyncError, OSError) as error:
     undoChoice(projectDir, backup, replaced)

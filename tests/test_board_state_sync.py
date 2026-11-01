@@ -9,13 +9,15 @@ import pytest
 import board
 import board_api
 import board_git
+import board_sync
 from board_review import renderReviewMarkdown
 from board_setup.project import Options, initialize
-from board_sync import (backupDirName, checkpointPath, isChoosable, newProjectId, progressPath, readCheckpoint,
-                        readSnapshot, revisionOf, writeSnapshot)
+from board_sync import (SyncError, backupDirName, checkpointPath, isChoosable, loadProgress, newProjectId,
+                        progressPath, readCheckpoint, readSnapshot, revisionOf, writeSnapshot)
 from browser import browserPages, sharedBrowser  # noqa: F401  測試模組裡要看得到 fixture
+from conductor import Conductor
 from conftest import git
-from helpers import makeEvent
+from helpers import fakeConfig, makeEvent, testConfig
 from test_board_export import holdAlfredLock, legacyProject  # noqa: F401
 from test_board_handoff import computers, planLines, publish, statusOutput  # noqa: F401
 from test_board_setup import toolRoot
@@ -218,6 +220,74 @@ def test_failedCheckpointRestoresHandoffFile(diverged, capsys, monkeypatch):
   monkeypatch.undo()
   assert roundOfT1(clone, capsys) == "3/3"
   assert board_api.stateView(clone)["sync"]["choosable"] is True
+
+
+def localChoiceHandedBack(computers, capsys):
+  # 兩台在同一任務同一輪審查結論不同：電腦 2 選本機並交接，電腦 1 pull 回這一版
+  notes = {}
+
+  def prepare(source, clone):
+    notes["source"] = reviewNote(source, "電腦 1 審查：請補 A 的測試")
+    notes["clone"] = reviewNote(clone, "電腦 2 審查：請補 B 的測試")
+
+  source, clone, remote, _ = divergeWith(computers, capsys, reviewedRound2(), reviewedRound2(), prepare)
+  assert stateSync(clone, "local", capsys)[0] == 0
+  chosen = publish(clone, capsys, remote)
+  checkpoint = checkpointPath(source).read_bytes()
+  git(source, "pull", "-q", "--ff-only", str(remote), "main")
+  return source, chosen, notes, checkpoint
+
+
+def sourceNote(source):
+  return (source / ".board" / "reviews" / "P0001-T1-r2.md").read_text(encoding="utf-8")
+
+
+def test_pullAfterTakeLocalReplacesConflictingReviewNote(computers, capsys):
+  source, chosen, notes, _ = localChoiceHandedBack(computers, capsys)
+
+  alfred = Conductor(source, config=fakeConfig(), out=lambda message: None)
+  _, state = alfred.currentState()
+
+  assert alfred.sync["status"] == "accepted" and alfred.sync["baseRevision"] == chosen["revision"]
+  # writer 重寫時讀的就是 lastReviewNotes，要拿到電腦 2 選定版本的必改
+  assert alfred.readReview(state["tasks"]["P0001/T1"]["lastReviewNotes"]) == notes["clone"]
+  [backup] = backups(source)
+  assert (backup / "reviews" / "P0001-T1-r2.md").read_text(encoding="utf-8") == notes["source"]
+  # 已接納後重複讀取：不再替換，也不再多一份備份
+  statusOutput(source, capsys)
+  board_api.stateView(source)
+  assert backups(source) == [backup] and sourceNote(source) == notes["clone"]
+
+  capsys.readouterr()
+  assert board.cmdExportState(source) == 0
+  exported = readSnapshot(source)
+  assert exported["revision"] == chosen["revision"]
+  [task] = [task for task in exported["plans"]["P0001"]["tasks"] if task["id"] == "T1"]
+  assert task["reviewConclusions"]["reviews/P0001-T1-r2.md"]["mustFix"][0]["text"] == "電腦 2 審查：請補 B 的測試"
+
+
+def breakReviewNoteWrite(monkeypatch):
+  # 寫到一半就失敗，留下殘缺的審查檔
+  def broken(path, planIdValue, taskId, conclusion):
+    path.write_text("寫到一半", encoding="utf-8")
+    raise OSError("磁碟已滿")
+  monkeypatch.setattr(board_sync, "writeReviewNote", broken)
+
+
+@pytest.mark.parametrize("breakWrite", [lockCheckpoint, breakReviewNoteWrite])
+def test_failedAutoAcceptKeepsOldBaseAndOldReviewNote(computers, capsys, monkeypatch, breakWrite):
+  source, chosen, notes, checkpoint = localChoiceHandedBack(computers, capsys)
+  breakWrite(monkeypatch)
+
+  with pytest.raises(SyncError):
+    loadProgress(source, testConfig)
+
+  # 基底沒換時 writer 讀到的必改也要還是原本那一份，不能新狀態配舊結論或反過來
+  assert checkpointPath(source).read_bytes() == checkpoint
+  assert sourceNote(source) == notes["source"] and backups(source) == []
+  monkeypatch.undo()
+  assert loadProgress(source, testConfig)["sync"]["baseRevision"] == chosen["revision"]
+  assert sourceNote(source) == notes["clone"] and len(backups(source)) == 1
 
 
 def test_takeLocalWithSameContentStillHandsOffNewRevision(computers, capsys):
