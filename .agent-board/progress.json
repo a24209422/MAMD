@@ -1,5 +1,7 @@
 {
-  "ancestors": [],
+  "ancestors": [
+    "be8ffbe4bec1167f3ad69015847b77334402b10aacc16b0f898254fb8a2baa6a"
+  ],
   "branches": {},
   "format": "agent-board-progress",
   "plans": {
@@ -2127,10 +2129,167 @@
         "qualityFailures": []
       },
       "testTiming": "afterMerge"
+    },
+    "P0024": {
+      "baseCommit": "ed51179a26517a9ba3783617d2511fffdf340093",
+      "file": "plans/0024-converge-review-rounds.md",
+      "mergeTest": {
+        "lastTested": {
+          "commit": "ba4ed6b38e7246c9df58dab22884f03d0d5cc960",
+          "comparedTo": "ed51179a26517a9ba3783617d2511fffdf340093",
+          "covers": [
+            "T1",
+            "T2",
+            "T3"
+          ],
+          "failures": [],
+          "passed": true,
+          "qualityChecked": true,
+          "qualityFailures": []
+        },
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "9b6b70ceb96a0d66070f97bafeba5d681bf5eb56ec7716d8715dfd39b5e3757b",
+      "status": "完成",
+      "tasks": [
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T1",
+          "lastCommit": "9513d1191d7eb2e7360eeb4a82ecab6fcdc5924f",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "4849c850b8ac7ed44619c4df651274f1dbe88e27",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0024-T1-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0024-T1-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "在 plan 撰寫規則加入涵蓋清單與不可列舉條件的寫法",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [],
+          "failStreak": 0,
+          "id": "T2",
+          "lastCommit": "41db2d2e8ee09a393306013b1ebe6311fead502f",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "e4f12c5b43553924e950a523dbd9ecc6c256bdfe",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0024-T2-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0024-T2-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "writer 重寫提示改成同類問題一起修，並在做法無法達成時回報 blocked",
+          "userDone": false,
+          "userNote": ""
+        },
+        {
+          "conflictCount": 0,
+          "conflictFiles": [],
+          "dependsOn": [
+            "T2"
+          ],
+          "failStreak": 0,
+          "id": "T3",
+          "lastCommit": "25455aeddeb07233586847bc87351f50196a1e9b",
+          "lastReviewNotes": null,
+          "lastTest": null,
+          "lastWriteMode": "write",
+          "maxRounds": 3,
+          "mergeFailures": [],
+          "mergeFix": false,
+          "mergedCommit": "ba4ed6b38e7246c9df58dab22884f03d0d5cc960",
+          "needs": null,
+          "requirementIds": [
+            "R1"
+          ],
+          "resolving": false,
+          "reviewConclusions": {
+            "reviews/P0024-T3-r1.md": {
+              "mustFix": [],
+              "round": 1,
+              "suggest": [],
+              "verdict": "pass"
+            }
+          },
+          "reviews": [
+            "reviews/P0024-T3-r1.md"
+          ],
+          "round": 1,
+          "status": "完成",
+          "text": "reviewer 規則加入同類情況合併列出與做法無法達成時的寫法",
+          "userDone": false,
+          "userNote": ""
+        }
+      ],
+      "testBaseline": {
+        "commit": "ed51179a26517a9ba3783617d2511fffdf340093",
+        "failures": [],
+        "passed": false,
+        "qualityChecked": false,
+        "qualityFailures": []
+      },
+      "testTiming": "afterMerge"
+    },
+    "P0025": {
+      "baseCommit": null,
+      "file": "plans/0025-layered-test-gate.md",
+      "mergeTest": {
+        "lastTested": null,
+        "split": null
+      },
+      "rejectReason": "",
+      "sha256": "0863408668a96a331d29dd67213c7a355759b686df09016342ce3ba613bdeb5f",
+      "status": "待核准",
+      "tasks": [],
+      "testBaseline": null,
+      "testTiming": null
     }
   },
-  "previousRevision": null,
+  "previousRevision": "be8ffbe4bec1167f3ad69015847b77334402b10aacc16b0f898254fb8a2baa6a",
   "projectId": "84e628a14491426da76af56735198958",
-  "revision": "be8ffbe4bec1167f3ad69015847b77334402b10aacc16b0f898254fb8a2baa6a",
+  "revision": "ebaac209d08fcf2d416ddb4d2cdd2745f193c95e0f7d668492a42639c5dae774",
   "version": 1
 }
