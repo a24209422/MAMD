@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -173,6 +174,50 @@ def test_takeIncomingReplacesConflictingReviewNote(computers, capsys):
   capsys.readouterr()
   assert board.cmdExportState(clone) == 0
   assert readSnapshot(clone)["revision"] == incoming["revision"]
+
+
+def lockCheckpoint(monkeypatch):
+  # 模擬防毒或編輯器一直開著 checkpoint：換檔一律被拒，其他檔案照常寫入
+  realReplace = os.replace
+
+  def refuse(source, target):
+    if Path(target).name == checkpointPath(Path(".")).name:
+      raise PermissionError("被占用")
+    realReplace(source, target)
+  monkeypatch.setattr(os, "replace", refuse)
+
+
+def test_failedCheckpointRestoresReviewNotes(computers, capsys, monkeypatch):
+  notes = {}
+
+  def prepare(source, clone):
+    notes["local"] = reviewNote(clone, "本機審查：請補 A 的測試")
+    reviewNote(source, "交接檔審查：請補 B 的測試")
+
+  _, clone, _, _ = divergeWith(computers, capsys, reviewedRound2(), reviewedRound2(), prepare)
+  before = fileBytes(clone)
+  lockCheckpoint(monkeypatch)
+
+  code, output = stateSync(clone, "incoming", capsys)
+
+  assert code == 1 and "本機進度與交接檔都沒有更動" in output and "被其他程式占用" in output
+  # 本機狀態沒換，writer 讀到的必改也要還是本機那一份
+  assert (clone / ".board" / "reviews" / "P0001-T1-r2.md").read_text(encoding="utf-8") == notes["local"]
+  assert fileBytes(clone) == before and backups(clone) == []
+
+
+def test_failedCheckpointRestoresHandoffFile(diverged, capsys, monkeypatch):
+  _, clone, _, _ = diverged
+  before = fileBytes(clone)
+  lockCheckpoint(monkeypatch)
+
+  code, output = stateSync(clone, "local", capsys)
+
+  assert code == 1 and "本機進度與交接檔都沒有更動" in output
+  assert fileBytes(clone) == before and backups(clone) == []
+  monkeypatch.undo()
+  assert roundOfT1(clone, capsys) == "3/3"
+  assert board_api.stateView(clone)["sync"]["choosable"] is True
 
 
 def test_takeLocalWithSameContentStillHandsOffNewRevision(computers, capsys):

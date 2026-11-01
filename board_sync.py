@@ -1111,17 +1111,50 @@ def localConclusion(path, task):
   return portableConclusion(conclusion) if conclusion else None
 
 
-def replaceReviewNotes(snapshot, boardDirectory, backup):
+def replaceReviewNotes(snapshot, boardDirectory, backup, replaced):
   # 本機同名審查檔若是另一個結論，writer 會照本機舊必改重寫、再匯出也會蓋掉交接檔的結論；
   # 先搬進這次的備份再寫入所選版本。結論相同的保留本機原稿，它比遮蔽過的內容完整
   for planIdValue, plan in snapshot["plans"].items():
     for task in plan["tasks"]:
       for notes, conclusion in task["reviewConclusions"].items():
-        path = Path(boardDirectory) / notes
-        if path.exists() and localConclusion(path, task) != conclusion:
-          (backup / notes).parent.mkdir(parents=True, exist_ok=True)
-          shutil.move(path, backup / notes)
+        path, moved = Path(boardDirectory) / notes, None
+        if path.exists():
+          if localConclusion(path, task) == conclusion:
+            continue
+          moved = backup / notes
+          moved.parent.mkdir(parents=True, exist_ok=True)
+          shutil.move(path, moved)
+        # 寫之前先記下，寫到一半失敗也還原得回來
+        replaced.append((path, moved))
         writeReviewNote(path, planIdValue, task["id"], conclusion)
+
+
+def undoChoice(projectDir, backup, replaced):
+  # 選擇沒寫完就回到選擇前：本機狀態沒換時，writer 讀到的必改和交接檔也不能換，否則兩者對不上
+  for path, moved in reversed(replaced):
+    path.unlink(missing_ok=True)
+    if moved:
+      shutil.move(moved, path)
+  saved = backup / progressPath(projectDir).name
+  if saved.exists():
+    shutil.copy2(saved, progressPath(projectDir))
+  # 都還原了才刪這次的備份；還原途中失敗就留著讓使用者手動找回
+  shutil.rmtree(backup)
+
+
+def applyChoice(projectDir, side, result, plans, branches, backup):
+  incoming, replaced = readSnapshot(projectDir), []
+  try:
+    chosen = chooseLocal(projectDir, result, plans, incoming, branches) if side == "local" else incoming
+    if side != "local":
+      replaceReviewNotes(incoming, boardDir(projectDir), backup, replaced)
+    writeCheckpoint(projectDir, chosen, len(readEvents(projectDir)))
+  except (SyncError, OSError) as error:
+    undoChoice(projectDir, backup, replaced)
+    if isinstance(error, SyncError):
+      raise
+    raise SyncError(f"寫入選擇的進度失敗：{error}") from error
+  return chosen
 
 
 def chooseLocal(projectDir, result, plans, incoming, branches):
@@ -1148,10 +1181,6 @@ def takeProgress(projectDir, config, side, checkSource):
       problems = localChoiceProblems(projectDir, result, plans, loadErrors) + problems
     if problems:
       raise ExportError(problems)
-    incoming = readSnapshot(projectDir)
     backup = backupProgress(projectDir)
-    chosen = chooseLocal(projectDir, result, plans, incoming, branches) if side == "local" else incoming
-    if side != "local":
-      replaceReviewNotes(incoming, directory, backup)
-    writeCheckpoint(projectDir, chosen, len(readEvents(projectDir)))
+    chosen = applyChoice(projectDir, side, result, plans, branches, backup)
   return chosen, backup
