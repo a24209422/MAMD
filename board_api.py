@@ -4,12 +4,12 @@ from pathlib import Path
 
 import board_git
 import board_logs
-from board import approveWarnings, planBlockers, stopReason
+from board import approveWarnings, planBlockers, requiredBranches, stopReason
 from board_core import (PlanStatus, TaskStatus, agentLanes, boardDir, configProblems, defaultContextWindows,
                         loadConfig, loadPlans, planTasks, readEvents, readUserConfig, roleNames,
                         roleSpec, taskKey, tasksWithStatus)
 from board_stats import approvedPlanIds, planStats, taskRounds
-from board_sync import blockedPlanMessages, loadProgress
+from board_sync import blockedPlanMessages, loadProgress, unexportedProgress
 from conductor import formatEvent, processAlive, readLockPid
 from rtm_graph import asList, formatList, parseArea
 
@@ -32,6 +32,9 @@ def loadSnapshot(projectDir):
     # 放進每次輪詢都重算的警告，畫面只要還在讀舊進度，提示就會一直在
     warnings.append("交接檔｜" + loaded["sync"]["message"])
   warnings += blockedPlanMessages(loaded["sync"])
+  # 和 status 用同一個判斷：看板上也要知道只 push 程式碼還交接不了
+  loaded["sync"]["unexported"] = unexportedProgress(projectDir, plans, config,
+                                                    lambda state: requiredBranches(projectDir, state))
   return {"plans": plans, "events": events, "config": config, "warnings": warnings,
           "state": loaded["state"], "sync": loaded["sync"]}
 

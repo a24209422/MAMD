@@ -15,7 +15,18 @@ $('#projectForm').addEventListener('submit', event => {
 });
 document.addEventListener('click', event => {
   if (event.target.closest('[data-project-reopen]')) openProjectDialog(missingProjectPath());
+  const syncButton = event.target.closest('[data-sync-take]');
+  if (syncButton) takeSyncSide(syncButton.dataset.syncTake);
 });
+
+// 選哪一邊會替換另一邊的進度，要使用者再確認一次；結果整段顯示，失敗時才知道要先處理什麼
+async function takeSyncSide(side) {
+  const label = side === 'local' ? '保留本機進度並產生新的交接版本' : '改接續交接檔的進度';
+  if (!window.confirm(`確定要${label}？被替換的進度會先備份到 .board/sync-backups`)) return;
+  const result = await apiPost(`/api/sync/${side}`);
+  window.alert(result.message || (result.ok ? '已完成' : '失敗'));
+  pollState();
+}
 window.addEventListener('hashchange', () => showPage(location.hash.slice(1)));
 showPage(location.hash.slice(1));
 renderChrome();

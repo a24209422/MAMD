@@ -18,10 +18,13 @@ from board_index import buildIndex
 from board_prompts import tddCrapDir
 from board_stats import approvedPlanIds, boardStats, planStats, taskRounds
 from board_sync import (ExportError, SyncError, blockedPlanMessages, commitPaths, exportProgress, loadProgress,
-                        unexportedProgress)
+                        takeProgress, unexportedProgress)
 from conductor import processAlive, readLockPid
 
-humanOnlyCommands = {"approve", "reject", "abandon", "decide", "stop", "resume", "cleanup"}
+humanOnlyCommands = {"approve", "reject", "abandon", "decide", "stop", "resume", "cleanup", "state-sync"}
+# 分歧時哪邊算數只能由使用者判斷，agent 自己選會悄悄丟掉另一台電腦的成果
+syncChoiceHint = ("交接檔｜要接續哪一邊請由使用者在終端機執行 python board.py state-sync --take incoming（接收交接檔）"
+                  "或 --take local（保留本機）；選擇前會把兩邊進度備份到 .board/sync-backups")
 # board_api 要從暫停事件的原因分辨是不是你按的 stop，兩邊共用同一個字串
 stopReason = "你執行了 stop"
 unexportedHint = ("有進度還沒匯出成交接檔：只 push 程式碼無法交接，請停止 Alfred 後執行 "
@@ -202,15 +205,29 @@ def taskStatusLine(task):
   return detail
 
 
+def revisionLine(sync):
+  base, incoming = sync["baseRevision"], sync["incomingRevision"]
+  if not (base or incoming):
+    return None
+  return f"交接版本｜本機基底 {base[:12] if base else '無'}｜收到 {incoming[:12] if incoming else '無'}"
+
+
+def printSyncLines(sync):
+  for line in (revisionLine(sync), "交接檔｜" + sync["message"] if sync["message"] else None):
+    if line:
+      print(line)
+  if sync.get("choosable"):
+    print(syncChoiceHint)
+  for message in blockedPlanMessages(sync):
+    print(message)
+
+
 def cmdStatus(projectDir, planIdValue=None):
   loadErrors = []
   loaded = loadedProgress(projectDir, loadErrors)
   plans, state = loaded["plans"], loaded["state"]
   printLoadWarnings(loadErrors)
-  if loaded["sync"]["message"]:
-    print("交接檔｜" + loaded["sync"]["message"])
-  for message in blockedPlanMessages(loaded["sync"]):
-    print(message)
+  printSyncLines(loaded["sync"])
   if state["paused"]:
     print(f"已暫停：{state['pauseReason']}")
   for planState in state["plans"].values():
@@ -227,10 +244,10 @@ def cmdStatus(projectDir, planIdValue=None):
   return 0
 
 
-def alfredProblems(projectDir):
+def alfredProblems(projectDir, action="匯出"):
   pid = readLockPid(projectDir)
   if pid is not None and processAlive(pid):
-    return [f"Alfred 還在執行（PID {pid}），進度可能還在變動；請先停止 Alfred 再匯出"]
+    return [f"Alfred 還在執行（PID {pid}），進度可能還在變動；請先停止 Alfred 再{action}"]
   return []
 
 
@@ -358,13 +375,57 @@ def cmdExportState(projectDir):
     print(f"已匯出交接進度 revision {snapshot['revision'][:12]}")
   else:
     print(f"沒有新進度，沿用 revision {snapshot['revision'][:12]}")
+  printPublishList(snapshot)
+  print("export-state 不會 commit、push，也不會改任務狀態；請自己 commit 上面的檔案並 push 檔案所在分支與上面的分支")
+  return 0
+
+
+def printPublishList(snapshot):
   print("請 commit 這些檔案：")
   for path in commitPaths(snapshot):
     print(f"  {path}")
   print("請 push 這些分支：")
   for branch, sha in snapshot["branches"].items():
     print(f"  {branch} {sha}")
-  print("export-state 不會 commit、push，也不會改任務狀態；請自己 commit 上面的檔案並 push 檔案所在分支與上面的分支")
+
+
+def syncSourceCheck(projectDir, side):
+  def checkSource(state):
+    problems = alfredProblems(projectDir, "選擇")
+    if side != "local":
+      return problems, {}
+    # 選本機會產生新交接版本，來源要和匯出一樣完整，另一台電腦才接得下去
+    problems += mainProjectProblems(projectDir) + worktreeProblems(projectDir, state)
+    if problems:
+      return problems, {}
+    return requiredBranches(projectDir, state)
+  return checkSource
+
+
+def cmdStateSync(projectDir, side):
+  if board_git.isLinkedWorktree(projectDir):
+    print("無法選擇交接進度：state-sync 只能在主專案執行，請改到主專案資料夾執行")
+    return 1
+  try:
+    chosen, backup = takeProgress(projectDir, loadConfig(projectDir), side, syncSourceCheck(projectDir, side))
+  except ExportError as error:
+    problems = error.problems
+  except SyncError as error:
+    problems = [str(error)]
+  else:
+    problems = []
+  if problems:
+    print("無法選擇交接進度，本機進度與交接檔都沒有更動：")
+    for problem in problems:
+      print(f"- {problem}")
+    return 1
+  label = "保留本機進度，產生新交接版本" if side == "local" else "改接續交接檔的進度"
+  print(f"已{label} revision {chosen['revision'][:12]}")
+  print(f"被替換的進度已備份到 {backup}")
+  print("Git 分支、worktree 與未提交的檔案都沒有刪除")
+  if side == "local":
+    printPublishList(chosen)
+    print("請 commit 上面的檔案並 push 檔案所在分支與上面的分支，另一台電腦 pull 後就會接續這一版")
   return 0
 
 
@@ -888,6 +949,8 @@ def buildParser():
   sub.add_parser("cleanup").add_argument("plan")
   sub.add_parser("index")
   sub.add_parser("export-state")
+  sub.add_parser("state-sync").add_argument("--take", choices=["incoming", "local"], required=True,
+                                            help="分歧時要接續交接檔（incoming）還是本機（local）的進度")
   init = sub.add_parser("init")
   testing = init.add_mutually_exclusive_group()
   testing.add_argument("--tdd", action="store_true", help="寫程式的 agent 照 tdd-crap 寫程式（只適用 Python 專案）")
@@ -923,6 +986,7 @@ def main(argv=None):
     "cleanup": lambda: cmdCleanup(projectDir, args.plan),
     "index": lambda: cmdIndex(projectDir),
     "export-state": lambda: cmdExportState(projectDir),
+    "state-sync": lambda: cmdStateSync(projectDir, args.take),
     "init": lambda: cmdInit(projectDir, args.tdd, args.source, args.tests, args.test_command, args.skip_tests),
   }
   return commands[args.command]()

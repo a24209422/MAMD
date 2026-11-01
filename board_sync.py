@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -276,9 +277,11 @@ def planEntry(state, planState, fileInfo, lookup):
                     if taskState["plan"] == planState["id"]]}
 
 
-def chainAfter(body, previous):
+def chainAfter(body, previous, known=()):
   body["previousRevision"] = previous["revision"] if previous else None
-  body["ancestors"] = [previous["revision"], *previous["ancestors"]] if previous else []
+  # 使用者選本機進度時，本機原本接續的版本也要留在鏈上，另一台電腦停在那一版時才認得出是後繼
+  chain = [previous["revision"], *previous["ancestors"], *known] if previous else []
+  body["ancestors"] = list(dict.fromkeys(chain))
   body["revision"] = revisionOf(body)
   return body
 
@@ -292,7 +295,7 @@ def sameContent(previous, body):
   return previous is not None and all(previous[field] == body[field] for field in contentFields)
 
 
-def buildSnapshot(state, plans, projectId, previous=None, branches=None, readReview=None):
+def buildSnapshot(state, plans, projectId, previous=None, branches=None, readReview=None, known=(), force=False):
   if previous is not None and previous["projectId"] != projectId:
     raise SyncError("交接檔的專案識別和這個專案不同，不能接在它後面")
   if branches is None:
@@ -301,10 +304,11 @@ def buildSnapshot(state, plans, projectId, previous=None, branches=None, readRev
           "plans": portablePlans(state, plans, previous, reviewLookup(readReview, previous))}
   # 經過一次 JSON 轉換：不和 state 共用物件，也確定內容寫得進檔案
   body = json.loads(canonicalJson(body))
-  # 內容沒變就沿用上一版，重複匯出不會一直長出新的 revision
-  if sameContent(previous, body):
+  # 內容沒變就沿用上一版，重複匯出不會一直長出新的 revision；
+  # 使用者選本機時兩邊歷史不同，即使內容一樣也要產生新版本記下本機的版本鏈
+  if not force and sameContent(previous, body):
     return previous
-  snapshot = chainAfter(body, previous)
+  snapshot = chainAfter(body, previous, known)
   validateSnapshot(snapshot)
   return snapshot
 
@@ -726,7 +730,8 @@ def progressView(state, base):
 
 def syncInfo(status, message, base, incoming):
   return {"status": status, "message": message, "baseRevision": base["revision"] if base else None,
-          "incomingRevision": incoming["revision"] if incoming else None, "blockedPlans": {}, "adoptBranches": {}}
+          "incomingRevision": incoming["revision"] if incoming else None, "blockedPlans": {}, "adoptBranches": {},
+          "choosable": False}
 
 
 def localState(context, checkpoint):
@@ -798,7 +803,18 @@ def evaluateProgress(projectDir, plans, config):
     return keepLocal(context, checkpoint, "error", str(error))
   if incoming is None:
     return keepLocal(context, checkpoint, "none")
-  return judgeSnapshot(context, checkpoint, incoming)
+  result = judgeSnapshot(context, checkpoint, incoming)
+  result["sync"]["choosable"] = isChoosable(result["sync"]["status"], checkpoint, incoming)
+  return result
+
+
+# 兩邊都是讀得懂的同一個專案進度、只是先後關係不明，才讓使用者選；損毀、未知版本或別的專案不能靠選擇硬接
+choosableStatuses = ("diverged", "older", "unrelated")
+
+
+def isChoosable(status, checkpoint, incoming):
+  sameProject = checkpoint is None or checkpoint["base"]["projectId"] == incoming["projectId"]
+  return status in choosableStatuses and sameProject
 
 
 def acceptUnderLock(projectDir, plans, config):
@@ -808,9 +824,28 @@ def acceptUnderLock(projectDir, plans, config):
   with fileLock(directory / lockFileName):
     result = evaluateProgress(projectDir, plans, config)
     if result["accept"] is not None:
-      writeCheckpoint(projectDir, result["base"], result["accept"])
-      restoreReviewNotes(result["base"], directory)
+      acceptWithReviewNotes(projectDir, result["base"], result["accept"])
   return result
+
+
+def acceptWithReviewNotes(projectDir, base, eventCount):
+  # 另一台選本機後交接回來時，本機同名審查檔可能還是被捨棄的結論；審查檔和 checkpoint 要一起換，
+  # 任一步失敗就全部還原，writer 才不會照新基底讀到舊必改，或照舊基底讀到新必改
+  directory = boardDir(projectDir)
+  changes = list(reviewNoteChanges(base, directory))
+  # 只有要蓋掉本機審查檔時才留備份；單純補上新電腦沒有的檔不必
+  replacing = any((directory / notes).exists() for _, _, notes, _ in changes)
+  backup, replaced = backupProgress(projectDir) if replacing else None, []
+  try:
+    replaceReviewNotes(changes, directory, backup, replaced)
+    writeCheckpoint(projectDir, base, eventCount)
+  except (SyncError, OSError) as error:
+    undoReviewNotes(replaced)
+    if backup:
+      shutil.rmtree(backup)
+    if isinstance(error, SyncError):
+      raise
+    raise SyncError(f"接納交接進度失敗，本機進度沒有更動：{error}") from error
 
 
 def planFileProblem(plan, entry):
@@ -1067,3 +1102,115 @@ def unexportedProgress(projectDir, plans, config, readBranches):
   except SyncError:
     return False
   return current is not snapshot
+
+
+backupDirName = "sync-backups"
+noChoiceMessage = "本機進度和交接檔沒有分歧，不需要選擇"
+
+
+def backupProgress(projectDir):
+  # 每次選擇都放進新的目錄：同一秒連選兩次也不會蓋掉前一份備份
+  target = boardDir(projectDir) / backupDirName / f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+  target.mkdir(parents=True)
+  for source in (checkpointPath(projectDir), boardDir(projectDir) / eventsFileName, progressPath(projectDir)):
+    if source.exists():
+      shutil.copy2(source, target / source.name)
+  return target
+
+
+def localChoiceProblems(projectDir, result, plans, loadErrors):
+  # 選本機等於拿本機進度產生新交接版本，要和匯出一樣確定本機進度完整
+  return (eventProblems(projectDir) + unloadedPlanProblems(projectDir, result["state"], loadErrors)
+          + list(blockChangedPlans(result["state"], result["base"], plans).values()))
+
+
+def localConclusion(path, task):
+  refs = {ref.upper() for ref in task["requirementIds"]} | {verifyRef}
+  conclusion = parseReviewMarkdown(path.read_bytes().decode("utf-8", errors="replace"), refs)
+  return portableConclusion(conclusion) if conclusion else None
+
+
+def reviewNoteChanges(snapshot, boardDirectory):
+  # 本機同名審查檔若是另一個結論，writer 會照本機舊必改重寫、再匯出也會蓋掉交接檔的結論；
+  # 結論相同的保留本機原稿，它比遮蔽過的內容完整
+  for planIdValue, plan in snapshot["plans"].items():
+    for task in plan["tasks"]:
+      for notes, conclusion in task["reviewConclusions"].items():
+        path = Path(boardDirectory) / notes
+        if not path.exists() or localConclusion(path, task) != conclusion:
+          yield planIdValue, task["id"], notes, conclusion
+
+
+def replaceReviewNotes(changes, boardDirectory, backup, replaced):
+  # 被換掉的本機審查檔先搬進這次的備份，再寫入所選版本
+  for planIdValue, taskId, notes, conclusion in changes:
+    path, moved = Path(boardDirectory) / notes, None
+    if path.exists():
+      moved = backup / notes
+      moved.parent.mkdir(parents=True, exist_ok=True)
+      shutil.move(path, moved)
+    # 寫之前先記下，寫到一半失敗也還原得回來
+    replaced.append((path, moved))
+    writeReviewNote(path, planIdValue, taskId, conclusion)
+
+
+def undoReviewNotes(replaced):
+  for path, moved in reversed(replaced):
+    path.unlink(missing_ok=True)
+    if moved:
+      shutil.move(moved, path)
+
+
+def undoChoice(projectDir, backup, replaced):
+  # 選擇沒寫完就回到選擇前：本機狀態沒換時，writer 讀到的必改和交接檔也不能換，否則兩者對不上
+  undoReviewNotes(replaced)
+  saved = backup / progressPath(projectDir).name
+  if saved.exists():
+    shutil.copy2(saved, progressPath(projectDir))
+  # 都還原了才刪這次的備份；還原途中失敗就留著讓使用者手動找回
+  shutil.rmtree(backup)
+
+
+def applyChoice(projectDir, side, result, plans, branches, backup):
+  incoming, replaced = readSnapshot(projectDir), []
+  try:
+    chosen = chooseLocal(projectDir, result, plans, incoming, branches) if side == "local" else incoming
+    if side != "local":
+      directory = boardDir(projectDir)
+      replaceReviewNotes(list(reviewNoteChanges(incoming, directory)), directory, backup, replaced)
+    writeCheckpoint(projectDir, chosen, len(readEvents(projectDir)))
+  except (SyncError, OSError) as error:
+    undoChoice(projectDir, backup, replaced)
+    if isinstance(error, SyncError):
+      raise
+    raise SyncError(f"寫入選擇的進度失敗：{error}") from error
+  return chosen
+
+
+def chooseLocal(projectDir, result, plans, incoming, branches):
+  base = result["base"]
+  known = [base["revision"], *base["ancestors"]] if base else []
+  snapshot = buildSnapshot(result["state"], plans, incoming["projectId"], incoming, branches,
+                           reviewReader(boardDir(projectDir)), known, force=True)
+  writeSnapshot(projectDir, snapshot)
+  return snapshot
+
+
+def takeProgress(projectDir, config, side, checkSource):
+  """使用者明確選擇分歧時要接續哪一邊；回傳新的基底與備份目錄，Git 分支、worktree 與檔案都不刪除。"""
+  loadErrors = []
+  plans = loadPlans(projectDir, loadErrors)
+  directory = boardDir(projectDir)
+  directory.mkdir(parents=True, exist_ok=True)
+  with fileLock(directory / lockFileName):
+    result = evaluateProgress(projectDir, plans, config)
+    if not result["sync"]["choosable"]:
+      raise ExportError([result["sync"]["message"] or noChoiceMessage])
+    problems, branches = checkSource(result["state"])
+    if side == "local":
+      problems = localChoiceProblems(projectDir, result, plans, loadErrors) + problems
+    if problems:
+      raise ExportError(problems)
+    backup = backupProgress(projectDir)
+    chosen = applyChoice(projectDir, side, result, plans, branches, backup)
+  return chosen, backup
