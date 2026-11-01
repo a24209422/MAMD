@@ -1,27 +1,28 @@
-"""兩個不同路徑的 clone 透過本機 bare remote 雙向交接；指令都用初始化帶進專案的 runtime 執行。"""
+"""兩個不同路徑的 clone 透過本機 bare remote 雙向交接；指令和 Alfred 都用初始化帶進專案的 runtime 執行。"""
+import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from board_core import PlanStatus
+import board_git
+from board_core import PlanStatus, TaskStatus, configPath, readEvents
 from board_setup.project import Options, initialize
 from board_sync import checkpointPath, progressPath, readCheckpoint, readSnapshot
-from conductor import Conductor
 from conftest import git
-from helpers import fakeConfig
+from helpers import fakeRole, fakesDir
 from test_board_export import legacyProject, pushListed, section  # noqa: F401
 from test_board_handoff import planLines, statusOutput
 from test_board_setup import toolRoot
-from test_board_sync_load import started, writeEvents
 
 initFiles = [".agents", ".claude", ".agent-board", "AGENTS.md", ".gitignore"]
 
 
-def runScript(projectDir, script, *args, home):
+def runScript(projectDir, script, *args, home, env=None):
   # 拿掉 PYTHONPATH，確保 import 到的是專案裡的 runtime，不是開發中的原始碼
-  env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+  env = {**{key: value for key, value in os.environ.items() if key != "PYTHONPATH"}, **(env or {})}
   env["USERPROFILE"] = str(home)
   result = subprocess.run([sys.executable, str(script), *args], cwd=projectDir, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=120, env=env)
@@ -88,14 +89,43 @@ def test_cloneInitThenReinitShowsSameStatus(computers):
   assert planLines(runtimeBoard(clone, "status", home=home)) == expected
 
 
-def test_cloneUpdatesAndSourceOnlyPulls(computers):
+def useFakeAgents(clone, tmp_path):
+  # 設定檔只在本機，不進交接檔；換成假 agent 才能在測試裡真的派工
+  config = json.loads(configPath(clone).read_text(encoding="utf-8-sig"))
+  config.update({"writer": fakeRole("claude"), "reviewer": fakeRole("codex"), "pollSeconds": 0.05})
+  configPath(clone).write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+  scenario = tmp_path / "scenario" / "scenario.json"
+  scenario.parent.mkdir()
+  scenario.write_text("{}", encoding="utf-8")
+  return {"FAKE_SCENARIO": str(scenario)}
+
+
+def isAncestor(projectDir, older, newer):
+  return subprocess.run(["git", "merge-base", "--is-ancestor", older, newer], cwd=projectDir).returncode == 0
+
+
+def test_cloneResumesTaskWithRuntimeAndSourceOnlyPulls(computers, tmp_path):
   source, clone, remote, home = computers
   initClone(clone, home)
-  # 電腦 2 啟動 Alfred 時照交接檔從遠端建分支，再往下跑一輪
-  alfred = Conductor(clone, config=fakeConfig(), out=lambda message: None)
-  plans, state = alfred.currentState()
-  alfred.ensurePlanWorktrees(state)
-  writeEvents(clone, [started("T1", roundNumber=2)])
+  recorded = readSnapshot(clone)["branches"]
+  env = useFakeAgents(clone, tmp_path)
+
+  # 電腦 2 用 clone 帶來的 runtime 跑 Alfred：照交接檔從遠端建分支、重建 worktree，再把退回的 T1 做完
+  driven = runScript(clone, fakesDir / "run_alfred.py", str(clone), "P0001", "T1", TaskStatus.done, home=home, env=env)
+  conductorFile = json.loads(driven.splitlines()[-1])["conductor"]
+  assert Path(conductorFile).parent == clone / ".agent-board" / "runtime"
+
+  started = [event for event in readEvents(clone) if event["type"] == "taskStarted" and event["task"] == "T1"]
+  assert started[-1]["round"] == 2
+  assert started[-1]["data"]["worktree"] == str(board_git.taskWorktreePath(clone, "P0001", "T1"))
+  written = [event for event in readEvents(clone) if event["type"] == "taskWritten" and event["task"] == "T1"]
+  # 新成果接在交接記錄的 SHA 後面，代表 worktree 是從記錄的分支重建，不是從頭開始
+  newCommit = written[-1]["data"]["commit"]
+  assert newCommit != recorded["task/P0001-T1"] and isAncestor(clone, recorded["task/P0001-T1"], newCommit)
+  # 合併回的 plan 分支同時帶著交接前合併的 T3 和這次的新成果
+  assert isAncestor(clone, recorded["plan/P0001"], "plan/P0001") and isAncestor(clone, newCommit, "plan/P0001")
+  assert board_git.runGit(clone, "show", "plan/P0001:t3.txt") == "T3 的成果"
+
   output = runtimeBoard(clone, "export-state", home=home)
   commitListed(clone, output)
   pushAgain(clone, output, remote)
@@ -104,7 +134,7 @@ def test_cloneUpdatesAndSourceOnlyPulls(computers):
   git(source, "pull", "-q", "--ff-only", str(remote), "main")
 
   sourceStatus = runtimeBoard(source, "status", home=home)
-  assert "  T1 寫程式中（第 2/3 輪）" in planLines(sourceStatus)
+  assert f"  T1 {TaskStatus.done}（第 2/3 輪）" in planLines(sourceStatus)
   assert sharedLines(sourceStatus) == planLines(runtimeBoard(clone, "status", home=home))
   assert readCheckpoint(source)["base"]["revision"] == updated["revision"]
   assert "export-state" not in sourceStatus

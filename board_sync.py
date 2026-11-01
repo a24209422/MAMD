@@ -1096,12 +1096,19 @@ def unexportedProgress(projectDir, plans, config, readBranches):
     # 分支都齊全時用和匯出相同的清單，完成的 plan 合併進交付分支後不必再 push 也算新內容
     # 缺分支時只蓋上本機有的：剛 clone 的電腦還沒建出本機分支，不該被當成有新進度
     problems, localBranches = readBranches(result["state"])
-    branches = {**snapshot["branches"], **localBranches} if problems else localBranches
-    current = buildSnapshot(result["state"], plans, snapshot["projectId"], snapshot, branches,
+    if problems:
+      localBranches = {**snapshot["branches"], **newerBranches(projectDir, snapshot["branches"], localBranches)}
+    current = buildSnapshot(result["state"], plans, snapshot["projectId"], snapshot, localBranches,
                             reviewReader(boardDir(projectDir)))
   except SyncError:
     return False
   return current is not snapshot
+
+
+def newerBranches(projectDir, recorded, local):
+  # 本機分支落後交接記錄（另一台推了新成果、這台只 pull 主分支）不是這台的新進度；帶著記錄成果的才算
+  return {name: sha for name, sha in local.items()
+          if name not in recorded or board_git.containsCommit(projectDir, f"refs/heads/{name}", recorded[name])}
 
 
 backupDirName = "sync-backups"
