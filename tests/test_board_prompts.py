@@ -146,6 +146,15 @@ def test_rulesMentionKeyConstraints():
   assert "AGENTS.md" in writerRules("codex") and "AGENTS.md" in reviewerRules
 
 
+def test_reviewerRulesMergeSameKindIssuesIntoOneMustFix():
+  assert "檢查同類的其他情況（其他呼叫入口、狀態、輸入格式），合併成同一條必改並列出所有位置" in reviewerRules
+
+
+def test_reviewerRulesAskUserWhenApproachCannotMeetVerification():
+  assert "做法無法完整達成驗證，需要使用者決定是否修改 plan" in reviewerRules
+  assert "不要只列一個反例" in reviewerRules
+
+
 def test_onlyClaudeWriterIsToldCommandsAreRestricted():
   assert "串接" in writerRules("claude")
   assert "串接" not in writerRules("codex")
