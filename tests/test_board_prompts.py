@@ -70,6 +70,22 @@ def test_writePromptWithReviewAndNote(writePlan):
   assert "使用者補充：提示用中文" in prompt
 
 
+def test_writePromptWithReviewAsksToFixSameKindTogether(writePlan):
+  plan = samplePlan(writePlan)
+  prompt = buildWritePrompt(plan, "T1", 2, reviewMarkdown="## 必改\n- [R1] 漏了一個入口")
+  assert "先判斷每條必改屬於哪一類問題" in prompt
+  assert "在這個任務的範圍內找出同類的所有地方一起修，並各自補測試" in prompt
+  assert "summary 列出這次修了哪些地方" in prompt
+  assert "本質上無法完整達成驗證、需要使用者決定時，status 填 blocked" in prompt
+  assert "不要只修單一反例" in prompt
+  # 修正方式要接在「請修正必改的每一條」之後、審查意見之前
+  assert prompt.index("請修正「必改」的每一條") < prompt.index("先判斷每條必改") < prompt.index("漏了一個入口")
+  lastTest = {"passed": False, "tail": "FAILED t.py::test_new", "verdict": "newFailure", "newFailures": ["t.py::test_new"]}
+  for withoutReview in (buildWritePrompt(plan, "T1", 1),
+                        buildWritePrompt(plan, "T1", 3, reviewMarkdown="## 必改\n- [R1] 舊意見", lastTest=lastTest)):
+    assert "屬於哪一類問題" not in withoutReview and "不要只修單一反例" not in withoutReview
+
+
 def test_writePromptAfterTestReturnShowsNewFailuresInsteadOfReview(writePlan):
   lastTest = {"passed": False, "tail": "FAILED t.py::test_new - boom\n1 failed", "verdict": "newFailure",
               "newFailures": ["t.py::test_new"]}

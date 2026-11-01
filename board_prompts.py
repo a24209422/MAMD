@@ -154,6 +154,15 @@ def afterMergeReviewLines(mergeFailures):
   return lines
 
 
+# 只修被點名的反例，下一輪審查又會找出同類的下一個，退回次數會一直累積
+reviewFixLines = [
+  "修正方式：先判斷每條必改屬於哪一類問題（例如同一個檢查漏了某個入口、某種狀態或某種輸入），"
+  "在這個任務的範圍內找出同類的所有地方一起修，並各自補測試；summary 列出這次修了哪些地方。",
+  "必改指出目前做法本質上無法完整達成驗證、需要使用者決定時，status 填 blocked，"
+  "並在 blockedReason 說明原因，不要只修單一反例。",
+]
+
+
 def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", qualityCommand="", cli="claude",
                      testCommand="", skipTests=False, tddSkill=None, pythonCommand="python", lastTest=None,
                      afterMerge=False):
@@ -168,7 +177,8 @@ def buildWritePrompt(plan, taskId, roundNumber, reviewMarkdown="", userNote="", 
   mergeFixReviewed = lastTest and lastTest.get("source") == "mergeTest"
   if reviewMarkdown and (mergeFixReviewed or not (lastTest and lastTest.get("verdict") == "newFailure")):
     # 合併後測試退回後，修正輪又被審查退回：失敗還要修，審查意見也要改，兩個都附
-    parts += ["", "上一輪審查沒有通過，請修正「必改」的每一條（「建議」可以參考，不強制）：", reviewMarkdown]
+    parts += ["", "上一輪審查沒有通過，請修正「必改」的每一條（「建議」可以參考，不強制）：", *reviewFixLines,
+              reviewMarkdown]
   if userNote:
     parts += ["", "使用者補充：" + userNote]
   parts += ["", *testExecutionLines(testCommand, skipTests, afterMerge)]
