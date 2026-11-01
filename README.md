@@ -73,7 +73,7 @@ AGENTS.md
 
 MAMD 自己已有完整執行程式，不需要再複製一份 runtime。目標專案的 runtime 副本不包含原 repo 的 `.git`、測試、虛擬環境或私人的設定。
 
-在其他電腦 clone 這份已初始化的專案後，在該專案開 agent，再呼叫同一個 `agent-board-init`。它會從隨專案交付的資源重建 `.venv` 與 `.board/config.json`，不需要原電腦的磁碟路徑或全域 skill。首次安裝套件需要網路；失敗會回報未完成，修正後可重跑。
+在其他電腦 clone 這份已初始化的專案後，在該專案開 agent，再呼叫同一個 `agent-board-init`。它會從隨專案交付的資源重建 `.venv` 與 `.board/config.json`，不需要原電腦的磁碟路徑或全域 skill。首次安裝套件需要網路；失敗會回報未完成，修正後可重跑。要接續原電腦的 plan 進度，見「換電腦交接」。
 
 `.venv/`、`.board/` 與測試快取不進 Git。角色、模型等既有本機設定會保留；初始化不會替你 commit、push、核准 plan 或啟動 Alfred。若 Alfred 已在執行，變更測試設定後須重啟。
 
@@ -278,6 +278,33 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 | 有不在上一個版本裡的名稱 | 好幾次合併 | 照合併順序逐一測，找出從哪次合併開始失敗 |
 | 失敗但一個名稱都分不出來（含超時），或上一個版本失敗又沒有名稱 | 任何 | 涵蓋到的任務停在「等你處理」 |
 
+## 換電腦交接
+
+plan 與任務進度存在本機的 `.board/`，不進 Git。要在另一台電腦接著做，先把進度匯出成交接檔 `.agent-board/progress.json`，和 plan 檔一起 commit、push。下面的 `board.py` 在 MAMD 是 `python board.py`，在初始化過的專案是 `python .agent-board/runtime/board.py`，都在專案根目錄執行。
+
+來源電腦（交出進度）：
+
+1. 停止 Alfred（在它的終端機按 Ctrl+C），確認沒有 agent 還在寫程式或審查
+2. 到 `<專案>-worktrees/` 底下各個 plan 與任務的 worktree，把還沒 commit 的成果 commit。有未 commit 的改動或沒解完的合併衝突時，`export-state` 會拒絕並列出原因
+3. 在主專案資料夾執行 `python board.py export-state`（在 worktree 裡執行會被拒絕）。它只寫交接檔，不會 commit 或 push；進度沒變時沿用上一版，不產生新版本
+4. 照輸出的「請 commit 這些檔案」，把交接檔與 plan 檔 commit
+5. 照輸出的「請 push 這些分支」，把目前的分支和列出的 plan／task 分支 push 到遠端，例如 `git push origin main plan/P0007 task/P0007-T1`。已完成、已合併進主分支並刪掉的分支不會列出，成果靠主分支帶過去
+
+目的電腦（接手）：
+
+- 第一次：clone 之後在專案開 agent，呼叫 `agent-board-init`（或執行 `python .agents/skills/agent-board-init/scripts/init.py`）。它會重建本機設定並接納交接檔，印出「已接納交接進度（版本 …）」；之後 `status` 與儀表板顯示的進度和來源電腦相同。重跑 init 不會改動已接納的進度
+- 之後：只要 `git pull`，不必重跑 init；下次執行 `status`、開儀表板或啟動 Alfred 時就會接納新的交接檔
+- 啟動 Alfred 後，它照交接檔記錄的 SHA 從遠端建立缺少的分支，並在這台電腦的 `<專案>-worktrees/` 重建 worktree，專案路徑不必和來源電腦相同。遠端沒有記錄的版本時會提示先 `git fetch`，那份 plan 先不派工
+
+規則與限制：
+
+- 進度以「最近一次成功匯出、而且已經 commit」的交接檔為準。匯出後才產生的進度、沒有 commit 或沒有 push 的交接檔，另一台電腦都看不到。`status` 發現本機有還沒匯出的進度時，會提示執行 `export-state`
+- Git 不搬移執行中的程序、終端機分頁和 agent 對話。接手後 agent 在新電腦開新的對話；寫到一半或審到一半的任務，會在這台電腦重新執行那一輪
+- 第一版不支援兩台電腦同時寫入：同一時間只讓一台電腦跑 Alfred 或執行會改變進度的指令（核准、`decide` 等）。原電腦要繼續時，先 `git pull` 接回進度。兩邊都有新進度時，`status` 會顯示分歧，由你執行 `state-sync --take incoming` 或 `--take local` 選擇一邊
+- 收到新的交接檔時如果 Alfred 正在執行，不會切換進度，並提示「請停止 Alfred」；停止後再執行 `status` 或重開 Alfred 就會接納
+- 還沒送出的草稿 plan 不進交接檔
+- 沒有匯出過交接檔的專案照舊只用本機 `.board/`，行為不變
+
 ## 儀表板
 
 在瀏覽器看即時狀態，也可以在網頁上核准、退回、放棄、`decide`、停止和繼續，以及在「模型」分頁換寫程式、審查的 CLI 和模型（見「換模型」）。「任務」頁選了核准過的 plan 時，底下的「成效」區塊顯示和 `stats P0007` 同一組指標；待核准或草稿的 plan 沒有這個區塊。
@@ -329,6 +356,7 @@ python .agents/skills/agent-board-init/scripts/init.py --test-command "npm test"
 | `decide P0007 T2 abandon` | 等你處理的任務：放棄 |
 | `stop`／`resume` | 全部停止／繼續 |
 | `cleanup P0007` | 刪除結束的 plan 的 worktree 與任務分支（`plan/P0007` 保留） |
+| `export-state` | 把本機進度匯出成交接檔 `.agent-board/progress.json`，列出要 commit 的檔案與要 push 的分支；只能在主專案資料夾執行，不會 commit 或 push（見「換電腦交接」） |
 | `state-sync --take incoming`／`--take local` | 本機進度和交接檔分歧時，選擇接續交接檔或保留本機；選擇前先備份到 `.board/sync-backups`，不刪除分支、worktree 或未提交檔案 |
 
 `approve`、`reject`、`abandon`、`decide`、`stop`、`resume`、`cleanup`、`state-sync` 只能由你在終端機執行，agent 執行會被拒絕。
